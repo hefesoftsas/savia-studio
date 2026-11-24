@@ -78,7 +78,8 @@ function registryBaseUrl(value: string): URL {
 async function fetchRegistry(url: URL, token: string): Promise<Response> {
   return fetch(url, {
     headers: { authorization: `Bearer ${token}` },
-    redirect: "error",
+    // Workers supports manual redirects. Callers reject the 3xx response.
+    redirect: "manual",
     signal: AbortSignal.timeout(10_000),
   });
 }
@@ -113,7 +114,7 @@ export async function deletePluginRegistryRelease(
   const response = await fetch(url, {
     method: "DELETE",
     headers: { authorization: `Bearer ${config.publishToken}` },
-    redirect: "error",
+    redirect: "manual",
     signal: AbortSignal.timeout(10_000),
   });
   if (response.status === 404 || response.status === 403) {
@@ -489,7 +490,7 @@ export async function publishPluginRegistryRelease(
         "content-type": "application/zip",
       },
       body: bytes as unknown as BodyInit,
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(10_000),
     });
     if (response.status === 409)

@@ -2976,6 +2976,7 @@ describe("studio plugin registry consumer", () => {
         expect(String(input)).toBe(
           "https://registry.example/v1/plugins?cursor=next-1",
         );
+        expect(init?.redirect).toBe("manual");
         expect(new Headers(init?.headers).get("authorization")).toBe(
           `Bearer ${registry.token}`,
         );

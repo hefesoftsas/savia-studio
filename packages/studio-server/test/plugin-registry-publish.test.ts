@@ -135,7 +135,7 @@ describe("plugin registry publishing", () => {
         expect(new Headers(init?.headers).get("authorization")).toBe(
           `Bearer ${"p".repeat(32)}`,
         );
-        expect(init?.redirect).toBe("error");
+        expect(init?.redirect).toBe("manual");
         expect(init?.signal).toBeInstanceOf(AbortSignal);
         return Response.json(
           { error: { code: "RELEASE_NOT_FOUND" } },
