@@ -1,0 +1,63 @@
+name: Clean completed workflow runs
+
+on:
+  schedule:
+    - cron: "17 8 * * *" # 03:17 America/Bogota
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List eligible runs without deleting them
+        type: boolean
+        default: true
+
+permissions:
+  actions: write
+
+concurrency:
+  group: workflow-run-retention
+  cancel-in-progress: false
+
+jobs:
+  clean:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Apply seven-day retention
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -u
+          endpoint="repos/$GITHUB_REPOSITORY/actions/runs"
+          cutoff=$(jq -nr 'now - (7 * 86400) | todateiso8601')
+
+          eligible_ids() {
+            jq -r --arg cutoff "$cutoff" '
+              (.workflow_runs // [.])[]
+              | select(.status == "completed" and (.updated_at | type) == "string" and .updated_at < $cutoff)
+              | .id
+            '
+          }
+
+          # Finish paging before deleting so removals cannot shift subsequent pages.
+          candidates=$(gh api --paginate "$endpoint?per_page=100" | eligible_ids)
+          if [[ -z "$candidates" ]]; then
+            echo "No completed runs older than seven days."
+            exit 0
+          fi
+
+          while IFS= read -r run_id; do
+            if [[ "$DRY_RUN" == true ]]; then
+              echo "Would delete run $run_id"
+              continue
+            fi
+
+            # A run might have been retried while the repository was being listed.
+            current=$(gh api "$endpoint/$run_id" | eligible_ids)
+            if [[ "$current" == "$run_id" ]]; then
+              gh api --method DELETE "$endpoint/$run_id"
+              echo "Deleted run $run_id"
+            fi
+          done <<< "$candidates"

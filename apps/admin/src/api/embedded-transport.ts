@@ -1,0 +1,67 @@
+import type { ApiClient } from "./api-client";
+
+const LONG_EXTENSION_REQUEST_PATH =
+  /^\/api\/extensions\/[a-z0-9.-]+\/(?:document-analysis|actions\/[a-z0-9._-]+)$/;
+const HUBSPOT_INSTALL_PATH = "/api/crm-workspace/install";
+const LONG_EMBEDDED_REQUEST_TIMEOUT_MS = 90_000;
+
+export function createEmbeddedTransport(client: ApiClient, prefix: string) {
+  return async (path: string, init: RequestInit = {}): Promise<Response> => {
+    let decoded = path;
+    try {
+      for (let i = 0; i < 4; i++) decoded = decodeURIComponent(decoded);
+    } catch {
+      return Response.json({ error: "Ruta no permitida." }, { status: 400 });
+    }
+    if (
+      !/^\/api\//.test(decoded) ||
+      decoded.includes("..") ||
+      decoded.includes("\\") ||
+      /[\r\n]/.test(decoded)
+    )
+      return Response.json({ error: "Ruta no permitida." }, { status: 400 });
+    try {
+      const response = await client.requestResponse(
+        prefix + path,
+        init,
+        (init.method ?? "GET").toUpperCase() === "POST" &&
+          (decoded === HUBSPOT_INSTALL_PATH ||
+            LONG_EXTENSION_REQUEST_PATH.test(decoded))
+          ? LONG_EMBEDDED_REQUEST_TIMEOUT_MS
+          : undefined,
+      );
+      if (
+        !response.ok &&
+        response.headers.get("content-type")?.includes("application/json")
+      ) {
+        const body = await response.json();
+        return Response.json(
+          {
+            ...body,
+            ...(typeof body.error === "object" &&
+            typeof body.error?.code === "string"
+              ? { code: body.error.code }
+              : {}),
+            ...(typeof body.error === "object" &&
+            typeof body.error?.fileId === "string" &&
+            /^[0-9a-f-]{36}$/i.test(body.error.fileId)
+              ? { fileId: body.error.fileId }
+              : {}),
+            error:
+              typeof body.error === "string"
+                ? body.error
+                : (body.error?.message ?? "No se pudo completar la operación."),
+          },
+          { status: response.status },
+        );
+      }
+      return response;
+    } catch (error) {
+      if ((error as { name?: string })?.name === "AbortError") throw error;
+      return Response.json(
+        { error: "No se pudo conectar con Savia. Reintenta." },
+        { status: 503 },
+      );
+    }
+  };
+}

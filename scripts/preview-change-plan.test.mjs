@@ -1,0 +1,1036 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+import {
+  classifyChanges,
+  classifyCiChanges,
+  isFrontendSourcePath,
+} from "./preview-change-plan.mjs";
+
+const manifest = (version = "1.0.0", extra = {}) => ({
+  format: "savia.extension",
+  formatVersion: 1,
+  id: "custom.example",
+  version,
+  label: "Example",
+  description: "Example extension",
+  requires: [],
+  apiVersion: 1,
+  ...extra,
+});
+
+function fixture(t) {
+  const repo = mkdtempSync(join(tmpdir(), "savia-preview-plan-"));
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  const put = (path, content) => {
+    const fullPath = join(repo, path);
+    mkdirSync(join(fullPath, ".."), { recursive: true });
+    writeFileSync(fullPath, content);
+  };
+  const commit = (message) => {
+    git("add", "--all");
+    git("commit", "-m", message);
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repo,
+      encoding: "utf8",
+    }).trim();
+  };
+
+  git("init", "-q");
+  git("config", "user.email", "ci@example.invalid");
+  git("config", "user.name", "CI Test");
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  return { repo, git, put, commit };
+}
+
+function addPlugin(f, directory = "packages/plugin-example") {
+  f.put(`${directory}/savia-extension.json`, JSON.stringify(manifest()));
+  f.put(
+    `${directory}/store.json`,
+    JSON.stringify({ format: "savia.store", formatVersion: 1 }),
+  );
+  f.put(
+    `${directory}/package.json`,
+    JSON.stringify({ name: "@savia/plugin-example" }),
+  );
+  f.put(`${directory}/entry.tsx`, "export const entry = true;\n");
+}
+
+test("eligible plugin source and test changes require an increased strict semver", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  const base = f.commit("base");
+  f.put("packages/plugin-example/entry.tsx", "export const entry = false;\n");
+  f.put(
+    "packages/plugin-example/dossier-panel.tsx",
+    "export const panel = true;\n",
+  );
+  f.put("packages/plugin-example/styles.css", ".panel { display: block; }\n");
+  f.put("packages/plugin-example/test/example.test.ts", "// test\n");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.1")),
+  );
+  const head = f.commit("plugin update");
+
+  assert.deepEqual(classifyChanges({ base, head, repo: f.repo }), {
+    kind: "plugin",
+    flows: false,
+    plugins: [
+      {
+        directory: "packages/plugin-example",
+        id: "custom.example",
+        version: "1.0.1",
+        previousVersion: "1.0.0",
+      },
+    ],
+    plugin_only: true,
+    reasons: ["All changed files are eligible plugin source or metadata."],
+  });
+});
+
+test("store-ports namespace is supported when all required metadata exists", (t) => {
+  const f = fixture(t);
+  addPlugin(f, "store-ports/example");
+  const base = f.commit("base");
+  f.put("store-ports/example/README.md", "Updated docs\n");
+  f.put(
+    "store-ports/example/savia-extension.json",
+    JSON.stringify(manifest("2.0.0")),
+  );
+  const head = f.commit("store port update");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "plugin");
+  assert.equal(plan.plugins[0].directory, "store-ports/example");
+});
+
+test("known repository documentation may accompany an otherwise eligible plugin release", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  f.put("docs/guides/plugin.md", "Plugin guide\n");
+  const base = f.commit("base");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.1")),
+  );
+  f.put(
+    "packages/plugin-example/dossier-panel.tsx",
+    "export const panel = true;\n",
+  );
+  f.put("docs/guides/plugin.md", "Updated plugin guide\n");
+  const head = f.commit("plugin and guide update");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "plugin");
+  assert.equal(plan.flows, false);
+  assert.equal(plan.plugins.length, 1);
+});
+
+test("documentation does not make infrastructure changes eligible for the plugin lane", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  f.put("docs/guides/plugin.md", "Plugin guide\n");
+  const base = f.commit("base");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.1")),
+  );
+  f.put(
+    "packages/plugin-example/dossier-panel.tsx",
+    "export const panel = true;\n",
+  );
+  f.put("docs/guides/plugin.md", "Updated plugin guide\n");
+  f.put("infra/deploy/config.yml", "changed: true\n");
+  const head = f.commit("plugin, docs, and infrastructure update");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.equal(plan.flows, true);
+});
+
+test("manifest metadata changes and missing version bumps fall back to platform", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  const base = f.commit("base");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.0", { apiVersion: 2 })),
+  );
+  const head = f.commit("manifest edit");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.equal(plan.plugin_only, false);
+  assert.match(plan.reasons.join(" "), /must increase its strict semver/);
+});
+
+test("manifest metadata changes remain platform work even with a valid version increase", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  const base = f.commit("base");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.1", { apiVersion: 2 })),
+  );
+  const head = f.commit("manifest metadata update");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.match(plan.reasons.join(" "), /fields other than version changed/);
+});
+
+test("strict semver comparison preserves large numeric components", (t) => {
+  const f = fixture(t);
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("9007199254740992.0.0")),
+  );
+  f.put(
+    "packages/plugin-example/store.json",
+    JSON.stringify({ format: "savia.store", formatVersion: 1 }),
+  );
+  f.put(
+    "packages/plugin-example/package.json",
+    JSON.stringify({ name: "@savia/plugin-example" }),
+  );
+  f.put("packages/plugin-example/entry.tsx", "export {};\n");
+  const base = f.commit("base");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("9007199254740993.0.0")),
+  );
+  f.put("packages/plugin-example/entry.tsx", "export const updated = true;\n");
+  const head = f.commit("large version bump");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "plugin");
+  assert.equal(plan.plugins[0].version, "9007199254740993.0.0");
+});
+
+test("plugin IDs outside the publisher's accepted format fall back to platform", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  const base = f.commit("base");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.1", { id: "custom_bad-id" })),
+  );
+  const head = f.commit("invalid plugin ID");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+});
+
+test("store, package, and configuration changes are never fast-laned", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  const base = f.commit("base");
+  f.put(
+    "packages/plugin-example/store.json",
+    JSON.stringify({ format: "savia.store", formatVersion: 1, changed: true }),
+  );
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.1")),
+  );
+  const head = f.commit("store edit");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.equal(plan.flows, true);
+  assert.match(plan.reasons.join(" "), /unsupported files/);
+});
+
+test("unknown namespaces, shared dependencies, and root dependency changes are conservative", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  const base = f.commit("base");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.1")),
+  );
+  f.put("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+  const head = f.commit("root dependency change");
+  const dependencyPlan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(dependencyPlan.kind, "platform");
+  assert.equal(dependencyPlan.flows, true);
+
+  f.put("packages/service-example/source.ts", "export {};\n");
+  const next = f.commit("unknown package namespace");
+  const unknownPlan = classifyChanges({ head, base: head, repo: f.repo });
+  assert.equal(unknownPlan.kind, "none");
+  const changedUnknown = classifyChanges({
+    base: head,
+    head: next,
+    repo: f.repo,
+  });
+  assert.equal(changedUnknown.kind, "platform");
+  assert.equal(changedUnknown.flows, true);
+});
+
+test("unrelated admin changes are platform work without forcing flows", (t) => {
+  const f = fixture(t);
+  f.put("apps/admin/src/page.tsx", "export const page = true;\n");
+  const base = f.commit("base");
+  f.put("apps/admin/src/page.tsx", "export const page = false;\n");
+  const head = f.commit("admin edit");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.equal(plan.flows, false);
+});
+
+test("unknown runtime and infrastructure paths force Flows checks", (t) => {
+  const f = fixture(t);
+  f.put("apps/hook-executor/src/worker.ts", "export {};\n");
+  const base = f.commit("base");
+  f.put("apps/hook-executor/src/worker.ts", "export const changed = true;\n");
+  f.put(".github/actions/custom/action.yml", "name: Custom\n");
+  const head = f.commit("runtime and action update");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.equal(plan.flows, true);
+});
+
+test("test-only plugin changes use platform checks without requiring a version bump", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  const base = f.commit("base");
+  f.put("packages/plugin-example/test/example.test.ts", "// added test\n");
+  const head = f.commit("test-only update");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.equal(plan.flows, false);
+  assert.equal(plan.plugin_only, false);
+  assert.doesNotMatch(
+    plan.reasons.join(" "),
+    /must increase its strict semver/,
+  );
+});
+
+test("path traversal shaped names are not accepted by the plugin source allowlist", (t) => {
+  const f = fixture(t);
+  addPlugin(f);
+  const base = f.commit("base");
+  f.put("packages/plugin-example/..hidden.ts", "export {};\n");
+  f.put(
+    "packages/plugin-example/savia-extension.json",
+    JSON.stringify(manifest("1.0.1")),
+  );
+  const head = f.commit("unsafe path shape");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.match(plan.reasons.join(" "), /unsupported files/);
+});
+
+test("pure docs changes are none and malformed or unavailable git input is full platform CI", (t) => {
+  const f = fixture(t);
+  f.put("docs/guide.md", "Guide\n");
+  const base = f.commit("base");
+  f.put("docs/guide.md", "Updated guide\n");
+  const head = f.commit("docs change");
+
+  const docsPlan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(docsPlan.kind, "none");
+  assert.equal(docsPlan.flows, false);
+  const missingPlan = classifyChanges({ base: "missing", head, repo: f.repo });
+  assert.equal(missingPlan.kind, "platform");
+  assert.equal(missingPlan.flows, false);
+  assert.equal(
+    classifyChanges({ base: "", head, repo: f.repo }).kind,
+    "platform",
+  );
+});
+
+test("CI classification isolates only infrastructure and documentation changes", (t) => {
+  const f = fixture(t);
+  f.put("infra/pulumi/project.ts", "export const value = 1;\n");
+  f.put("docs/guide.md", "Guide\n");
+  const base = f.commit("base");
+
+  const scenarios = [
+    ["infra/pulumi/project.ts", "export const value = 2;\n", "infrastructure"],
+    ["infra/pulumi/project.test.mjs", "// changed test\n", "infrastructure"],
+    ["docs/guide.md", "Updated guide\n", "none"],
+    ["apps/admin/src/page.tsx", "export const page = true;\n", "frontend"],
+    ["package.json", "{}\n", "full"],
+    ["pnpm-lock.yaml", "lockfileVersion: '9.0'\n", "full"],
+    ["packages/shared/src/index.ts", "export {};\n", "full"],
+    ["unknown/file.txt", "unknown\n", "full"],
+    [".github/workflows/ci.yml", "name: changed\n", "ci-config"],
+    ["scripts/preview-change-plan.mjs", "// changed classifier\n", "full"],
+  ];
+
+  let scenarioBase = base;
+  for (const [path, content, expected] of scenarios) {
+    f.put(path, content);
+    const head = f.commit(`change ${path}`);
+    assert.equal(
+      classifyCiChanges({ base: scenarioBase, head, repo: f.repo }).kind,
+      expected,
+      `${path} should classify as ${expected}`,
+    );
+    scenarioBase = head;
+  }
+
+  f.put("infra/pulumi/project.ts", "export const value = 3;\n");
+  f.put("docs/guide.md", "Infra guide update\n");
+  let head = f.commit("infrastructure and docs");
+  assert.equal(
+    classifyCiChanges({ base: scenarioBase, head, repo: f.repo }).kind,
+    "infrastructure",
+  );
+
+  const mixedBase = head;
+  f.put("infra/pulumi/project.ts", "export const value = 4;\n");
+  f.put("apps/admin/src/page.tsx", "export const page = false;\n");
+  head = f.commit("mixed infrastructure and application");
+  assert.equal(
+    classifyCiChanges({ base: mixedBase, head, repo: f.repo }).kind,
+    "full",
+  );
+
+  const unavailable = classifyCiChanges({
+    base: "missing",
+    head,
+    repo: f.repo,
+  });
+  assert.equal(unavailable.kind, "full");
+  assert.equal(unavailable.flows, true);
+});
+
+test("CI selects ci-config only for the explicit orchestration path allowlist", (t) => {
+  const f = fixture(t);
+  const allowedPaths = [
+    ".github/workflows/ci.yml",
+    ".github/workflows/codeql.yml",
+    ".github/workflows/coverage.yml",
+    ".github/workflows/deploy-preview.yml",
+    "scripts/codeql-plan.mjs",
+    "scripts/codeql-plan.test.mjs",
+    "scripts/github-workflows.test.mjs",
+    "scripts/preview-release-plan.mjs",
+    "scripts/preview-release-plan.test.mjs",
+    "scripts/preview-component-evidence.mjs",
+    "scripts/preview-component-evidence.test.mjs",
+  ];
+  for (const path of allowedPaths) f.put(path, "// baseline\n");
+  f.put("docs/guides/ci.md", "CI guide\n");
+  const base = f.commit("base");
+
+  for (const path of allowedPaths) f.put(path, "// updated\n");
+  f.put("docs/guides/ci.md", "Updated CI guide\n");
+  const head = f.commit("orchestration update");
+  const plan = classifyCiChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "ci-config");
+  assert.equal(plan.flows, false);
+
+  for (const path of [
+    ".github/workflows/other.yml",
+    "scripts/other-ci-helper.mjs",
+    "package.json",
+    "pnpm-lock.yaml",
+    "apps/api/src/index.ts",
+  ]) {
+    const scenario = fixture(t);
+    scenario.put(".github/workflows/ci.yml", "name: CI\n");
+    const scenarioBase = scenario.commit("base");
+    scenario.put(".github/workflows/ci.yml", "name: Updated CI\n");
+    scenario.put(path, "// changed\n");
+    const mixedHead = scenario.commit(`change ${path}`);
+    const mixed = classifyCiChanges({
+      base: scenarioBase,
+      head: mixedHead,
+      repo: scenario.repo,
+    });
+    assert.equal(mixed.kind, "full", `${path} must select full CI`);
+    assert.equal(mixed.flows, true, `${path} must retain Flows checks`);
+  }
+});
+
+test("CI config classification leaves trusted-source handling in the workflow intact", () => {
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(ci, /name: Classify changes with trusted base code/);
+  assert.match(
+    ci,
+    /git show "\$BASE_SHA:scripts\/preview-change-plan\.mjs" > "\$trusted_script"/,
+  );
+});
+
+test("CI config renames classify both paths without rename detection", (t) => {
+  const f = fixture(t);
+  f.put(".github/workflows/coverage.yml", "name: coverage\n");
+  const base = f.commit("base");
+  f.put(".github/workflows/coverage.yml", "name: moved\n");
+  f.put(".github/workflows/unknown-coverage.yml", "name: moved\n");
+  const head = f.commit("rename allowed workflow to unknown path");
+
+  const plan = classifyCiChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "full");
+  assert.equal(plan.flows, true);
+});
+
+test("release classification remains unchanged for orchestration paths", (t) => {
+  const f = fixture(t);
+  f.put(".github/workflows/ci.yml", "name: CI\n");
+  const base = f.commit("base");
+  f.put(".github/workflows/ci.yml", "name: Updated CI\n");
+  const head = f.commit("workflow update");
+
+  const plan = classifyChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "platform");
+  assert.equal(plan.flows, true);
+});
+
+test("the CI command-line mode emits separate outputs and leaves default classification intact", (t) => {
+  const f = fixture(t);
+  f.put("infra/pulumi/project.ts", "export const value = 1;\n");
+  const base = f.commit("base");
+  f.put("infra/pulumi/project.ts", "export const value = 2;\n");
+  const head = f.commit("infra update");
+
+  const script = fileURLToPath(
+    new URL("./preview-change-plan.mjs", import.meta.url),
+  );
+  const ciOutput = execFileSync(
+    process.execPath,
+    [script, "--ci", "--base", base, "--head", head, "--repo", f.repo],
+    { encoding: "utf8" },
+  );
+  assert.match(ciOutput, /^ci_kind=infrastructure$/m);
+  assert.match(ciOutput, /^ci_flows=false$/m);
+
+  const releaseOutput = execFileSync(
+    process.execPath,
+    [script, "--base", base, "--head", head, "--repo", f.repo],
+    { encoding: "utf8" },
+  );
+  assert.match(releaseOutput, /^kind=platform$/m);
+  assert.doesNotMatch(releaseOutput, /^ci_kind=/m);
+});
+
+test("the actual CI workflow falls back when trusted CI output is unsupported or inconsistent", (t) => {
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8",
+  );
+  const step = ci.slice(
+    ci.indexOf("      - name: Classify changes with trusted base code"),
+    ci.indexOf("\n      - name: Preview CI proof"),
+  );
+  const run = step.slice(
+    step.indexOf("        run: |\n") + "        run: |\n".length,
+  );
+  const workflowRunBlock = run
+    .split("\n")
+    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+    .join("\n");
+  const scenarios = [
+    ["reject", null],
+    ["ignore", null],
+    ["partial", "ci_kind=infrastructure\n"],
+    ["malformed", "ci_kind=other\nci_flows=false\n"],
+    ["inconsistent", "ci_kind=full\nci_flows=false\n"],
+    ["valid-full", "ci_kind=full\nci_flows=true\n"],
+    ["valid-infrastructure", "ci_kind=infrastructure\nci_flows=false\n"],
+    ["valid-auth", "ci_kind=auth\nci_flows=false\n"],
+  ];
+
+  for (const [mode, ciOutput] of scenarios) {
+    const f = fixture(t);
+    f.put(
+      "scripts/preview-change-plan.mjs",
+      `import { appendFileSync } from "node:fs";\n` +
+        `if (process.argv.includes("--ci")) {\n` +
+        `  if (process.env.CI_MODE === "reject") process.exit(1);\n` +
+        `  if (process.env.CI_MODE === "ignore") process.exit(0);\n` +
+        `  const ciOutput = process.argv[process.argv.indexOf("--output") + 1];\n` +
+        `  appendFileSync(ciOutput, ${JSON.stringify(ciOutput ?? "")});\n` +
+        `} else {\n` +
+        `  const output = process.argv[process.argv.indexOf("--output") + 1];\n` +
+        `  appendFileSync(output, "kind=platform\\nflows=false\\nplugins=[]\\nplugin_only=false\\n");\n` +
+        `}\n`,
+    );
+    const base = f.commit("legacy classifier base");
+    f.put("apps/admin/src/page.tsx", "export const changed = true;\n");
+    const head = f.commit("application change");
+    const output = join(f.repo, "github-output");
+    const runnerTemp = join(f.repo, "runner-temp");
+    mkdirSync(runnerTemp);
+
+    execFileSync("bash", ["-c", workflowRunBlock], {
+      cwd: f.repo,
+      env: {
+        ...process.env,
+        CI_MODE: mode,
+        EVENT_NAME: "pull_request",
+        PR_BASE_SHA: base,
+        PUSH_BEFORE_SHA: "",
+        HEAD_SHA: head,
+        GITHUB_OUTPUT: output,
+        RUNNER_TEMP: runnerTemp,
+      },
+    });
+
+    const result = readFileSync(output, "utf8");
+    assert.match(result, /^kind=platform$/m, mode);
+    if (mode.startsWith("valid-")) {
+      assert.match(result, new RegExp(`^ci_kind=${mode.slice(6)}$`, "m"));
+      assert.match(result, /^ci_flows=(?:true|false)$/m);
+    } else {
+      assert.match(result, /^ci_kind=full$/m, mode);
+      assert.match(result, /^ci_flows=true$/m, mode);
+    }
+  }
+});
+
+test("the release-facing classifier keeps infrastructure classified as platform", (t) => {
+  const f = fixture(t);
+  f.put("infra/pulumi/project.ts", "export const value = 1;\n");
+  const base = f.commit("base");
+  f.put("infra/pulumi/project.ts", "export const value = 2;\n");
+  const head = f.commit("infra update");
+
+  assert.equal(classifyChanges({ base, head, repo: f.repo }).kind, "platform");
+  assert.equal(
+    classifyCiChanges({ base, head, repo: f.repo }).kind,
+    "infrastructure",
+  );
+});
+
+test("CI selects focused profiles for isolated Auth, API, and backup-gate changes", (t) => {
+  const f = fixture(t);
+  f.put("apps/auth/src/index.ts", "export const auth = 1;\n");
+  f.put("apps/api/src/index.ts", "export const api = 1;\n");
+  f.put("packages/backup-gate/index.mjs", "export const gate = 1;\n");
+  let base = f.commit("base");
+
+  for (const [path, profile] of [
+    ["apps/auth/src/index.ts", "auth"],
+    ["apps/api/src/index.ts", "api"],
+    ["packages/backup-gate/index.mjs", "backup-gate"],
+  ]) {
+    f.put(path, `export const changed = ${JSON.stringify(profile)};\n`);
+    f.put("docs/runtime.md", `Document ${profile} change.\n`);
+    const head = f.commit(`${profile} change`);
+    const plan = classifyCiChanges({ base, head, repo: f.repo });
+    assert.equal(plan.kind, profile);
+    assert.equal(plan.flows, false);
+    base = head;
+  }
+});
+
+test("mixed runtime scopes and migration changes retain full CI and Flows checks", (t) => {
+  const f = fixture(t);
+  f.put("apps/auth/src/index.ts", "export const auth = 1;\n");
+  f.put("apps/api/src/index.ts", "export const api = 1;\n");
+  f.put("apps/db/migrations/0001.sql", "select 1;\n");
+  const base = f.commit("base");
+  f.put("apps/auth/src/index.ts", "export const auth = 2;\n");
+  f.put("apps/api/src/index.ts", "export const api = 2;\n");
+  const mixed = f.commit("mixed runtime change");
+  const mixedPlan = classifyCiChanges({ base, head: mixed, repo: f.repo });
+  assert.equal(mixedPlan.kind, "full");
+  assert.equal(mixedPlan.flows, true);
+  f.put("apps/db/migrations/0001.sql", "select 2;\n");
+  const migration = f.commit("migration change");
+  const plan = classifyCiChanges({
+    base: mixed,
+    head: migration,
+    repo: f.repo,
+  });
+  assert.equal(plan.kind, "full");
+  assert.equal(plan.flows, true);
+});
+
+test("CI isolates the Auth deployment PR paths with docs and keeps mixed paths full", (t) => {
+  const f = fixture(t);
+  const authPaths = [
+    "apps/auth/src/index.ts",
+    "apps/auth/test/request-initialization.test.ts",
+    "scripts/auth-deployment/worker.mjs",
+    "scripts/auth-deployment/worker.test.mjs",
+    "scripts/initialize-auth-deployment.mjs",
+    "scripts/initialize-auth-deployment.test.mjs",
+    "scripts/check-auth-bridge.mjs",
+    "scripts/check-auth-bridge.test.mjs",
+    ".github/workflows/check-preview-auth.yml",
+  ];
+  for (const path of authPaths) f.put(path, "// baseline\n");
+  f.put("docs/guides/preview-release-lanes.md", "Auth CI guide\n");
+  const base = f.commit("base");
+
+  for (const path of authPaths)
+    f.put(path, "// updated Auth deployment path\n");
+  f.put("docs/guides/preview-release-lanes.md", "Updated Auth CI guide\n");
+  const head = f.commit("Auth deployment validation update");
+  const authPlan = classifyCiChanges({ base, head, repo: f.repo });
+  assert.equal(authPlan.kind, "auth");
+  assert.equal(authPlan.flows, false);
+
+  let scenarioBase = head;
+  for (const path of [
+    "packages/shared/src/index.ts",
+    "pnpm-lock.yaml",
+    ".github/workflows/other.yml",
+    "unknown/new-file.txt",
+  ]) {
+    f.put(path, "// mixed change\n");
+    const mixedHead = f.commit(`mixed ${path}`);
+    const mixedPlan = classifyCiChanges({
+      base: scenarioBase,
+      head: mixedHead,
+      repo: f.repo,
+    });
+    assert.equal(mixedPlan.kind, "full", `${path} must select full CI`);
+    assert.equal(mixedPlan.flows, true, `${path} must retain Flows checks`);
+    scenarioBase = mixedHead;
+  }
+});
+
+test("CI selects frontend only for eligible admin UI source and its tests", (t) => {
+  const f = fixture(t);
+  for (const path of [
+    "apps/admin/src/views/page.tsx",
+    "apps/admin/src/styles/page.css",
+    "apps/admin/src/i18n/en.ts",
+    "apps/admin/src/views/page.test.ts",
+    "apps/admin/src/views/page.test.tsx",
+    "apps/admin/src/views/page.spec.ts",
+    "apps/admin/src/views/page.spec.tsx",
+    "docs/guides/admin.md",
+  ]) {
+    f.put(path, "// baseline\n");
+  }
+  const base = f.commit("base");
+
+  let scenarioBase = base;
+  for (const path of [
+    "apps/admin/src/views/page.tsx",
+    "apps/admin/src/styles/page.css",
+    "apps/admin/src/i18n/en.ts",
+    "apps/admin/src/views/page.test.ts",
+    "apps/admin/src/views/page.test.tsx",
+    "apps/admin/src/views/page.spec.ts",
+    "apps/admin/src/views/page.spec.tsx",
+  ]) {
+    f.put(path, "// updated\n");
+    const head = f.commit(`update ${path}`);
+    const plan = classifyCiChanges({ base: scenarioBase, head, repo: f.repo });
+    assert.equal(plan.kind, "frontend", `${path} should select frontend CI`);
+    assert.equal(plan.flows, false);
+    scenarioBase = head;
+  }
+
+  f.put("apps/admin/src/views/page.tsx", "// updated with a test\n");
+  f.put("apps/admin/src/views/page.spec.tsx", "// changed test\n");
+  const mixedHead = f.commit("UI and test update");
+  assert.equal(
+    classifyCiChanges({ base: scenarioBase, head: mixedHead, repo: f.repo })
+      .kind,
+    "frontend",
+  );
+  scenarioBase = mixedHead;
+
+  f.put("docs/guides/admin.md", "Updated admin guide\n");
+  const docsHead = f.commit("frontend docs update");
+  assert.equal(
+    classifyCiChanges({ base: scenarioBase, head: docsHead, repo: f.repo })
+      .kind,
+    "none",
+  );
+});
+
+test("frontend source eligibility excludes tests and unrestricted TypeScript", () => {
+  for (const path of [
+    "apps/admin/src/page.tsx",
+    "apps/admin/src/styles/page.css",
+    "apps/admin/src/i18n/en.ts",
+  ]) {
+    assert.equal(
+      isFrontendSourcePath(path),
+      true,
+      `${path} should be eligible`,
+    );
+  }
+  for (const path of [
+    "apps/admin/src/page.test.tsx",
+    "apps/admin/src/page.spec.tsx",
+    "apps/admin/src/i18n/en.test.ts",
+    "apps/admin/src/__tests__/page.test.ts",
+    "apps/admin/src/i18n/__tests__/messages.ts",
+    "apps/admin/src/services/api.ts",
+    "apps/admin/vite.config.ts",
+  ]) {
+    assert.equal(isFrontendSourcePath(path), false, `${path} is not UI source`);
+  }
+});
+
+test("admin config, arbitrary TypeScript, and mixed frontend scopes retain full CI", (t) => {
+  const f = fixture(t);
+  f.put("apps/admin/src/page.tsx", "export const page = true;\n");
+  f.put("apps/admin/src/i18n/en.ts", "export default {};\n");
+  const base = f.commit("base");
+
+  for (const path of [
+    "apps/admin/src/services/api.ts",
+    "apps/admin/src/i18n/helpers.ts",
+    "apps/admin/vite.config.ts",
+    "apps/admin/package.json",
+    "pnpm-lock.yaml",
+    "apps/api/src/index.ts",
+  ]) {
+    f.put(path, "// changed\n");
+    const head = f.commit(`change ${path}`);
+    const plan = classifyCiChanges({ base, head, repo: f.repo });
+    assert.equal(plan.kind, "full", `${path} must select full CI`);
+    assert.equal(plan.flows, true, `${path} must retain Flows checks`);
+  }
+
+  f.put("apps/admin/src/page.tsx", "export const page = false;\n");
+  f.put("apps/api/src/index.ts", "export const api = true;\n");
+  const mixed = f.commit("mixed frontend and runtime");
+  assert.equal(
+    classifyCiChanges({ base, head: mixed, repo: f.repo }).kind,
+    "full",
+  );
+});
+
+test("release-facing classification keeps eligible admin UI changes platform", (t) => {
+  const f = fixture(t);
+  f.put("apps/admin/src/page.tsx", "export const page = true;\n");
+  const base = f.commit("base");
+  f.put("apps/admin/src/page.tsx", "export const page = false;\n");
+  const head = f.commit("admin UI update");
+
+  assert.equal(classifyChanges({ base, head, repo: f.repo }).kind, "platform");
+  assert.equal(
+    classifyCiChanges({ base, head, repo: f.repo }).kind,
+    "frontend",
+  );
+});
+
+test("assistant API surface changes use a focused CI profile", (t) => {
+  const f = fixture(t);
+  const paths = [
+    "apps/api/src/assistant/service.ts",
+    "apps/api/test/assistant-service.test.ts",
+    "apps/mcp/src/server.ts",
+    "apps/mcp/test/savia-api.test.ts",
+    "packages/release-catalog/src/assistant-api-client.ts",
+    "docs/remote-mcp.md",
+  ];
+  for (const path of paths) f.put(path, "// before\n");
+  const base = f.commit("base");
+  for (const path of paths) f.put(path, "// after\n");
+  const head = f.commit("assistant API surface");
+
+  const plan = classifyCiChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "assistant-api");
+  assert.equal(plan.flows, false);
+});
+
+test("assistant API profile rejects unrelated mixed and unknown runtime changes", (t) => {
+  const f = fixture(t);
+  f.put("apps/mcp/src/server.ts", "// before\n");
+  f.put("apps/api/src/routes/users.ts", "// before\n");
+  const base = f.commit("base");
+
+  f.put("apps/mcp/src/server.ts", "// after\n");
+  f.put("apps/api/src/routes/users.ts", "// changed\n");
+  const mixed = f.commit("assistant and unrelated API");
+  assert.equal(
+    classifyCiChanges({ base, head: mixed, repo: f.repo }).kind,
+    "full",
+  );
+
+  const unknownRepo = fixture(t);
+  unknownRepo.put("apps/mcp/src/server.ts", "// before\n");
+  const unknownBase = unknownRepo.commit("base");
+  unknownRepo.put("apps/mcp/wrangler.jsonc", "// changed\n");
+  const unknown = unknownRepo.commit("unknown assistant runtime");
+  assert.equal(
+    classifyCiChanges({
+      base: unknownBase,
+      head: unknown,
+      repo: unknownRepo.repo,
+    }).kind,
+    "full",
+  );
+});
+
+test("CI selects a combined frontend-assistant-api profile only for their vetted union", (t) => {
+  const f = fixture(t);
+  f.put("apps/admin/src/views/assistant.tsx", "// UI before\n");
+  f.put("apps/api/src/assistant/service.ts", "// API before\n");
+  f.put("apps/mcp/src/server.ts", "// MCP before\n");
+  f.put("apps/admin/src/views/assistant.test.tsx", "// test before\n");
+  f.put("docs/guides/assistant.md", "Guide before\n");
+  const base = f.commit("base");
+
+  f.put("apps/api/src/assistant/service.ts", "// API changed\n");
+  const assistantHead = f.commit("assistant API update");
+  assert.equal(
+    classifyCiChanges({ base, head: assistantHead, repo: f.repo }).kind,
+    "assistant-api",
+    "a pure assistant API change keeps its existing profile",
+  );
+
+  f.put("apps/admin/src/views/assistant.tsx", "// UI changed\n");
+  const frontendHead = f.commit("frontend update");
+  assert.equal(
+    classifyCiChanges({
+      base: assistantHead,
+      head: frontendHead,
+      repo: f.repo,
+    }).kind,
+    "frontend",
+    "a pure frontend change keeps its existing profile",
+  );
+  assert.equal(
+    classifyCiChanges({ base, head: frontendHead, repo: f.repo }).kind,
+    "frontend-assistant-api",
+  );
+  assert.equal(
+    classifyCiChanges({ base, head: frontendHead, repo: f.repo }).flows,
+    false,
+  );
+});
+
+test("combined frontend-assistant-api rejects unrelated, infrastructure, and dependency paths", (t) => {
+  const f = fixture(t);
+  f.put("apps/admin/src/views/assistant.tsx", "// UI before\n");
+  f.put("apps/api/src/assistant/service.ts", "// API before\n");
+  const base = f.commit("base");
+
+  for (const path of [
+    "apps/api/src/routes/unrelated.ts",
+    "apps/admin/package.json",
+    "infra/pulumi/project.ts",
+    "pnpm-lock.yaml",
+  ]) {
+    f.put("apps/admin/src/views/assistant.tsx", `// UI ${path}\n`);
+    f.put("apps/api/src/assistant/service.ts", `// API ${path}\n`);
+    f.put(path, "// incompatible\n");
+    const head = f.commit(`mixed with ${path}`);
+    const plan = classifyCiChanges({ base, head, repo: f.repo });
+    assert.equal(plan.kind, "full", `${path} must select full CI`);
+    assert.equal(plan.flows, true, `${path} must retain Flows checks`);
+  }
+});
+
+test("CI routes infrastructure contracts through the required suite and gate", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8",
+  );
+  const contractSuite = workflow.slice(
+    workflow.indexOf("  contract-suite:"),
+    workflow.indexOf("  contracts:"),
+  );
+  const assistantMcp = workflow.slice(
+    workflow.indexOf("  assistant-mcp:"),
+    workflow.indexOf("  runtime-profile:"),
+  );
+  const contracts = workflow.slice(
+    workflow.indexOf("  contracts:"),
+    workflow.indexOf("  typecheck:"),
+  );
+
+  assert.match(workflow, /node "\$trusted_script" --ci --base/);
+  assert.match(workflow, /echo 'ci_kind=full'/);
+  assert.match(contractSuite, /needs: changes/);
+  assert.match(contractSuite, /run: pnpm run test:contracts/);
+  assert.match(
+    contractSuite,
+    /Run offline Flows recovery contracts for infrastructure changes/,
+  );
+  assert.match(
+    contractSuite,
+    /if: \$\{\{ vars\.SAVIA_CI_FLOWS_ENABLED != 'false' && needs\.changes\.outputs\.ci_kind == 'infrastructure' \}\}/,
+  );
+  assert.match(contractSuite, /scripts\/flows-maintenance\/\*\.test\.mjs/);
+  assert.match(contracts, /needs:[\s\S]*- contract-suite/);
+  assert.match(contracts, /name: Contract tests/);
+  assert.match(contracts, /node scripts\/contract-check-gate\.mjs/);
+  assert.match(workflow, /ci_flows == 'true'/);
+  assert.match(
+    workflow,
+    /ci_kind=\(infrastructure\|plugin\|none\|auth\|api\|backup-gate\|assistant-api\|ci-config\|frontend\|frontend-assistant-api\)/,
+  );
+  assert.match(workflow, /^  runtime-profile:/m);
+  assert.match(workflow, /pnpm --filter @savia\/connector-gateway typecheck/);
+  assert.match(
+    workflow,
+    /\["auth","api","backup-gate","assistant-api","frontend","frontend-assistant-api"\]/,
+  );
+  assert.match(workflow, /pnpm --filter @savia\/mcp test/);
+  assert.match(workflow, /pnpm --filter @savia\/mcp exec tsc --noEmit/);
+  assert.match(workflow, /pnpm --filter @savia\/release-catalog typecheck/);
+  assert.match(
+    workflow,
+    /pnpm --filter @savia\/admin exec vitest run src\/features\/assistant\/assistant-api\.test\.ts/,
+  );
+  assert.match(assistantMcp, /needs: changes/);
+  assert.match(
+    assistantMcp,
+    /ci_kind == 'assistant-api' \|\| needs\.changes\.outputs\.ci_kind == 'frontend-assistant-api'/,
+  );
+  assert.match(contracts, /- assistant-mcp/);
+  assert.match(contracts, /- api\n\s+- api-2\n\s+- api-3/);
+  assert.match(
+    workflow,
+    /\["full","api","assistant-api","frontend-assistant-api"\]/,
+  );
+  assert.match(
+    workflow,
+    /node --test scripts\/auth-deployment\/worker\.test\.mjs scripts\/initialize-auth-deployment\.test\.mjs scripts\/check-auth-bridge\.test\.mjs/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /runs: pnpm run test:unit:workspace|typecheck:plugins && pnpm run typecheck:companion/,
+  );
+});
+
+test("CI validates custody and Preview planning helpers with infrastructure contracts", (t) => {
+  const f = fixture(t);
+  const paths = [
+    "infra/pulumi/runtime-artifact-custody.mjs",
+    "scripts/preview-code-release.mjs",
+    "scripts/preview-release-plan.mjs",
+    "scripts/preview-change-plan.mjs",
+    "scripts/preview-code-release.test.mjs",
+  ];
+  for (const path of paths) f.put(path, "// before\n");
+  const base = f.commit("base");
+  for (const path of paths) f.put(path, "// after\n");
+  const head = f.commit("custody helpers");
+  assert.equal(
+    classifyCiChanges({ base, head, repo: f.repo }).kind,
+    "infrastructure",
+  );
+  f.put("packages/shared/src/index.ts", "export const x = 1;\n");
+  const mixed = f.commit("shared runtime");
+  assert.equal(
+    classifyCiChanges({ base, head: mixed, repo: f.repo }).kind,
+    "full",
+  );
+});

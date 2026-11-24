@@ -1,0 +1,55 @@
+name: Prepare hosted first-party plugins
+description: Assemble the exact first-party release in an approved deployment workspace
+inputs:
+  ssh-key:
+    description: Read-only deploy key scoped to the first-party plugin repository
+    required: true
+outputs:
+  frontend_overlaid:
+    description: Whether hosted compatibility files change frontend inputs
+    value: ${{ steps.assemble.outputs.frontend_overlaid }}
+runs:
+  using: composite
+  steps:
+    - name: Read the approved plugin revision
+      id: release
+      shell: bash
+      run: |
+        set -euo pipefail
+        revision="$(node -p "require('./deployment/hosted-plugins.json').revision")"
+        [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+        test "$(git rev-parse HEAD)" = "$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
+        echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+    - name: Check out first-party plugin sources
+      uses: actions/checkout@v4
+      with:
+        repository: hefesoftsas/savia-plugins
+        ref: ${{ steps.release.outputs.revision }}
+        path: .hosted-plugins
+        ssh-key: ${{ inputs.ssh-key }}
+        persist-credentials: false
+
+    - name: Assemble first-party plugins
+      id: assemble
+      shell: bash
+      env:
+        PLUGIN_REVISION: ${{ steps.release.outputs.revision }}
+      run: |
+        set -euo pipefail
+        test "$(git -C .hosted-plugins rev-parse HEAD)" = "$PLUGIN_REVISION"
+        git apply --check .hosted-plugins/hosted/studio-compatibility.patch
+        git apply .hosted-plugins/hosted/studio-compatibility.patch
+        ruby scripts/compose-hosted-plugins.rb .hosted-plugins
+        cp -R .hosted-plugins/packages/. packages/
+        cp -R .hosted-plugins/store-ports/. store-ports/
+        cp -R .hosted-plugins/hosted/packages/release-catalog/src/. packages/release-catalog/src/
+        for file in catalog.json seed.json provider-profile.ts input-hints.ts mock.ts; do
+          cp ".hosted-plugins/hosted/apps/savia-request/src/server/$file" \
+            "apps/savia-request/src/server/$file"
+        done
+        cp -R .hosted-plugins/deployment/. deployment/
+        mkdir -p solutions
+        cp -R .hosted-plugins/solutions/. solutions/
+        git diff --quiet -- apps/admin/src packages/studio-shared/src && frontend_overlaid=false || frontend_overlaid=true
+        echo "frontend_overlaid=$frontend_overlaid" >> "$GITHUB_OUTPUT"

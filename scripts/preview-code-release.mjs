@@ -1,0 +1,92 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { releaseRuntimeChanged } from "./preview-release-plan.mjs";
+import { isFrontendSourcePath } from "./preview-change-plan.mjs";
+const execute = promisify(execFile);
+const roles = ["auth", "mcp", "api", "request", "connectors"];
+const roots = {
+  auth: "apps/auth/src/",
+  mcp: "apps/mcp/src/",
+  api: "apps/api/src/",
+  request: "apps/savia-request/src/",
+  connectors: "apps/connector-gateway/src/",
+};
+// This lane deliberately excludes schema/configuration changes, including schema
+// statements embedded in application source. Missing source/history means full.
+const schema =
+  /\b(?:CREATE\s+(?:(?:UNIQUE|TEMP|TEMPORARY|VIRTUAL)\s+)?(?:TABLE|INDEX|TRIGGER|VIEW)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW)|getMigrations|betterAuth|createBetterAuth|oauthProvider)\b/i;
+export function classifyPreviewCodeChanges(files) {
+  const targets = new Set();
+  let frontend = false;
+  for (const { path, before, after } of files) {
+    if (!releaseRuntimeChanged([path])) continue;
+    if (
+      before === null ||
+      after === null ||
+      schema.test(before) ||
+      schema.test(after)
+    )
+      return null;
+    // This package also owns the coordinator Durable Object implementation.
+    // Updating only its four consumers would leave a mixed coordinator protocol.
+    if (path === "packages/backup-gate/index.mjs") return null;
+    // This leaf module is imported by both Workers; changes must publish both.
+    if (path === "packages/release-catalog/src/assistant-api-client.ts") {
+      targets.add("mcp");
+      targets.add("api");
+      continue;
+    }
+    if (isFrontendSourcePath(path)) {
+      frontend = true;
+      continue;
+    }
+    const role = roles.find((role) => path.startsWith(roots[role]));
+    if (
+      !role ||
+      !/\.[jt]sx?$/.test(path) ||
+      /(?:^|\/)(?:index|env|config|schema|migration[^/]*)\.[jt]sx?$/.test(path)
+    )
+      return null;
+    targets.add(role);
+  }
+  const selected = roles.filter((role) => targets.has(role));
+  if (frontend) {
+    if (selected.some((role) => role !== "api" && role !== "mcp")) return null;
+    selected.push("pluginEditor", "gateway");
+  }
+  return selected.length ? selected : null;
+}
+export async function derivePreviewCodeScope({
+  base,
+  head,
+  cwd,
+  run = execute,
+}) {
+  if (
+    ![base, head].every((value) => /^[a-f\d]{40}$/.test(value ?? "")) ||
+    base === head
+  )
+    return null;
+  try {
+    await run("git", ["merge-base", "--is-ancestor", base, head], { cwd });
+    const { stdout } = await run(
+      "git",
+      ["diff", "--no-renames", "--name-only", base, head],
+      { cwd },
+    );
+    const files = [];
+    for (const path of stdout.trim().split("\n").filter(Boolean)) {
+      if (path.includes(":") || path.startsWith("/")) return null;
+      if (!releaseRuntimeChanged([path])) continue;
+      const before = (await run("git", ["show", `${base}:${path}`], { cwd }))
+        .stdout;
+      const after = (await run("git", ["show", `${head}:${path}`], { cwd }))
+        .stdout;
+      files.push({ path, before, after });
+    }
+    const targets = classifyPreviewCodeChanges(files);
+    return targets ? { base, head, targets } : null;
+  } catch {
+    return null;
+  }
+}

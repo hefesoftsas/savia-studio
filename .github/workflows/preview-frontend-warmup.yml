@@ -1,0 +1,58 @@
+name: Warm Savia Preview frontend
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: savia-preview-frontend-warmup
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: ${{ vars.SAVIA_PREVIEW_PLUGIN_EDITOR_ORIGIN != '' && github.event.repository.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Prepare frontend assets from the exact main revision
+        id: warmup
+        run: node scripts/warm-preview-frontend.mjs "$RUNNER_TEMP/savia-frontend-assets"
+        env:
+          PREVIEW_PUSH_BASE: ${{ github.event.before }}
+          PREVIEW_PLUGIN_EDITOR_ORIGIN: ${{ vars.SAVIA_PREVIEW_PLUGIN_EDITOR_ORIGIN }}
+          NODE_OPTIONS: "--max-old-space-size=1536"
+
+      - name: Retain compiled frontend assets
+        if: ${{ steps.warmup.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-frontend-${{ github.sha }}
+          path: ${{ runner.temp }}/savia-frontend-assets
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 2

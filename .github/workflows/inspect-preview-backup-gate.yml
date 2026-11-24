@@ -1,0 +1,37 @@
+name: Inspect Savia Preview backup gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: savia-preview
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: preview
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @savia/api...
+        env:
+          PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
+      - name: Inspect outstanding writer permits
+        run: node scripts/inspect-preview-backup-gate.mjs
+        env:
+          SAVIA_DEPLOY_ENVIRONMENT: preview
+          SAVIA_BACKUP_CONTROL_SECRET: ${{ secrets.SAVIA_BACKUP_CONTROL_SECRET }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
