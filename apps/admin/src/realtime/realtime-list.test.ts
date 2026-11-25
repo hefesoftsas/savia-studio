@@ -1,4 +1,4 @@
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { applyRealtimeListEvent } from "./realtime-list";
 
@@ -49,6 +49,57 @@ describe("applyRealtimeListEvent", () => {
       data: [],
       total: 0,
     });
+  });
+
+  it("backfills the visible tenant page and invalidates the other pages after a deletion", async () => {
+    const queryClient = new QueryClient();
+    const firstPage = [
+      "tenants",
+      "getList",
+      { pagination: { page: 1, perPage: 2 } },
+    ];
+    const secondPage = [
+      "tenants",
+      "getList",
+      { pagination: { page: 2, perPage: 2 } },
+    ];
+    const deleted = { id: 101 };
+    const second = { id: 102 };
+    const third = { id: 103 };
+    queryClient.setQueryData(firstPage, { data: [deleted, second], total: 3 });
+    queryClient.setQueryData(secondPage, { data: [third], total: 3 });
+    const loadPage = vi
+      .fn()
+      .mockResolvedValue({ data: [second, third], total: 2 });
+    const observer = new QueryObserver(queryClient, {
+      queryKey: firstPage,
+      queryFn: loadPage,
+      staleTime: Infinity,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    try {
+      applyRealtimeListEvent(queryClient, "tenants", {
+        topic: "tenants",
+        type: "deleted",
+        id: deleted.id,
+      });
+
+      expect(queryClient.getQueryData(firstPage)).toEqual({
+        data: [second],
+        total: 2,
+      });
+      expect(queryClient.getQueryState(secondPage)?.isInvalidated).toBe(true);
+      await vi.waitFor(() =>
+        expect(queryClient.getQueryData(firstPage)).toEqual({
+          data: [second, third],
+          total: 2,
+        }),
+      );
+      expect(loadPage).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+      queryClient.clear();
+    }
   });
 
   it("refetches once for creates, updates and unknown ids", () => {

@@ -127,8 +127,7 @@ describe("Jira privacy SQLite migration", () => {
         try {
           for (const filename of readdirSync(postgresDirectory).filter(
             (name) =>
-              name.endsWith(".sql") &&
-              name !== "0015_jira_privacy_reporting.sql",
+              name.endsWith(".sql") && name < "0015_jira_privacy_reporting.sql",
           ))
             cpSync(
               join(postgresDirectory, filename),

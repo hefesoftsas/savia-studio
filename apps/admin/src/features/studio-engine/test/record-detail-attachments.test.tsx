@@ -13,8 +13,10 @@ vi.mock("../api", () => ({
   studioFetch: vi.fn(),
   downloadCrm: vi.fn(),
 }));
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  // Radix restores focus in a timer after the dialog unmounts.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   vi.clearAllMocks();
 });
 it("shows persisted file metadata and download under its attachment field", async () => {

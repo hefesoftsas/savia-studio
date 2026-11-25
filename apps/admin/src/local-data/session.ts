@@ -163,7 +163,7 @@ export function createLocalSession(
     }
   };
   return {
-    login: () => remote.login(),
+    login: (bookingQuery) => remote.login(bookingQuery),
     getAuthorizeUrl: () => remote.getAuthorizeUrl(),
     getAccessToken: () => remote.getAccessToken(),
     handleCallback: async () => {

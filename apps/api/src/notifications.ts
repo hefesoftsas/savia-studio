@@ -155,32 +155,37 @@ export async function runScheduledNotifications(
   realtime?: RealtimeHubClient,
 ): Promise<DispatchReport> {
   const startedAt = Date.now();
-  const report = await processNotifications(db, createNotificationPolicy(db), {
-    now: () => Date.now(),
-    random: () => Math.random(),
-    workerId: `scheduled-${startedAt}`,
-    maxEvents: notificationDefaults.maxEvents,
-    maxRecipients: notificationDefaults.maxRecipients,
-    maxRecipientAttempts: notificationDefaults.maxRecipientAttempts,
-    softBudgetMs: notificationDefaults.softBudgetMs,
-    leaseMs: notificationDefaults.leaseMs,
-  }, {
-    onDelivery(principalId) {
-      publishRealtime(realtime, principalRoom(principalId), {
-        topic: "notifications",
-        type: "created",
-        collection: "inbox",
-      });
+  const report = await processNotifications(
+    db,
+    createNotificationPolicy(db),
+    {
+      now: () => Date.now(),
+      random: () => Math.random(),
+      workerId: `scheduled-${startedAt}`,
+      maxEvents: notificationDefaults.maxEvents,
+      maxRecipients: notificationDefaults.maxRecipients,
+      maxRecipientAttempts: notificationDefaults.maxRecipientAttempts,
+      softBudgetMs: notificationDefaults.softBudgetMs,
+      leaseMs: notificationDefaults.leaseMs,
     },
-    onEventStatus(principalId, eventId) {
-      publishRealtime(realtime, principalRoom(principalId), {
-        topic: "notifications",
-        type: "updated",
-        collection: "admin-status",
-        id: eventId,
-      });
+    {
+      onDelivery(principalId) {
+        publishRealtime(realtime, principalRoom(principalId), {
+          topic: "notifications",
+          type: "created",
+          collection: "inbox",
+        });
+      },
+      onEventStatus(principalId, eventId) {
+        publishRealtime(realtime, principalRoom(principalId), {
+          topic: "notifications",
+          type: "updated",
+          collection: "admin-status",
+          id: eventId,
+        });
+      },
     },
-  });
+  );
   const backlog = await db
     .prepare(
       "SELECT COUNT(*) AS n FROM notification_events WHERE status='pending'",

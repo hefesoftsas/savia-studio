@@ -47,6 +47,28 @@ export function localInstant(
     .filter((v) => parts(v, zone) === `${date}T${time}:00`);
   return matches.length === 1 ? matches[0] : null;
 }
+
+/** Date-only events start at the first instant on the local date. */
+export function localDayStart(date: string, zone: string): number | null {
+  const midnight = Date.parse(`${date}T00:00:00Z`);
+  if (
+    !Number.isFinite(midnight) ||
+    new Date(midnight).toISOString().slice(0, 10) !== date
+  )
+    return null;
+  const exact = localInstant(date, "00:00", zone);
+  if (exact !== null) return exact;
+
+  // Search for the date transition when the clock skips or repeats midnight.
+  let before = midnight / 1000 - 2 * 86400;
+  let after = midnight / 1000 + 2 * 86400;
+  while (after - before > 1) {
+    const middle = Math.floor((before + after) / 2);
+    if (parts(middle * 1000, zone).slice(0, 10) < date) before = middle;
+    else after = middle;
+  }
+  return after * 1000;
+}
 const minute = (v: string) => Number(v.slice(0, 2)) * 60 + Number(v.slice(3));
 const clock = (m: number) =>
   `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;

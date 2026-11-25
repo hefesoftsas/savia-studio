@@ -47,9 +47,74 @@ Plataforma ya no instala automáticamente los objetos administrados al abrirse. 
 
 ## Selective HubSpot screen installation
 
+The HubSpot table's CSV download exports its visible columns and current
+free-text search in HubSpot's record order. Saved views only apply settings
+supported by the connected source when exporting. Exports can include up to 1,000
+matching records. Savia reports a provider error when a page is incomplete
+or a record repeats during export, so the user never receives a partial CSV.
+If HubSpot rate-limits listing, summaries, or exports, Savia reports the
+rate limit and keeps the provider's HTTP 429 status. When HubSpot includes
+`Retry-After`, the API and Studio transport preserve that header.
+Studio shows the earliest retry time in the records table and CSV export errors
+when that header provides a valid future deadline.
+Studio reports a download error if the response contains no CSV, including
+when a sign-in page is returned instead of the file.
+Studio gives the CSV response body 15 seconds to finish and reports a timeout
+instead of saving a partial file.
+If the server sends an error status and the explanation stalls, Studio keeps
+the original status and reports the failed download.
+The export action stays disabled while a download is in progress and becomes
+available again when the download finishes or fails.
+When the search text changes, Studio applies it to the table before enabling
+the export. Both requests use the same search text.
+Search and CSV export accept punctuation in the search text, including percent
+signs and ellipses.
+Studio only shows the CSV action for Savia tables, domain collections, and
+HubSpot. Salesforce, Zoho, Pipedrive, database, JSON:API, and MCP sources
+support browsing without CSV export in Studio.
+Studio preserves punctuation in supported record IDs when opening, editing,
+moving, deleting, or restoring records.
+The download uses the visible columns the current user is allowed to export.
+Savia tables also preserve the configured column labels and table sort order
+for users with scoped export access.
+When a named view is saved, Studio stores the search text and the selected
+search field for collections that support field-specific searches.
+In Savia tables, a search scoped to a field that no longer exists returns a
+validation error. Choose an available field or select all fields to search again.
+The search selector keeps a saved field visible when its column is hidden and
+labels it unavailable if it no longer exists.
+Named views reject unknown fields in search, filters, grouping, and sorting
+when saved. Views and default table preferences retain the CRM link column
+for collections that display it.
+Invalid saved-view filters return a validation error in record lists and CSV
+exports. Edit or clear the filter before retrying.
+Members with read-only access to a shared CRM can browse its records without
+an export action.
+
 Studio shows the live record total in the heading and sidebar for the open
 HubSpot collection when its summary is available. Unopened HubSpot collections
 omit the count.
+The Mi día summary widget reports a HubSpot rate limit and keeps the last
+verified total visible during that error, if available.
+When HubSpot provides a retry deadline, the widget shows it and skips live
+refresh events until the deadline passes. The manual retry action stays available.
+For other connected collections, Studio and Mi día omit catalog count badges
+because those counts describe Savia's local records. Use the record list for a
+provider-reported total where available.
+Record lists and summaries reject malformed pages and repeated cursors, so an
+invalid provider response cannot appear as an empty collection or an exact
+count. Search retains the provider's reported total when the requested page
+is beyond the last available cursor.
+
+Connected CRM record lists expose at most 100 pages. Salesforce also limits
+the starting offset to 2,000 records. Studio and the mail context picker stop
+at the supported page limit and indicate when the source has more records.
+Any count reported by the provider still describes the full results.
+Salesforce, Zoho, and Pipedrive report an upstream error when a record ID is
+unusable. Zoho and Pipedrive also reject invalid pagination flags so they
+cannot silently truncate record or relationship lists.
+Record detail requests also verify that the CRM returned the requested record
+before displaying its fields.
 
 In **Sources and collections → Connected CRM · HubSpot**, select the screens you
 need and choose **Install selected (N)**. Nothing is selected by default. **Select
@@ -61,6 +126,8 @@ later without reinstalling the existing selection.
 Large selections can take longer while Savia reads the HubSpot catalog and
 prepares the screens. Studio waits up to 90 seconds for this installation.
 If the connection drops, refresh availability before retrying.
+If the optional owner lookup is unavailable or returns invalid pagination,
+installation keeps the owner ID field available and omits the owner dropdown.
 
 Installation creates the selected Savia screen definitions and connection bindings.
 It does not copy all remote records or create, update, or delete records in HubSpot.

@@ -4,6 +4,7 @@ import { DayPicker } from "react-day-picker";
 import { enUS, es, ptBR } from "react-day-picker/locale";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { bookingMessages } from "./booking-messages";
+import { publicBookingRequest } from "./public-booking-request";
 import { publicBookingWizardMessages } from "./public-booking-wizard-messages";
 import type { BookingSelection, PublicBookingSlot } from "./booking-types";
 
@@ -28,7 +29,7 @@ type Props = {
   onTimeZoneChange(timeZone: string): void;
   value: BookingSelection | undefined;
   onChange(selection: BookingSelection | undefined): void;
-  onLoadingChange?(loading: boolean): void;
+  onReadyChange?(ready: boolean): void;
   refreshKey?: number;
   hideHeading?: boolean;
   excludedStartsAt?: string[];
@@ -122,17 +123,6 @@ function sameMonth(left: Date, right: Date) {
   );
 }
 
-async function fetchAvailability(path: string, signal: AbortSignal) {
-  const response = await fetch(path, {
-    signal,
-    credentials: "omit",
-    headers: { Accept: "application/json" },
-  });
-  const body = (await response.json()) as { data?: AvailabilityResult };
-  if (!response.ok || !body.data) throw new Error("Availability unavailable");
-  return body.data;
-}
-
 export function PublicBookingAvailability({
   token,
   mode = "booking",
@@ -143,7 +133,7 @@ export function PublicBookingAvailability({
   onTimeZoneChange,
   value,
   onChange,
-  onLoadingChange,
+  onReadyChange,
   refreshKey = 0,
   hideHeading = false,
   excludedStartsAt = [],
@@ -168,42 +158,39 @@ export function PublicBookingAvailability({
   const [attempt, setAttempt] = useState(0);
   const requestId = useRef(0);
 
-  const range = useMemo(() => {
-    const start = dayString(visibleMonth);
-    const lastOfMonth = dayString(
-      new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 0, 12),
-    );
-    return {
-      from: start < today ? today : start,
-      to: lastOfMonth > horizonEnd ? horizonEnd : lastOfMonth,
-    };
-  }, [visibleMonth, today, horizonEnd]);
+  const firstOfMonth = dayString(visibleMonth);
+  const lastOfMonth = dayString(
+    new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 0, 12),
+  );
+  const rangeFrom = firstOfMonth < today ? today : firstOfMonth;
+  const rangeTo = lastOfMonth > horizonEnd ? horizonEnd : lastOfMonth;
 
   useEffect(() => {
-    if (!serviceId || !professionalId || range.from > range.to) {
+    onReadyChange?.(false);
+    if (!serviceId || !professionalId || rangeFrom > rangeTo) {
       setDays([]);
       setLoading(false);
-      onLoadingChange?.(false);
       return;
     }
     const controller = new AbortController();
     const id = ++requestId.current;
     setLoading(true);
-    onLoadingChange?.(true);
     setRequestError(false);
     setDays([]);
     const query = new URLSearchParams({
       serviceId,
       professionalId,
-      from: range.from,
-      to: range.to,
+      from: rangeFrom,
+      to: rangeTo,
       displayTimeZone,
     });
     const endpoint =
       mode === "management"
         ? `/api/public/bookings/manage/${encodeURIComponent(token)}/availability`
         : `/api/public/bookings/${encodeURIComponent(token)}/availability`;
-    void fetchAvailability(`${endpoint}?${query}`, controller.signal)
+    void publicBookingRequest<AvailabilityResult>(`${endpoint}?${query}`, {
+      signal: controller.signal,
+    })
       .then((result) => {
         if (controller.signal.aborted || requestId.current !== id) return;
         setDays(result.days);
@@ -226,18 +213,17 @@ export function PublicBookingAvailability({
             onChange(undefined);
           }
         }
+        onReadyChange?.(true);
       })
       .catch(() => {
         if (!controller.signal.aborted && requestId.current === id) {
           setRequestError(true);
           setDays([]);
-          if (value) onChange(undefined);
         }
       })
       .finally(() => {
         if (!controller.signal.aborted && requestId.current === id) {
           setLoading(false);
-          onLoadingChange?.(false);
         }
       });
     return () => controller.abort();
@@ -247,10 +233,11 @@ export function PublicBookingAvailability({
     serviceId,
     professionalId,
     displayTimeZone,
-    range,
+    rangeFrom,
+    rangeTo,
     attempt,
     refreshKey,
-    onLoadingChange,
+    onReadyChange,
   ]);
 
   useEffect(() => {
@@ -268,6 +255,9 @@ export function PublicBookingAvailability({
   );
   const selectedSlots =
     days.find((day) => day.date === selectedDay)?.slots ?? [];
+  const selectedDateUtc = selectedDay
+    ? new Date(`${selectedDay}T00:00:00Z`)
+    : undefined;
   const nextMonth = addMonths(visibleMonth, 1);
   const nextAllowed = dayString(nextMonth) <= horizonEnd;
   const repeatedLabels = useMemo(() => {
@@ -402,13 +392,13 @@ export function PublicBookingAvailability({
         </div>
         <div className="min-w-0 border-t pt-4 sm:border-l sm:border-t-0 sm:pl-5 sm:pt-1">
           <h3 className="mb-3 text-sm font-semibold">
-            {selectedDay
+            {selectedDateUtc
               ? new Intl.DateTimeFormat(intlLocale(locale), {
                   weekday: "long",
                   month: "long",
                   day: "numeric",
                   timeZone: "UTC",
-                }).format(fromDayString(selectedDay))
+                }).format(selectedDateUtc)
               : t("Choose an available day")}
           </h3>
           {loading && (
@@ -420,7 +410,7 @@ export function PublicBookingAvailability({
             <div className="grid gap-3 text-sm">
               <p role="alert" className="text-destructive">
                 {t(
-                  "Available times could not be loaded. Choose another date and retry.",
+                  "Available times could not be loaded. Check your connection and retry.",
                 )}
               </p>
               <Button
@@ -461,19 +451,22 @@ export function PublicBookingAvailability({
                 {t("Choose an available day")}
               </p>
             )}
-          {!loading && selectedDay && selectedSlots.length === 0 && (
-            <p className="text-sm text-muted-foreground">
-              {t("No available times")}
-            </p>
-          )}
-          {!!selectedSlots.length && (
+          {!loading &&
+            !requestError &&
+            selectedDay &&
+            selectedSlots.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                {t("No available times")}
+              </p>
+            )}
+          {selectedDateUtc && !!selectedSlots.length && (
             <div
               role="group"
               aria-label={t("Available times for %{date}", {
                 date: new Intl.DateTimeFormat(intlLocale(locale), {
                   dateStyle: "long",
                   timeZone: "UTC",
-                }).format(fromDayString(selectedDay)),
+                }).format(selectedDateUtc),
               })}
               className="grid max-h-80 grid-cols-2 gap-2 overflow-y-auto overscroll-contain pr-1 sm:grid-cols-2"
             >

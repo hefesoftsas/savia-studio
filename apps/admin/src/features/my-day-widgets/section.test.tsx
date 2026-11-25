@@ -1,4 +1,4 @@
-import { cleanup, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { render } from "../studio-engine/test/locale-test-render";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -36,7 +36,7 @@ function isoDay(offset: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-function createApiClient() {
+function createApiClient(objects = objectsPayload) {
   return {
     get: vi.fn(async (path: string) => {
       if (path === "/v1/tenant-workspaces") {
@@ -53,7 +53,7 @@ function createApiClient() {
         };
       }
       if (path === "/v1/studio/0/api/objects") {
-        return objectsPayload;
+        return objects;
       }
       if (path.includes("/api/records/contracts/summary")) {
         return {
@@ -212,6 +212,73 @@ describe("MyDayWidgetsSection", () => {
     expect(card).toHaveTextContent("POL-002");
     expect(card).toHaveTextContent("Vencido");
     expect(card).toHaveTextContent("Esta semana");
+  });
+
+  it("prevents adding incompatible CRM widgets while allowing a summary", async () => {
+    const [object] = objectsPayload.data;
+    const apiClient = createApiClient({
+      data: [
+        {
+          ...object,
+          name: "salesforce_contacts",
+          label: "Contactos",
+          config: {
+            ...object.config,
+            studio: {
+              collection: { kind: "crm", sourceId: "salesforce" },
+            },
+          },
+        },
+      ],
+    });
+    const preferences = createPreferences();
+    render(
+      <MyDayWidgetsSection
+        apiClient={apiClient as never}
+        userPreferences={preferences as never}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Agregar tu primer widget" }),
+    );
+    const collection = screen.getByRole("combobox", { name: "Colección" });
+    await waitFor(() => expect(collection).toBeEnabled());
+    fireEvent.keyDown(collection, { key: "Enter" });
+    const contactOption = await screen.findByRole("option", {
+      name: "Contactos",
+    });
+    fireEvent.keyDown(contactOption, { key: "Enter" });
+
+    const kind = screen.getByRole("combobox", { name: "Tipo de widget" });
+    const add = screen.getByRole("button", { name: "Agregar widget" });
+    for (const [name, reason] of [
+      [
+        "Gráfica: barras por estado",
+        "Esta fuente no admite gráficos por estado.",
+      ],
+      [
+        "Acciones: vencidos y por vencer",
+        "Esta fuente no permite ordenar los registros por vencimiento.",
+      ],
+    ]) {
+      fireEvent.keyDown(kind, { key: "Enter" });
+      fireEvent.keyDown(await screen.findByRole("option", { name }), {
+        key: "Enter",
+      });
+      expect(await screen.findByText(reason)).toBeVisible();
+      expect(add).toBeDisabled();
+    }
+
+    fireEvent.keyDown(kind, { key: "Enter" });
+    fireEvent.keyDown(
+      await screen.findByRole("option", {
+        name: "Resumen: total y conteo por estado",
+      }),
+      { key: "Enter" },
+    );
+    expect(add).toBeEnabled();
+    expect(preferences.saveMyDayWidgets).not.toHaveBeenCalled();
   });
 
   it("moves a widget right and persists the new order", async () => {

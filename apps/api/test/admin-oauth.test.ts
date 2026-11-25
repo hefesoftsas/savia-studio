@@ -231,7 +231,18 @@ describe("admin OAuth bridge", () => {
     expect(authFetch).toHaveBeenCalledTimes(9);
   });
 
-  it("identifies a rejected authorization-code exchange without exposing the code", async () => {
+  it.each([
+    "generic",
+    "bookings",
+    "unavailable",
+    "timeout",
+    "upstream-503",
+  ] as const)("returns a safe authorization error for %s", async (scenario) => {
+    const bookings = scenario !== "generic";
+    let markExchangeStarted!: () => void;
+    const exchangeStarted = new Promise<void>((resolve) => {
+      markExchangeStarted = resolve;
+    });
     const authFetch = vi.fn(async (request: Request) => {
       const path = new URL(request.url).pathname;
       if (path === "/_internal/oauth/admin-client") {
@@ -244,6 +255,11 @@ describe("admin OAuth bridge", () => {
         });
       }
       if (path === "/api/auth/oauth2/token") {
+        markExchangeStarted();
+        if (scenario === "unavailable") throw new Error("Auth binding offline");
+        if (scenario === "timeout") return new Promise<Response>(() => {});
+        if (scenario === "upstream-503")
+          return new Response("Auth service offline", { status: 503 });
         return Response.json(
           {
             error: "invalid_request",
@@ -264,29 +280,155 @@ describe("admin OAuth bridge", () => {
       { fetch: authFetch },
     );
 
-    const authorization = await app.request(
-      "http://127.0.0.1:8787/api/auth/admin/authorize",
-    );
+    const tenant = "https://clinic.savia-preview.hefesoft.com";
+    const authorize = new URL("http://127.0.0.1:8787/api/auth/admin/authorize");
+    if (bookings) {
+      authorize.searchParams.set("return_to", tenant);
+      authorize.searchParams.set("resume", "bookings");
+      authorize.searchParams.set(
+        "booking_query",
+        "tab=reservations&date=2026-11-25&ignored=1",
+      );
+    }
+    const authorization = await app.request(authorize.href);
     const state = new URL(
       authorization.headers.get("location") ?? "",
     ).searchParams.get("state");
-    const callback = await app.request(
-      "http://127.0.0.1:8787/api/auth/admin/callback",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code: "authorization-code", state }),
-      },
-    );
+    if (scenario === "timeout") vi.useFakeTimers();
+    let callback: Response;
+    try {
+      const pending = app.request(
+        "http://127.0.0.1:8787/api/auth/admin/callback",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code: "authorization-code", state }),
+        },
+      );
+      if (scenario === "timeout") {
+        await exchangeStarted;
+        await vi.advanceTimersByTimeAsync(10_000);
+      }
+      callback = await pending;
+    } finally {
+      if (scenario === "timeout") vi.useRealTimers();
+    }
 
-    expect(callback.status).toBe(401);
+    const unavailable = scenario !== "generic" && scenario !== "bookings";
+    expect(callback.status).toBe(unavailable ? 503 : 401);
     await expect(callback.json()).resolves.toEqual({
       error: {
-        code: "OAUTH_TOKEN_EXCHANGE_FAILED",
-        message:
-          "Better Auth rejected the authorization code (invalid_request)",
+        code: unavailable
+          ? "AUTHENTICATION_UNAVAILABLE"
+          : "OAUTH_TOKEN_EXCHANGE_FAILED",
+        message: unavailable
+          ? "Authentication service is temporarily unavailable"
+          : "Better Auth rejected the authorization code (invalid_request)",
       },
+      ...(bookings && {
+        returnOrigin: tenant,
+        returnRoute: "bookings",
+        returnBookingQuery: "tab=reservations&date=2026-11-25",
+      }),
     });
+  });
+
+  it.each([
+    [
+      "client lookup fails",
+      "/_internal/oauth/admin-client",
+      () => Promise.reject(new Error("provider offline")),
+    ],
+    [
+      "client metadata is not JSON",
+      "/_internal/oauth/admin-client",
+      () => new Response("{"),
+    ],
+    [
+      "client callback is malformed",
+      "/_internal/oauth/admin-client",
+      () => Response.json({ ...adminClient, redirectUri: "invalid" }),
+    ],
+    [
+      "client callback is not an HTTP URL",
+      "/_internal/oauth/admin-client",
+      () =>
+        Response.json({
+          ...adminClient,
+          redirectUri: "mailto:admin@example.test",
+        }),
+    ],
+    [
+      "authorization request fails",
+      "/api/auth/oauth2/authorize",
+      () => Promise.reject(new Error("provider offline")),
+    ],
+    [
+      "authorization destination is malformed",
+      "/api/auth/oauth2/authorize",
+      () => Response.json({ redirect: true, url: "https://[" }),
+    ],
+  ] as const)(
+    "returns a retryable authorization response when %s",
+    async (_name, failurePath, failure) => {
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          fetch: async (request) => {
+            const path = new URL(request.url).pathname;
+            if (path === failurePath) return failure();
+            if (path === "/_internal/oauth/admin-client")
+              return Response.json(adminClient);
+            return Response.json({ redirect: true, url: "/api/auth/login" });
+          },
+        },
+      );
+
+      const result = await app.request(
+        "http://127.0.0.1:8787/api/auth/admin/authorize",
+      );
+      expect(result.status).toBe(503);
+      expect(result.headers.get("cache-control")).toBe("no-store");
+      expect(result.headers.get("location")).toBeNull();
+      await expect(result.json()).resolves.toMatchObject({
+        error: { code: "AUTHENTICATION_UNAVAILABLE" },
+      });
+    },
+  );
+
+  it("times out a stalled admin-client lookup before creating a transaction", async () => {
+    const authFetch = vi.fn(() => new Promise<Response>(() => {}));
+    const app = createApp(
+      env.DB,
+      env.DOCUMENTS,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { fetch: authFetch },
+    );
+
+    vi.useFakeTimers();
+    try {
+      const pending = app.request(
+        "http://127.0.0.1:8787/api/auth/admin/authorize",
+      );
+      await vi.advanceTimersByTimeAsync(4_000);
+      const response = await pending;
+      expect(response.status).toBe(503);
+      expect(authFetch).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+    const transaction = await env.DB.prepare(
+      "SELECT state FROM admin_oauth_transactions LIMIT 1",
+    ).first();
+    expect(transaction).toBeNull();
   });
 
   it("permits CORS and scopes cookies for allowed tenant subdomains", async () => {
@@ -432,7 +574,7 @@ describe("admin OAuth bridge", () => {
     const tenantOrigin = "https://savia-team.savia-preview.hefesoft.com";
     const canonicalOrigin = "https://savia-preview.hefesoft.com";
 
-    function fixture() {
+    function fixture(callbackOrigin = canonicalOrigin) {
       let tokenNumber = 0;
       let nextRefreshResponse: (() => Response | Promise<Response>) | undefined;
       const authFetch = vi.fn(async (request: Request) => {
@@ -440,7 +582,7 @@ describe("admin OAuth bridge", () => {
         if (url.pathname === "/_internal/oauth/admin-client")
           return Response.json({
             ...adminClient,
-            redirectUri: `${canonicalOrigin}/auth/callback`,
+            redirectUri: `${callbackOrigin}/auth/callback`,
           });
         if (url.pathname === "/api/auth/oauth2/authorize")
           return Response.json({
@@ -490,11 +632,11 @@ describe("admin OAuth bridge", () => {
         const state = new URL(
           authorize.headers.get("location")!,
         ).searchParams.get("state");
-        return app.request(`${canonicalOrigin}/api/auth/admin/callback`, {
+        return app.request(`${callbackOrigin}/api/auth/admin/callback`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            origin: canonicalOrigin,
+            origin: callbackOrigin,
             cookie,
           },
           body: JSON.stringify({ code: "authorization-code", state }),
@@ -685,6 +827,44 @@ describe("admin OAuth bridge", () => {
       },
     );
 
+    it("returns validated booking filters from the initiating transaction", async () => {
+      const f = fixture();
+      const search = new URLSearchParams({
+        resume: "bookings",
+        return_to: tenantOrigin,
+        booking_query: "tab=reservations&date=2026-11-25&ignored=1",
+      });
+      const callback = await f.signIn(canonicalOrigin, "", `?${search}`);
+      expect(callback.status).toBe(200);
+      expect(await callback.json()).toMatchObject({
+        returnOrigin: tenantOrigin,
+        returnRoute: "bookings",
+        returnBookingQuery: "tab=reservations&date=2026-11-25",
+      });
+    });
+
+    it.each([canonicalOrigin, "http://127.0.0.1:5173"])(
+      "resumes bookings without a cross-origin return at %s",
+      async (origin) => {
+        const f = fixture(origin);
+        const search = new URLSearchParams({
+          resume: "bookings",
+          booking_query: "tab=availability&date=2026-11-25&ignored=1",
+        });
+        const callback = await f.signIn(origin, "", `?${search}`);
+        expect(callback.status).toBe(200);
+        const payload = await callback.json();
+        expect(payload).toMatchObject({
+          returnRoute: "bookings",
+          returnBookingQuery: "tab=availability&date=2026-11-25",
+        });
+        expect(payload).not.toHaveProperty("returnOrigin");
+        expect((await f.refresh(origin, f.cookieFrom(callback))).status).toBe(
+          200,
+        );
+      },
+    );
+
     it("does not let a stale return cookie change the session origin", async () => {
       const f = fixture();
       const callback = await f.signIn(
@@ -777,6 +957,56 @@ describe("admin OAuth bridge", () => {
         expect((await f.refresh(tenantOrigin, cookie)).status).toBe(200);
       },
     );
+
+    it("bounds a stalled refresh response body and keeps the session retryable", async () => {
+      const f = fixture();
+      const cookie = f.cookieFrom(await f.signIn(tenantOrigin));
+      let closeBody!: () => void;
+      const body = new ReadableStream({
+        start(controller) {
+          closeBody = () => controller.close();
+        },
+      });
+      let markProviderStarted!: () => void;
+      const providerStarted = new Promise<void>((resolve) => {
+        markProviderStarted = resolve;
+      });
+      f.respondToNextRefresh(() => {
+        markProviderStarted();
+        return new Response(body, {
+          headers: { "content-type": "application/json" },
+        });
+      });
+
+      let completed = false;
+      vi.useFakeTimers();
+      try {
+        const pending = f.refresh(tenantOrigin, cookie).then((response) => {
+          completed = true;
+          return response;
+        });
+        await providerStarted;
+        await vi.advanceTimersByTimeAsync(10_000);
+        const completedByDeadline = completed;
+        closeBody();
+        const failed = await pending;
+
+        expect(completedByDeadline).toBe(true);
+        expect(failed.status).toBe(503);
+        expect(failed.headers.get("set-cookie")).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+
+      f.respondToNextRefresh(() =>
+        Response.json({
+          access_token: "recovered-access",
+          refresh_token: "recovered-refresh",
+          token_type: "Bearer",
+        }),
+      );
+      expect((await f.refresh(tenantOrigin, cookie)).status).toBe(200);
+    });
 
     it.each([
       ["invalid_grant", 400],

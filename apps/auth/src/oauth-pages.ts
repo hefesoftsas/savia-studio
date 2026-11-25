@@ -438,26 +438,42 @@ const oauthUiScript = String.raw`(() => {
     return error;
   }
 
+  async function withAuthRequestTimeout(operation) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      return await operation(controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error("La solicitud tardó demasiado. Inténtalo de nuevo.");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function request(path, payload) {
     const body = { ...payload };
     if (oauthQuery) body.oauth_query = oauthQuery;
-    const response = await fetch("/api/auth/" + path, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify(body),
-    });
-    const text = await response.text();
-    let result = {};
-    if (text) {
-      try {
-        result = JSON.parse(text);
-      } catch {
-        throw new Error("El servidor devolvió una respuesta no válida.");
+    return withAuthRequestTimeout(async (signal) => {
+      const response = await fetch("/api/auth/" + path, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      });
+      const text = await response.text();
+      let result = {};
+      if (text) {
+        try {
+          result = JSON.parse(text);
+        } catch {
+          throw new Error("El servidor devolvió una respuesta no válida.");
+        }
       }
-    }
-    if (!response.ok) throw requestError(result, "No fue posible completar la solicitud.");
-    return result;
+      if (!response.ok) throw requestError(result, "No fue posible completar la solicitud.");
+      return result;
+    });
   }
 
   function restartExpiredAuthorization(error) {
@@ -531,28 +547,43 @@ const oauthUiScript = String.raw`(() => {
   }
 
   let tenantHomeCheckedEmail = "";
+  let tenantHomeLookup;
   let tenantHomeRedirecting = false;
+  let authenticationPending = false;
+
+  function beginAuthenticationAction() {
+    if (authenticationPending || redirecting) return false;
+    authenticationPending = true;
+    tenantHomeLookup = undefined;
+    return true;
+  }
   async function redirectToTenantHome(email, emailInput) {
     const normalized = validEmail(email);
-    if (!normalized || tenantHomeRedirecting) return;
+    if (!normalized || tenantHomeRedirecting || authenticationPending || redirecting) return;
     const queried = normalized.toLowerCase();
-    if (queried === tenantHomeCheckedEmail) return;
-    tenantHomeCheckedEmail = queried;
+    if (queried === tenantHomeCheckedEmail || tenantHomeLookup?.email === queried) return;
+    const lookup = { email: queried };
+    tenantHomeLookup = lookup;
     let result = null;
     try {
-      const response = await fetch("/api/auth/tenant-home?email=" + encodeURIComponent(normalized), { credentials: "same-origin", headers: { accept: "application/json" } });
-      if (!response.ok) return;
-      result = await response.json().catch(() => null);
+      result = await withAuthRequestTimeout(async (signal) => {
+        const response = await fetch("/api/auth/tenant-home?email=" + encodeURIComponent(normalized), { credentials: "same-origin", headers: { accept: "application/json" }, signal });
+        return response.ok ? response.json() : null;
+      });
+      if (tenantHomeLookup !== lookup) return;
     } catch {
       return;
+    } finally {
+      if (tenantHomeLookup === lookup) tenantHomeLookup = undefined;
     }
     // Ignore stale responses: another lookup may have started, or the user
     // may have edited the field while this request was in flight.
-    if (tenantHomeRedirecting) return;
+    if (tenantHomeRedirecting || authenticationPending || redirecting) return;
     const currentValue = emailInput ? validEmail(emailInput.value) : "";
     if (!currentValue || currentValue.toLowerCase() !== queried) return;
     const slug = result && result.found === true ? tenantSlugPattern(result.slug) : "";
     if (!slug) return;
+    tenantHomeCheckedEmail = queried;
     const hostname = window.location.hostname || "";
     const lowerHost = hostname.toLowerCase();
     if (lowerHost === slug || lowerHost.startsWith(slug + ".")) return;
@@ -599,12 +630,17 @@ const oauthUiScript = String.raw`(() => {
   let navigationTimer;
   function navigateTo(destination, replace = false) {
     redirecting = true;
+    const resume = document.querySelector("[data-oauth-resume]");
+    if (resume) resume.hidden = true;
     clearTimeout(navigationTimer);
     navigationTimer = setTimeout(() => {
       redirecting = false;
+      if (tenantHomeRedirecting) {
+        tenantHomeRedirecting = false;
+        tenantHomeCheckedEmail = "";
+      }
       const loading = document.querySelector("[data-oauth-loading]");
       const content = document.querySelector("[data-oauth-content]");
-      const resume = document.querySelector("[data-oauth-resume]");
       if (loading) loading.hidden = true;
       if (content) content.hidden = false;
       if (resume) {
@@ -661,7 +697,7 @@ const oauthUiScript = String.raw`(() => {
       form.hidden = true;
       if (twoFactor) twoFactor.hidden = false;
       setStatus("Ingresa tu segundo factor para continuar.");
-      return;
+      return twoFactor;
     }
     if (!redirectFromServer(result)) await continueAfterEnrollment();
   }
@@ -712,8 +748,10 @@ const oauthUiScript = String.raw`(() => {
         for (const button of socialLogin.querySelectorAll("[data-social-provider]")) {
           button.hidden = !providers.includes(button.dataset.socialProvider);
           button.addEventListener("click", async () => {
+            if (!beginAuthenticationAction()) return;
             const buttons = [...socialLogin.querySelectorAll("button")];
             buttons.forEach(item => item.disabled = true);
+            if (loginPanel) setSubmitting(loginPanel, true);
             setStatus("Conectando con tu proveedor de identidad…");
             try {
               const callback = new URL("/api/auth/sso-complete", window.location.origin);
@@ -722,7 +760,10 @@ const oauthUiScript = String.raw`(() => {
               if (!redirectFromServer(result)) throw new Error("No fue posible iniciar sesión con este proveedor.");
             } catch (error) {
               setStatus(error instanceof Error ? error.message : "No fue posible iniciar sesión.");
+            } finally {
+              authenticationPending = false;
               buttons.forEach(item => item.disabled = false);
+              if (loginPanel) setSubmitting(loginPanel, false);
             }
           });
         }
@@ -736,15 +777,27 @@ const oauthUiScript = String.raw`(() => {
       });
   }
 
+  const ssoChoices = document.querySelector("[data-sso-connections]");
+  document.querySelector("#sso-email")?.addEventListener("input", () => {
+    ssoChoices?.replaceChildren();
+    setStatus("");
+  });
+
   async function submitSSODiscovery(form) {
     if (!ssoEnabled) throw new Error("El acceso SSO no está disponible para esta organización.");
     const email = formValue(form, "email").trim();
     const domain = email.slice(email.lastIndexOf("@") + 1).toLowerCase();
-    const response = await fetch("/api/auth/savia-sso/connections?domain=" + encodeURIComponent(domain), {credentials:"same-origin"});
-    if (!response.ok) throw new Error("No fue posible consultar las conexiones de SSO.");
-    const result = await response.json();
-    const choices = document.querySelector("[data-sso-connections]");
-    if (choices) choices.replaceChildren();
+    ssoChoices?.replaceChildren();
+    const result = await withAuthRequestTimeout(async (signal) => {
+      const response = await fetch("/api/auth/savia-sso/connections?domain=" + encodeURIComponent(domain), {
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+        signal,
+      });
+      if (!response.ok) throw new Error("No fue posible consultar las conexiones de SSO.");
+      return response.json();
+    });
+    if (formValue(form, "email").trim() !== email) return;
     if (!result.connections?.length) throw new Error("No encontramos una conexión SSO para este correo. Consulta con tu administrador.");
     if (result.connections.length === 1) return startSSO(result.connections[0].providerId);
     for (const connection of result.connections) {
@@ -752,11 +805,23 @@ const oauthUiScript = String.raw`(() => {
       button.type = "button";
       button.textContent = connection.displayName;
       button.addEventListener("click", async () => {
-        button.disabled = true;
-        try { await startSSO(connection.providerId); }
-        catch (error) { setStatus(error instanceof Error ? error.message : "No fue posible iniciar SSO."); button.disabled = false; }
+        if (!beginAuthenticationAction()) return;
+        const buttons = ssoChoices?.querySelectorAll("button") ?? [];
+        buttons.forEach(item => item.disabled = true);
+        setSubmitting(form, true);
+        try {
+          await startSSO(connection.providerId);
+        } catch (error) {
+          if (!restartExpiredAuthorization(error)) {
+            setStatus(error instanceof Error ? error.message : "No fue posible iniciar SSO.");
+          }
+        } finally {
+          authenticationPending = false;
+          buttons.forEach(item => item.disabled = false);
+          setSubmitting(form, false);
+        }
       });
-      choices?.append(button);
+      ssoChoices?.append(button);
     }
     setStatus("Selecciona tu organización para continuar.");
   }
@@ -810,9 +875,18 @@ const oauthUiScript = String.raw`(() => {
     setStatus("Escanea el código QR y confirma el código de tu aplicación autenticadora.");
   }
 
-  async function submitEnrollmentVerification(form) {
-    await request("two-factor/verify-totp", { code: formValue(form, "code") });
-    await continueAfterEnrollment();
+  function showExistingAuthenticator(form) {
+    form.hidden = true;
+    enrollment.hidden = false;
+    const setup = enrollment.querySelector("[data-oauth-enrollment-setup]");
+    if (setup) setup.hidden = true;
+    const heading = document.querySelector("[data-oauth-enrollment-heading]");
+    if (heading) heading.textContent = "Verifica tu segundo factor";
+    const intro = document.querySelector("[data-oauth-enrollment-intro]");
+    if (intro) intro.textContent = "Ingresa el código de tu aplicación autenticadora para continuar.";
+    const submit = enrollment.querySelector("[data-oauth-enrollment-submit]");
+    if (submit) submit.textContent = "Verificar y continuar";
+    setStatus("Tu autenticador ya está configurado.");
   }
 
   function bindForms() {
@@ -822,6 +896,8 @@ const oauthUiScript = String.raw`(() => {
     for (const form of document.querySelectorAll("[data-oauth-form]")) {
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
+        if (!beginAuthenticationAction()) return;
+        let factorCodeScope;
         setSubmitting(form, true);
         try {
           switch (form.dataset.oauthForm) {
@@ -829,7 +905,7 @@ const oauthUiScript = String.raw`(() => {
               await submitSSODiscovery(form);
               break;
             case "sign-in":
-              await submitSignIn(form);
+              factorCodeScope = await submitSignIn(form);
               break;
             case "request-password-reset":
               await submitRecovery(form);
@@ -847,7 +923,7 @@ const oauthUiScript = String.raw`(() => {
               await submitEnrollment(form);
               break;
             case "verify-enrollment":
-              await submitEnrollmentVerification(form);
+              await submitSecondFactor(form, "two-factor/verify-totp");
               break;
             case "consent": {
               const result = await request("oauth2/consent", { accept: true });
@@ -857,17 +933,25 @@ const oauthUiScript = String.raw`(() => {
           }
         } catch (error) {
           if (!restartExpiredAuthorization(error)) {
-            if (error && error.code === "EMAIL_NOT_VERIFIED" && form.dataset.oauthForm === "sign-in") {
+            if (error && error.code === "TOTP_ALREADY_ENABLED" && form.dataset.oauthForm === "enable-totp" && enrollment) {
+              showExistingAuthenticator(form);
+              factorCodeScope = enrollment;
+            } else if (error && error.code === "EMAIL_NOT_VERIFIED" && form.dataset.oauthForm === "sign-in") {
               const verificationEmail = document.querySelector("#verification-email");
               if (verificationEmail) verificationEmail.value = formValue(form, "email");
               showAccountPanel("verify");
               setStatus("Verifica tu correo antes de iniciar sesión. Puedes solicitar un nuevo enlace aquí.");
             } else {
               setStatus(error instanceof Error ? error.message : "No fue posible completar la solicitud.");
+              if (["verify-totp", "verify-backup-code", "verify-enrollment"].includes(form.dataset.oauthForm)) {
+                factorCodeScope = form;
+              }
             }
           }
         } finally {
+          authenticationPending = false;
           setSubmitting(form, false);
+          factorCodeScope?.querySelector('input[name="code"]')?.focus();
         }
       });
     }
@@ -883,6 +967,7 @@ const oauthUiScript = String.raw`(() => {
     if (loginPanel) loginPanel.hidden = true;
     twoFactor.hidden = false;
     setStatus("Ingresa tu segundo factor para completar el acceso.");
+    twoFactor.querySelector('input[name="code"]')?.focus();
   }
 
   renderConsentDetails();

@@ -9,6 +9,7 @@ import { HTTPException } from "hono/http-exception";
 import { salesforceModule } from "./salesforce-workspace";
 import { zohoModule } from "./zoho-workspace";
 import { pipedriveModule } from "./pipedrive-workspace";
+import { salesforceMaxOffset } from "./workspace-pagination";
 
 export type RemoteProviderId = Exclude<CrmProviderId, "hubspot">;
 export type WorkspaceResource = "contacts" | "companies" | "deals";
@@ -134,6 +135,11 @@ function validateId(module: ProviderModule, id: string): void {
   if (!module.idPattern.test(id))
     throw new CrmUnavailableError("The CRM record identifier is invalid");
 }
+function readHasNextPage(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") throw new CrmUpstreamError();
+  return value;
+}
 function responseRecords(
   module: ProviderModule,
   body: Record<string, unknown>,
@@ -172,42 +178,47 @@ function responseRecords(
           (entry) => record(entry).item ?? entry,
         )
       : raw;
-  return values
-    .map((value) => record(value))
-    .filter((value) => {
-      const id = str(value.Id ?? value.id);
-      if (!id) throw new CrmUpstreamError();
-      value.id = id;
-      if (module.provider === "pipedrive") {
-        for (const field of ["email", "phone"]) {
-          const entries = array(value[field]);
-          if (field === "email")
-            value._crmEmailValues = entries
-              .map((entry) => str(record(entry).value))
-              .filter(Boolean);
-          if (entries.length)
-            value[field] =
-              str(
-                record(
-                  entries.find((entry) => record(entry).primary === true) ??
-                    entries[0],
-                ).value,
-              ) ?? "";
-        }
-        for (const field of ["org_id", "person_id", "owner_id", "stage_id"]) {
-          const reference = record(value[field]);
-          if (Object.keys(reference).length)
-            value[field] = str(reference.value ?? reference.id) ?? value[field];
-        }
+  return values.map((entry) => {
+    const value = record(entry);
+    const nativeId = value.Id ?? value.id;
+    const id = str(nativeId);
+    if (
+      !id ||
+      !module.idPattern.test(id) ||
+      (typeof nativeId === "number" && !Number.isSafeInteger(nativeId))
+    )
+      throw new CrmUpstreamError();
+    value.id = id;
+    if (module.provider === "pipedrive") {
+      for (const field of ["email", "phone"]) {
+        const entries = array(value[field]);
+        if (field === "email")
+          value._crmEmailValues = entries
+            .map((entry) => str(record(entry).value))
+            .filter(Boolean);
+        if (entries.length)
+          value[field] =
+            str(
+              record(
+                entries.find((entry) => record(entry).primary === true) ??
+                  entries[0],
+              ).value,
+            ) ?? "";
       }
-      if (module.provider === "zoho") {
-        for (const field of ["Account_Name", "Contact_Name", "Owner"]) {
-          const reference = record(value[field]);
-          if (str(reference.id)) value[field] = String(reference.id);
-        }
+      for (const field of ["org_id", "person_id", "owner_id", "stage_id"]) {
+        const reference = record(value[field]);
+        if (Object.keys(reference).length)
+          value[field] = str(reference.value ?? reference.id) ?? value[field];
       }
-      return true;
-    });
+    }
+    if (module.provider === "zoho") {
+      for (const field of ["Account_Name", "Contact_Name", "Owner"]) {
+        const reference = record(value[field]);
+        if (str(reference.id)) value[field] = String(reference.id);
+      }
+    }
+    return value;
+  });
 }
 async function call(
   nango: NangoClient,
@@ -618,7 +629,7 @@ export function createRemoteWorkspaceAdapter(
       let method: "GET" | "POST" = "GET";
       let body: unknown;
       if (provider === "salesforce") {
-        if ((page - 1) * perPage > 2000)
+        if ((page - 1) * perPage > salesforceMaxOffset)
           throw new CrmUnavailableError(
             "The requested page is beyond the CRM paging limit",
           );
@@ -663,8 +674,16 @@ export function createRemoteWorkspaceAdapter(
       if (!response.ok) throw upstreamError(response.status);
       if (response.status === 204) return { records: [], hasNextPage: false };
       const payload = record(await response.json().catch(() => undefined));
-      if (payload.success === false) throw new CrmUpstreamError();
       const fetched = responseRecords(module, payload);
+      const hasNextPage =
+        provider === "salesforce"
+          ? fetched.length > perPage
+          : provider === "zoho"
+            ? readHasNextPage(record(payload.info).more_records)
+            : readHasNextPage(
+                record(record(payload.additional_data).pagination)
+                  .more_items_in_collection,
+              );
       let records =
         provider === "salesforce" ? fetched.slice(0, perPage) : fetched;
       if (provider === "pipedrive" && options.q?.trim()) {
@@ -687,14 +706,6 @@ export function createRemoteWorkspaceAdapter(
         }
         records = hydrated;
       }
-      const info = record(payload.info);
-      const pagination = record(record(payload.additional_data).pagination);
-      const hasNextPage =
-        provider === "salesforce"
-          ? fetched.length > perPage
-          : provider === "zoho"
-            ? info.more_records === true
-            : pagination.more_items_in_collection === true;
       return { records, hasNextPage };
     },
     async get(connection, resource, id, fields) {
@@ -727,17 +738,25 @@ export function createRemoteWorkspaceAdapter(
         "GET",
         `${url.pathname}${url.search}`,
       );
+      if (payload.success === false) throw new CrmUpstreamError();
       const rows =
         provider === "zoho" ? array(payload.data) : [payload.data ?? payload];
+      if (rows.length !== 1) throw new CrmUpstreamError();
       const envelope =
         provider === "salesforce"
           ? { records: rows }
           : provider === "pipedrive"
             ? { success: true, data: rows }
             : { data: rows };
-      const entry = responseRecords(module, envelope)[0] ?? record(rows[0]);
-      if (!str(entry.Id ?? entry.id)) throw new CrmUpstreamError();
-      return { ...entry, id: String(entry.Id ?? entry.id) };
+      const [entry] = responseRecords(module, envelope);
+      const returnedId = String(entry.id);
+      // A Salesforce response may append the case-safe suffix to a short ID.
+      const sameSalesforceId =
+        provider === "salesforce" &&
+        returnedId.length !== id.length &&
+        returnedId.slice(0, 15) === id.slice(0, 15);
+      if (returnedId !== id && !sameSalesforceId) throw new CrmUpstreamError();
+      return entry;
     },
     async create(connection, resource, data) {
       requireProvider(connection);
@@ -898,7 +917,10 @@ export function createRemoteWorkspaceAdapter(
           );
           const fetched = responseRecords(module, payload);
           const info = record(payload.info);
-          return { records: fetched, hasNextPage: info.more_records === true };
+          return {
+            records: fetched,
+            hasNextPage: readHasNextPage(info.more_records),
+          };
         }
       }
       if (provider === "pipedrive") {
@@ -939,7 +961,7 @@ export function createRemoteWorkspaceAdapter(
           const pagination = record(record(payload.additional_data).pagination);
           return {
             records,
-            hasNextPage: pagination.more_items_in_collection === true,
+            hasNextPage: readHasNextPage(pagination.more_items_in_collection),
           };
         }
       }

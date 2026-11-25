@@ -170,8 +170,9 @@ function renderTemplate(
   maxLength: number,
 ): string {
   return template
-    .replace(/\{\s*(name|previous|current|deadline|hours)\s*\}/g, (_, key: string) =>
-      values[key] ?? "",
+    .replace(
+      /\{\s*(name|previous|current|deadline|hours)\s*\}/g,
+      (_, key: string) => values[key] ?? "",
     )
     .slice(0, maxLength);
 }
@@ -221,7 +222,11 @@ export function planMonitorCheck(args: {
           `status:${state.sequence}`,
           monitor.notifications.changedTitle,
           monitor.notifications.changedBody,
-          { name: text(record[monitor.titleField], 500), previous, current: remoteStatus },
+          {
+            name: text(record[monitor.titleField], 500),
+            previous,
+            current: remoteStatus,
+          },
         ),
       );
     }

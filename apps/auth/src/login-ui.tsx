@@ -655,8 +655,8 @@ function EnrollmentContent({ branding }: { branding?: TenantBranding }) {
     <Shell screen="enroll" branding={branding}>
       <div className="oauth-heading">
         <p className="oauth-kicker">Protección de cuenta</p>
-        <h1>Configura tu segundo factor</h1>
-        <p>
+        <h1 data-oauth-enrollment-heading>Configura tu segundo factor</h1>
+        <p data-oauth-enrollment-intro>
           Las cuentas administradoras deben activar MFA antes de autorizar una
           aplicación.
         </p>
@@ -682,20 +682,22 @@ function EnrollmentContent({ branding }: { branding?: TenantBranding }) {
         </Button>
       </form>
       <section className="oauth-enrollment" data-oauth-enrollment hidden>
-        <p>Escanea este código QR con tu aplicación autenticadora:</p>
-        <img
-          className="oauth-totp-qr"
-          data-oauth-totp-qr
-          alt="Código QR para configurar MFA en Savia"
-          hidden
-        />
-        <details className="oauth-manual-setup">
-          <summary>Configurar manualmente</summary>
-          <p>Agrega esta URI a tu aplicación autenticadora:</p>
-          <code data-oauth-totp-uri />
-        </details>
-        <p>Guarda estos códigos de recuperación en un lugar seguro:</p>
-        <ul data-oauth-backup-codes />
+        <div data-oauth-enrollment-setup>
+          <p>Escanea este código QR con tu aplicación autenticadora:</p>
+          <img
+            className="oauth-totp-qr"
+            data-oauth-totp-qr
+            alt="Código QR para configurar MFA en Savia"
+            hidden
+          />
+          <details className="oauth-manual-setup">
+            <summary>Configurar manualmente</summary>
+            <p>Agrega esta URI a tu aplicación autenticadora:</p>
+            <code data-oauth-totp-uri />
+          </details>
+          <p>Guarda estos códigos de recuperación en un lugar seguro:</p>
+          <ul data-oauth-backup-codes />
+        </div>
         <form
           className="oauth-form"
           action="verify-enrollment"
@@ -712,7 +714,12 @@ function EnrollmentContent({ branding }: { branding?: TenantBranding }) {
               required
             />
           </div>
-          <Button className="oauth-submit" type="submit" size="lg">
+          <Button
+            className="oauth-submit"
+            type="submit"
+            size="lg"
+            data-oauth-enrollment-submit
+          >
             Activar MFA y continuar
           </Button>
         </form>

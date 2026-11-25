@@ -9,13 +9,15 @@ const email =
 const password = process.env.BETTER_AUTH_BOOTSTRAP_PASSWORD ?? "TestUser321!";
 
 function cookie(response, name) {
-  const cookies = response.headers.getSetCookie?.() ?? [];
-  const candidate =
-    cookies.find((entry) => entry.startsWith(`${name}=`)) ??
-    response.headers.get("set-cookie");
-  return candidate?.startsWith(`${name}=`)
-    ? candidate.split(";", 1)[0]
-    : undefined;
+  return response.headers
+    .getSetCookie()
+    .map((entry) => entry.split(";", 1)[0])
+    .find((pair) => {
+      const separator = pair.indexOf("=");
+      if (separator < 0 || separator === pair.length - 1) return false;
+      const cookieName = pair.slice(0, separator);
+      return cookieName === name || cookieName === `__Secure-${name}`;
+    });
 }
 
 function requiredCookie(response, name, message) {
@@ -45,7 +47,7 @@ if (isMfaChallenge) {
   );
   const challengeCookie = requiredCookie(
     signIn,
-    "savia_two_factor",
+    "savia.two_factor",
     "Better Auth did not set an MFA challenge cookie",
   );
   const code = process.env.TOTP_CODE;

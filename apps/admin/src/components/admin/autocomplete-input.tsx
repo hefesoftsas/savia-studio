@@ -222,17 +222,20 @@ export const AutocompleteInput = (
             />
           </FormLabel>
         )}
-        <FormControl>
-          <Popover open={open} onOpenChange={handleOpenChange} modal={modal}>
+        <Popover open={open} onOpenChange={handleOpenChange} modal={modal}>
+          <FormControl>
             <PopoverTrigger asChild>
               <Button
+                ref={field.ref}
                 variant="outline"
                 role="combobox"
                 aria-expanded={open}
                 aria-labelledby={uniqueId}
-                aria-describedby={
-                  selectedChoice ? `${uniqueId}-value` : undefined
-                }
+                {...(selectedChoice
+                  ? {
+                      "aria-describedby": `${id}-description ${id}-message ${uniqueId}-value`,
+                    }
+                  : {})}
                 className="w-full justify-between h-auto py-1.75 font-normal"
               >
                 {selectedChoice ? (
@@ -245,78 +248,78 @@ export const AutocompleteInput = (
                 <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
               </Button>
             </PopoverTrigger>
-            <PopoverContent
-              className={cn(
-                "w-full max-w-(--radix-popover-trigger-width) p-0",
-                props.popoverClassName,
-              )}
-            >
-              {/* We handle the filtering ourselves */}
-              <Command shouldFilter={!isFromReference}>
-                <CommandInput
-                  placeholder={ui("Search...")}
-                  value={filterValue}
-                  onValueChange={(filter) => {
-                    setFilterValue(filter);
-                    requestAnimationFrame(() => {
-                      listRef.current?.scrollTo(0, 0);
-                    });
-                    // We don't want the ChoicesContext to filter the choices if the input
-                    // is not from a reference as it would also filter out the selected values
-                    if (isFromReference) {
-                      setFilters(filterToQuery(filter));
-                    }
-                  }}
-                />
-                <CommandList ref={listRef}>
-                  <CommandEmpty>{t("No matching item found.")}</CommandEmpty>
-                  <CommandGroup>
-                    {finalChoices.map((choice) => {
-                      const isCreateItem =
-                        !!createItem && choice?.id === createItem.id;
-                      const disabled = getOptionDisabled(choice);
+          </FormControl>
+          <PopoverContent
+            className={cn(
+              "w-full max-w-(--radix-popover-trigger-width) p-0",
+              props.popoverClassName,
+            )}
+          >
+            {/* We handle the filtering ourselves */}
+            <Command shouldFilter={!isFromReference}>
+              <CommandInput
+                placeholder={ui("Search...")}
+                value={filterValue}
+                onValueChange={(filter) => {
+                  setFilterValue(filter);
+                  requestAnimationFrame(() => {
+                    listRef.current?.scrollTo(0, 0);
+                  });
+                  // We don't want the ChoicesContext to filter the choices if the input
+                  // is not from a reference as it would also filter out the selected values
+                  if (isFromReference) {
+                    setFilters(filterToQuery(filter));
+                  }
+                }}
+              />
+              <CommandList ref={listRef}>
+                <CommandEmpty>{t("No matching item found.")}</CommandEmpty>
+                <CommandGroup>
+                  {finalChoices.map((choice) => {
+                    const isCreateItem =
+                      !!createItem && choice?.id === createItem.id;
+                    const disabled = getOptionDisabled(choice);
 
-                      const choiceText = getChoiceText(
-                        isCreateItem ? createItem : choice,
-                      );
+                    const choiceText = getChoiceText(
+                      isCreateItem ? createItem : choice,
+                    );
 
-                      return (
-                        <CommandItem
-                          key={getChoiceValue(choice)}
-                          keywords={
-                            isCreateItem || React.isValidElement(choiceText)
-                              ? undefined
-                              : [choiceText]
-                          }
-                          value={
-                            isCreateItem
-                              ? // if it's the create option, include the filter value so it is shown in the command input
-                                // characters before and after the filter value are required
-                                // to show the option when the filter value starts or ends with a space
-                                `?${filterValue}?`
-                              : getChoiceValue(choice)
-                          }
-                          onSelect={() => handleChangeWithCreateSupport(choice)}
-                          disabled={disabled}
-                        >
-                          <Check
-                            className={cn(
-                              "mr-2 h-4 w-4",
-                              field.value === getChoiceValue(choice)
-                                ? "opacity-100"
-                                : "opacity-0",
-                            )}
-                          />
-                          {choiceText}
-                        </CommandItem>
-                      );
-                    })}
-                  </CommandGroup>
-                </CommandList>
-              </Command>
-            </PopoverContent>
-          </Popover>
-        </FormControl>
+                    return (
+                      <CommandItem
+                        key={getChoiceValue(choice)}
+                        keywords={
+                          isCreateItem || React.isValidElement(choiceText)
+                            ? undefined
+                            : [choiceText]
+                        }
+                        value={
+                          isCreateItem
+                            ? // if it's the create option, include the filter value so it is shown in the command input
+                              // characters before and after the filter value are required
+                              // to show the option when the filter value starts or ends with a space
+                              `?${filterValue}?`
+                            : getChoiceValue(choice)
+                        }
+                        onSelect={() => handleChangeWithCreateSupport(choice)}
+                        disabled={disabled}
+                      >
+                        <Check
+                          className={cn(
+                            "mr-2 h-4 w-4",
+                            field.value === getChoiceValue(choice)
+                              ? "opacity-100"
+                              : "opacity-0",
+                          )}
+                        />
+                        {choiceText}
+                      </CommandItem>
+                    );
+                  })}
+                </CommandGroup>
+              </CommandList>
+            </Command>
+          </PopoverContent>
+        </Popover>
         <InputHelperText helperText={props.helperText} />
         <FormError />
       </FormField>

@@ -191,18 +191,20 @@ export function createIdentityUserDataProvider(
 
     async create(_resource: string, params: CreateParams) {
       const data = params.data as UserFormData;
+      const platformAdmin = Boolean(data.platformAdmin);
+      const membership = platformAdmin ? undefined : membershipFrom(data);
       const user = await client.provision({
         email: data.email ?? "",
         firstName: data.firstName ?? "",
         lastName: data.lastName ?? "",
-        platformAdmin: Boolean(data.platformAdmin),
+        platformAdmin,
         ...(data.emailVerified === undefined
           ? {}
           : { emailVerified: data.emailVerified }),
         ...(data.temporaryPassword
           ? { temporaryPassword: data.temporaryPassword }
           : {}),
-        membership: membershipFrom(data),
+        ...(membership ? { membership } : {}),
         ...(data.accessRoleIds?.length
           ? { accessRoleIds: data.accessRoleIds }
           : {}),

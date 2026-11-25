@@ -355,10 +355,16 @@ export const pagesMessages = {
   View: ["Vista guardada", "Saved view", "Visualização salva"],
   "All records": ["Todos los registros", "All records", "Todos os registros"],
   "Open collection": ["Abrir colección", "Open collection", "Abrir coleção"],
+  "No group": ["Sin grupo", "No group", "Sem grupo"],
   "No records": [
     "No hay registros en esta vista.",
     "No records in this view.",
     "Nenhum registro nesta visualização.",
+  ],
+  "No displayable columns": [
+    "Esta vista no tiene columnas visibles. Abre un registro para ver sus detalles.",
+    "This view has no visible columns. Open a record to see its details.",
+    "Esta visualização não tem colunas visíveis. Abra um registro para ver os detalhes.",
   ],
   Previous: ["Anterior", "Previous", "Anterior"],
   Next: ["Siguiente", "Next", "Próximo"],

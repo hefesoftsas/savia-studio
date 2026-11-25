@@ -1,11 +1,13 @@
 import { useId } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, Building2, CalendarDays } from "lucide-react";
+import { useLocation } from "react-router-dom";
 import {
   buildTenantOrigin,
   KNOWN_CANONICAL_HOSTS,
   normalizeTenantSlug,
 } from "@savia/tenant-host";
+import { normalizeBookingRouteQuery } from "@savia/tenant-host/bookings-route";
 import type { ApiClient } from "@/api/api-client";
 import type { paths } from "@/api/generated/openapi";
 import { useSessionGeneration } from "@/auth/session-scope";
@@ -27,6 +29,11 @@ export function BookingWorkspacePicker({
   const t = useMessages(bookingMessages);
   const headingId = useId();
   const sessionGeneration = useSessionGeneration();
+  const { search } = useLocation();
+  const bookingQuery = normalizeBookingRouteQuery(search);
+  const bookingPath = bookingQuery
+    ? `/#/bookings?${bookingQuery}`
+    : "/#/bookings";
   const canOpenWorkspace = KNOWN_CANONICAL_HOSTS.includes(hostname);
   const tenants = useQuery({
     queryKey: readKey(
@@ -48,7 +55,7 @@ export function BookingWorkspacePicker({
           id: tenant.id,
           name: tenant.name,
           host: new URL(origin).hostname,
-          href: `${origin}/#/bookings`,
+          href: `${origin}${bookingPath}`,
         },
       ];
     }) ?? [];

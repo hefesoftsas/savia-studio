@@ -141,6 +141,8 @@ export type StudioObject = {
   };
   count?: number;
   version?: number;
+  /** Exportable fields for the current principal. An empty list denies CSV. */
+  exportFields?: string[];
 };
 export type StudioRecord = {
   id: string;

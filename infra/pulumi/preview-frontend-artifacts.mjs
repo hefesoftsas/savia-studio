@@ -96,7 +96,12 @@ async function buildIdentity({
       tree,
       nodeVersion: process.version,
       pnpmVersion,
-      buildEnvironmentSha256: sha256(JSON.stringify(buildEnvironment)),
+      buildEnvironmentSha256: sha256(
+        JSON.stringify({
+          values: buildEnvironment,
+          flowsFrontendEnabled: env.SAVIA_CI_FLOWS_ENABLED !== "false",
+        }),
+      ),
     },
   };
 }

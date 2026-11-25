@@ -1,4 +1,9 @@
 import { resolveFieldLabel } from "@savia/studio-shared/field-labels";
+import {
+  CRM_INTEGRATION_COLUMN_KEY,
+  hasCrmIntegrationColumn,
+  orderRecordTableColumns as orderColumns,
+} from "@savia/studio-shared/record-table-columns";
 import { intlLocale, useAppLocale } from "@/i18n/core";
 import { useMessages } from "@/i18n/core";
 import { recordsMessages } from "@/i18n/locales/records";
@@ -52,6 +57,8 @@ import {
   X,
 } from "lucide-react";
 import { api, downloadCrm } from "./api";
+import { formatRetryTime } from "@/api/retry-after";
+import { recordPath } from "./record-path";
 import { getListObjectsQueryKey } from "./generated/studio";
 import { getStudioRuntime } from "./runtime";
 import {
@@ -90,21 +97,8 @@ type TablePreferences = Pick<
 >;
 type ConfigTab = "table" | "form";
 type SavedView = { id: string; name: string; config: Partial<Settings> };
-export const CRM_INTEGRATION_COLUMN_KEY = "__crm_integration";
 const CRM_INTEGRATION_COLUMN_LABEL = "CRM";
 const EMPTY_RECORDS: StudioRecord[] = [];
-function hasCrmIntegrationColumn(object: StudioObject) {
-  const collection = object.config.studio?.collection;
-  return (
-    collection?.kind === "crm" ||
-    (collection?.sourceId !== undefined &&
-      ["hubspot", "salesforce", "zoho", "pipedrive"].includes(
-        collection.sourceId,
-      )) ||
-    object.name.toLowerCase().includes("hubspot") ||
-    object.config.studio?.business === "managed-customer"
-  );
-}
 function recordLabel(record: StudioRecord) {
   for (const key of ["name", "displayName", "title", "subject"]) {
     const value = record[key];
@@ -286,13 +280,6 @@ function params(s: Settings, trash = false) {
     trash: String(trash),
   };
 }
-function orderColumns(order: string[], available: string[]) {
-  const availableSet = new Set(available);
-  return [
-    ...order.filter((key) => availableSet.has(key)),
-    ...available.filter((key) => !order.includes(key)),
-  ];
-}
 function moveColumn(order: string[], source: string, target: string) {
   if (source === target) return order;
   const next = order.filter((key) => key !== source);
@@ -461,6 +448,8 @@ export default function Records({
     ),
     [savingFormColumns, setSavingFormColumns] = useState(false);
   const appliedDefaultFor = useRef<string | null>(null);
+  const [exportingCsv, setExportingCsv] = useState(false);
+  const exportInProgress = useRef(false);
   const client = useQueryClient(),
     pipeline = getPipeline(object);
   const views = useQuery({
@@ -525,6 +514,7 @@ export default function Records({
     }
   };
   const querySearch = useDebouncedSearch(s.q);
+  const csvSearchPending = capabilities.search !== false && s.q !== querySearch;
   const querySettings = { ...s, q: querySearch };
   const summary = useQuery({
     queryKey: [
@@ -579,7 +569,13 @@ export default function Records({
   const visibleColumnCount = s.columns.filter((key) =>
     availableColumnKeys.includes(key),
   ).length;
-  const canExportCsv = collectionCapabilities(object).list;
+  const source = object.config.studio?.collection;
+  const canExportCsv =
+    capabilities.list &&
+    object.exportFields?.length !== 0 &&
+    (!source ||
+      source.kind === "domain" ||
+      (source.kind === "crm" && source.sourceId === "hubspot"));
   const currentTablePreferences = tablePreferences(s);
   const tablePreferencesDirty = !hasSameTablePreferences(
     currentTablePreferences,
@@ -602,8 +598,11 @@ export default function Records({
     if (target) reorderColumn(key, target);
   };
   const exportCsv = async () => {
+    if (exportInProgress.current || csvSearchPending) return;
     const exportableColumnKeys = visibleColumnKeys.filter(
-      (key) => key !== CRM_INTEGRATION_COLUMN_KEY,
+      (key) =>
+        key !== CRM_INTEGRATION_COLUMN_KEY &&
+        (object.exportFields?.includes(key) ?? true),
     );
     if (!exportableColumnKeys.length) {
       toast.error(t("Muestra al menos una columna antes de exportar."));
@@ -612,22 +611,50 @@ export default function Records({
     const query = new URLSearchParams({
       columns: JSON.stringify(exportableColumnKeys),
       headers: JSON.stringify(exportableColumnKeys.map(columnLabel)),
-      filters: JSON.stringify(s.filters),
-      sort: s.sort.field,
-      order: s.sort.order,
-      q: s.q,
       trash: String(trash),
-      ...(s.searchField ? { searchField: s.searchField } : {}),
-      ...(s.stage ? { stage: s.stage } : {}),
+      ...(capabilities.filter === false
+        ? {}
+        : {
+            filters: JSON.stringify(s.filters),
+            ...(s.stage ? { stage: s.stage } : {}),
+          }),
+      ...(capabilities.sort === false
+        ? {}
+        : { sort: s.sort.field, order: s.sort.order }),
+      ...(capabilities.search === false
+        ? {}
+        : {
+            q: querySearch,
+            ...(s.searchField &&
+            object.config.studio?.collection?.kind !== "crm"
+              ? { searchField: s.searchField }
+              : {}),
+          }),
     });
+    exportInProgress.current = true;
+    setExportingCsv(true);
     try {
       await downloadCrm(
         `/api/export/${encodeURIComponent(object.name)}?${query}`,
         recordsCsvFilename(object.name),
+        "text/csv",
       );
       toast.success(t("CSV descargado"));
     } catch (error) {
-      toast.error((error as Error).message);
+      const retryTime = formatRetryTime(error, uiLocale);
+      toast.error(
+        (error as Error).message,
+        retryTime
+          ? {
+              description: t("Puedes reintentar a partir de %{p0}.", {
+                p0: retryTime,
+              }),
+            }
+          : undefined,
+      );
+    } finally {
+      exportInProgress.current = false;
+      setExportingCsv(false);
     }
   };
   const saveTablePreferences = async () => {
@@ -772,6 +799,8 @@ export default function Records({
             filters={s.filters}
             onFiltersChange={(filters) => patch({ filters })}
             canExportCsv={canExportCsv}
+            csvSearchPending={csvSearchPending}
+            exportingCsv={exportingCsv}
             onExportCsv={() => void exportCsv()}
             trash={trash}
             onTrashToggle={() => {
@@ -1935,13 +1964,13 @@ function RecordRowAction({
     setBusy(true);
     try {
       if (pending === "restore") {
-        await api(`/records/${object.name}/${record.id}/restore`, "POST", {
+        await api(`${recordPath(object.name, record.id)}/restore`, "POST", {
           version: record._version,
         });
         toast.success(t("Registro restaurado"));
       } else {
         await api(
-          `/records/${object.name}/${record.id}?version=${record._version}`,
+          `${recordPath(object.name, record.id)}?version=${record._version}`,
           "DELETE",
         );
         toast.success(
@@ -2046,6 +2075,7 @@ function RecordsFooter({
   total: number | undefined;
 }) {
   const t = useMessages(recordsMessages);
+  const { meta } = useListContext();
 
   return (
     <div className="list-footer">
@@ -2054,7 +2084,11 @@ function RecordsFooter({
           ? t("%{p0} registros en esta página", { p0: dataLength })
           : t("%{p0} registros", { p0: total })}
       </span>
+      {meta?.pageLimitReached === true && (
+        <span>{t("Quedan más registros en el sistema de origen.")}</span>
+      )}
       <ListPagination
+        maxPage={meta?.maxPage}
         rowsPerPageOptions={
           object.config.studio?.collection
             ? [10, 25, 50, 100]
@@ -2118,7 +2152,7 @@ export function PipelineColumn({
   );
   async function move(record: StudioRecord, next: string) {
     try {
-      await api(`/records/${object.name}/${record.id}`, "PATCH", {
+      await api(recordPath(object.name, record.id), "PATCH", {
         [pipeline.field]: next || null,
         _version: record._version,
       });

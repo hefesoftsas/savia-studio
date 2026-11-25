@@ -36,6 +36,10 @@ worker is no longer part of the scheduler.
 - `GET /api/notifications?filter=all|unread|pending&cursor&limit` (default 30,
   max 100), opaque `(createdAt,id)` cursors, `GET /count`, read/archive/read-all
   (bulk reads are idempotent, capped at 100 with resumable cursors).
+- **Mark all as read** follows every cursor and covers account notices and
+  notices from the current workspace.
+- You can mark individual account or workspace notices as read or archive them
+  from the same inbox.
 - Actions resolve only assigned workflow tasks and administrator
   acknowledgements; security notices return navigation, never completion.
 - UI: bell with 30s polling in the header, `/notifications` route with

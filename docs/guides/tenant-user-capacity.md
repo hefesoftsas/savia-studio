@@ -22,7 +22,14 @@ tenant within its configured capacity. Reducing the limit does not suspend
 existing users; admissions remain blocked until capacity becomes available or
 the platform administrator raises or clears the limit.
 
-The API checks capacity before account provisioning. Database triggers provide
+The API checks that the destination tenant is active and has capacity before
+account provisioning, including when a platform administrator creates the user.
+The provisioning form requires an active commercial tenant for regular users.
+When creating a platform administrator, the form hides commercial membership
+fields and does not submit that membership. Switching back restores the tenant
+selection. When capacity changes before submission, the error stays visible in
+the form with the entered data.
+Database triggers provide
 the final atomic check, including concurrent requests for the last available
 seat. SQLite/D1 and native PostgreSQL implement the same policy. Rejected
 admissions return HTTP 409 with `TENANT_ACTIVE_USER_LIMIT_REACHED`.

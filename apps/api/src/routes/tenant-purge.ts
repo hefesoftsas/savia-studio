@@ -1,5 +1,4 @@
 import { dialectFor } from "@savia/db/dialect";
-import { HTTPException } from "hono/http-exception";
 import {
   prepareForeignKeys,
   tableNames,
@@ -14,9 +13,14 @@ type Table = {
 };
 
 const METADATA_BATCH_SIZE = 50;
+export class TenantFileCleanupError extends Error {}
 
 /** Schema-derived cleanup covers optional packages without assuming a business domain. */
-export async function tenantPurgePlan(db: D1Database, id: number) {
+export async function tenantPurgePlan(
+  db: D1Database,
+  id: number,
+  companionKeys: readonly string[] = [],
+) {
   if (!Number.isSafeInteger(id) || id < 0) throw new Error("Invalid tenant ID");
   const dialect = dialectFor(db);
   const quote = (name: string) => dialect.quoteIdentifier(name);
@@ -155,7 +159,7 @@ export async function tenantPurgePlan(db: D1Database, id: number) {
     .map((table) =>
       db.prepare(`DELETE FROM ${quote(table.name)} WHERE ${table.predicate}`),
     );
-  const keys = new Set<string>();
+  const keys = new Set(companionKeys);
   for (const table of data) {
     for (const column of table.columns.filter((column) =>
       ["storage_key", "object_key", "r2_key"].includes(column),
@@ -202,38 +206,28 @@ export async function tenantPurgePlan(db: D1Database, id: number) {
   };
 }
 
-export async function deleteTenantFiles(
-  bucket: R2Bucket | undefined,
-  keys: string[],
-) {
+export async function deleteTenantFiles(bucket: R2Bucket, keys: string[]) {
   if (!keys.length) return;
-  if (!bucket)
-    throw new HTTPException(503, {
-      message: "File cleanup unavailable. Retry tenant deletion.",
-    });
   try {
     for (let offset = 0; offset < keys.length; offset += 1000)
       await bucket.delete(keys.slice(offset, offset + 1000));
-  } catch {
-    throw new HTTPException(503, {
-      message: "File cleanup failed. Retry tenant deletion.",
-    });
+  } catch (cause) {
+    throw new TenantFileCleanupError(
+      "File cleanup failed. Retry tenant deletion.",
+      {
+        cause,
+      },
+    );
   }
 }
 
 /** Companion stores tenant ownership on R2 objects instead of in SQL. */
-export async function tenantCompanionKeys(
-  bucket: R2Bucket | undefined,
-  id: number,
-) {
-  if (!bucket)
-    throw new HTTPException(503, {
-      message: "Companion cleanup unavailable. Retry tenant deletion.",
-    });
+export async function tenantCompanionKeys(bucket: R2Bucket, id: number) {
   const keys = new Set<string>();
+  const seenCursors = new Set<string>();
   let cursor: string | undefined;
   try {
-    do {
+    while (true) {
       const page = await bucket.list({
         prefix: "companion/",
         cursor,
@@ -248,12 +242,21 @@ export async function tenantCompanionKeys(
         )
           keys.add(object.key.replace(/\.ogg$/, ".notes.json"));
       }
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
-  } catch {
-    throw new HTTPException(503, {
-      message: "Companion cleanup unavailable. Retry tenant deletion.",
-    });
+      if (!page.truncated) break;
+      if (!page.cursor || seenCursors.has(page.cursor))
+        throw new Error(
+          "Companion listing returned an invalid continuation cursor",
+        );
+      seenCursors.add(page.cursor);
+      cursor = page.cursor;
+    }
+  } catch (cause) {
+    throw new TenantFileCleanupError(
+      "Companion file listing failed. Retry tenant deletion.",
+      {
+        cause,
+      },
+    );
   }
   return [...keys];
 }

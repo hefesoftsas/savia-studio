@@ -131,6 +131,10 @@ export type AuthDependencies = AccountEmailDependencies & {
 
 const schemaInitializations = new WeakMap<object, Promise<void>>();
 const noticeSchemaInitialized = new WeakSet<object>();
+const managedPasswordResetDelivery = new WeakMap<
+  Request,
+  { sent?: Promise<boolean> }
+>();
 type AuthBootstrap = {
   scalarClient: ScalarOAuthClient;
   adminClient: AdminOAuthClient;
@@ -412,14 +416,22 @@ export function createBetterAuth(
       requireEmailVerification: true,
       resetPasswordTokenExpiresIn: 900,
       revokeSessionsOnPasswordReset: true,
-      sendResetPassword: async ({ user, url }) =>
-        deliverAccountEmail(
+      sendResetPassword: ({ user, url }, request) => {
+        const delivery = deliverAccountEmail(
           passwordResetEmail(url, user.email),
           typeof (user as typeof user & { emailTenantId?: number })
             .emailTenantId === "number"
             ? (user as typeof user & { emailTenantId?: number }).emailTenantId
             : undefined,
-        ),
+        );
+        const managed = request && managedPasswordResetDelivery.get(request);
+        if (managed)
+          managed.sent = delivery.then(
+            () => true,
+            () => false,
+          );
+        return delivery;
+      },
     },
     plugins: [
       ...chatgptOAuthPlugins(environment),
@@ -830,12 +842,15 @@ async function createUser(
           ),
         },
       });
-    } catch (error) {
+    } catch {
       const adapter = (await auth.$context).internalAdapter;
       await adapter.deleteUserSessions(userDocument(created).id);
       await adapter.deleteAccounts(userDocument(created).id);
       await adapter.deleteUser(userDocument(created).id);
-      throw error;
+      return Response.json(
+        { error: { code: "VERIFICATION_EMAIL_UNAVAILABLE" } },
+        { status: 503 },
+      );
     }
   }
   return Response.json({ user: userDocument(created) }, { status: 201 });
@@ -973,7 +988,7 @@ async function revokeUserSessions(
 async function sendPasswordReset(
   auth: ReturnType<typeof createBetterAuth>,
   environment: AuthWorkerEnvironment,
-  _request: Request,
+  request: Request,
   userId: string,
 ): Promise<Response> {
   const user = await (await auth.$context).internalAdapter.findUserById(userId);
@@ -983,17 +998,28 @@ async function sendPasswordReset(
     "/auth/reset-password",
     environment.SAVIA_ADMIN_REDIRECT_URI ?? environment.BETTER_AUTH_URL,
   ).toString();
+  // Better Auth keeps public recovery generic even when its sender rejects.
+  const delivery: { sent?: Promise<boolean> } = {};
+  managedPasswordResetDelivery.set(request, delivery);
   try {
     const response = await auth.api.requestPasswordReset({
+      request,
       body: { email: account.email, redirectTo },
       asResponse: true,
     });
     if (!response.ok) return response;
+    if (!(await delivery.sent))
+      return Response.json(
+        { error: { code: "PASSWORD_RESET_EMAIL_UNAVAILABLE" } },
+        { status: 503 },
+      );
     return new Response(null, { status: 204 });
   } catch (error) {
     if (isAPIError(error))
       return Response.json(error.body, { status: error.statusCode });
     throw error;
+  } finally {
+    managedPasswordResetDelivery.delete(request);
   }
 }
 

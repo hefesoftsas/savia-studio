@@ -10,6 +10,7 @@ export function useRealtimeRefresh({
   tenantId,
   enabled = true,
   blocked = false,
+  refreshScope,
   refreshOnInitialConnect = false,
   refresh,
   accepts,
@@ -18,6 +19,8 @@ export function useRealtimeRefresh({
   tenantId?: number;
   enabled?: boolean;
   blocked?: boolean;
+  /** Discard queued refreshes and notices when the displayed data changes within a room. */
+  refreshScope?: string;
   /** Catch up cache-first opening reads without refreshing every global listener. */
   refreshOnInitialConnect?: boolean;
   refresh: () => void | Promise<unknown>;
@@ -32,7 +35,7 @@ export function useRealtimeRefresh({
   const connected = useRef(false);
   const inFlight = useRef<{
     generation: number;
-    promise: Promise<void>;
+    promise: Promise<boolean>;
   } | null>(null);
   const followUp = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -44,7 +47,7 @@ export function useRealtimeRefresh({
       generation.current++;
       clearTimeout(timer.current);
     };
-  }, [scope]);
+  }, [scope, refreshScope]);
   const reload = useCallback(async function reload() {
     clearTimeout(timer.current);
     const token = generation.current;
@@ -52,14 +55,17 @@ export function useRealtimeRefresh({
       followUp.current = token;
       return inFlight.current.promise;
     }
-    const task = { generation: token, promise: Promise.resolve() };
+    const task = { generation: token, promise: Promise.resolve(false) };
     inFlight.current = task;
     task.promise = (async () => {
       try {
         await latest.current.refresh();
-        if (token === generation.current) setChanged(false);
+        if (token !== generation.current) return false;
+        setChanged(false);
+        return true;
       } catch {
         if (token === generation.current) setChanged(true);
+        return false;
       } finally {
         if (inFlight.current === task) inFlight.current = null;
         if (followUp.current === token && token === generation.current) {
@@ -113,11 +119,15 @@ export function useRealtimeRefresh({
 export function RemoteChangesNotice({
   changed,
   reload,
+  disabled = false,
 }: {
   changed: boolean;
   reload: () => void | Promise<unknown>;
+  disabled?: boolean;
 }) {
   const t = useMessages(accessMessages);
+  const [reloading, setReloading] = useState(false);
+  const reloadingRef = useRef(false);
   if (!changed) return null;
   return (
     <div
@@ -131,9 +141,21 @@ export function RemoteChangesNotice({
         type="button"
         variant="outline"
         size="sm"
-        onClick={() => void reload()}
+        disabled={disabled || reloading}
+        aria-busy={reloading}
+        onClick={async () => {
+          if (disabled || reloadingRef.current) return;
+          reloadingRef.current = true;
+          setReloading(true);
+          try {
+            await reload();
+          } finally {
+            reloadingRef.current = false;
+            setReloading(false);
+          }
+        }}
       >
-        {t("Reload and discard draft")}
+        {t(reloading ? "Reloading…" : "Reload and discard draft")}
       </Button>
     </div>
   );

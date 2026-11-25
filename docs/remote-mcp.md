@@ -155,12 +155,21 @@ a new MCP deployment or a tool per collection. The retired customer-profile
 sync-status tool is no longer exposed; generic CRM connections and workspace
 operations remain available.
 
-HubSpot discovery lists collection schemas with an unknown record count. Use
+Discovery lists connected collections and request-backed screens with an
+unknown record count. Use
 `savia_list_studio_records` to read live HubSpot records and
 `savia_aggregate_studio_records` for live totals and breakdowns. HubSpot
-aggregates currently support unfiltered collections. An aggregate result with
-`"total": null` means the total is unknown. A live result with `"total": 0`
+aggregates currently support unfiltered collections, including a numeric sum
+without grouping. For other collections, supply `groupBy` when requesting a sum.
+In record pages and total-only aggregates, `"total": null` means the total is
+unknown. The number of records on a page does not identify the collection
+total. If a reported total is smaller than the returned page, MCP keeps the
+records and reports the total as unknown. A live result with `"total": 0`
 reports an empty collection.
+
+The `savia_store_execute` tool advertises its required arguments in MCP tool
+discovery. Discover eligible read-only actions first with
+`savia_store_catalog`, then supply the plugin ID, action ID, and input object.
 
 | Tool                            | Purpose                                                                                |
 | ------------------------------- | -------------------------------------------------------------------------------------- |

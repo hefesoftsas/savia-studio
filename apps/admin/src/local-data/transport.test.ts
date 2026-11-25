@@ -65,6 +65,18 @@ describe("local CRM transport", () => {
     expect((await transport("/api/records/%252e%252e/one")).status).toBe(400);
     expect(network).not.toHaveBeenCalled();
   });
+  it("forwards an export with escaped punctuation in the search query", async () => {
+    const network = vi.fn(async () => new Response("name\r\n"));
+    const transport = createLocalTransport(
+      store() as never,
+      network,
+      async () => {},
+    );
+    const path = `/api/export/contacts?${new URLSearchParams({ q: "70%..." })}`;
+
+    expect((await transport(path)).status).toBe(200);
+    expect(network).toHaveBeenCalledWith(path, {});
+  });
 });
 
 it("forwards bulk operations without mistaking the reserved name for a record id", async () => {

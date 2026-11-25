@@ -89,10 +89,16 @@ const conflict = () =>
   });
 const params = z.object({ tenantId: z.coerce.number().int().positive() });
 const objectResponse = z.record(z.string(), z.unknown());
+const reservationPageSize = 500;
+const reservationCursorSchema = z.tuple([
+  z.string().datetime(),
+  z.string().uuid(),
+]);
 const rangeSchema = z
   .object({
     from: z.string().datetime({ offset: true }),
     to: z.string().datetime({ offset: true }),
+    cursor: z.string().max(100).optional(),
   })
   .refine(
     (v) =>
@@ -193,6 +199,7 @@ export function registerBookingRoutes(
     query?: z.ZodObject,
     response: z.ZodType = objectResponse,
     created = false,
+    responseFields?: z.ZodRawShape,
   ) {
     app.openAPIRegistry.registerPath(
       createRoute({
@@ -220,7 +227,9 @@ export function registerBookingRoutes(
           200: {
             description: "Booking response",
             content: {
-              "application/json": { schema: z.object({ data: response }) },
+              "application/json": {
+                schema: z.object({ data: response, ...responseFields }),
+              },
             },
           },
           ...(created
@@ -428,6 +437,44 @@ export function registerBookingRoutes(
         own.some((m) => ["tenant_admin", "agency_admin"].includes(m.role)),
     };
   }
+
+  const cutoff = (row: BookingRow, settings: BookingSettings) => {
+    if (
+      Date.parse(row.starts_at) - now() <
+      settings.cancellationMinutes * 60000
+    )
+      throw new HTTPException(409, {
+        message:
+          "The cancellation or rescheduling deadline has passed. Contact the business.",
+      });
+  };
+
+  async function cancelReservation(
+    row: BookingRow,
+    version: number,
+    enforceCutoff = false,
+  ) {
+    // A reschedule also increments the version, so only replay the exact cancelled revision.
+    const wasCancelled = (booking: BookingRow) =>
+      booking.status === "cancelled" && booking.version === version + 1;
+    if (wasCancelled(row)) return row;
+
+    const { settings } = await readSettings(db, row.tenant_id);
+    try {
+      if (enforceCutoff) cutoff(row, settings);
+      return await changeReservation(db, row, settings, {
+        version,
+        cancel: true,
+      });
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 409) {
+        const current = await readBooking(db, row.tenant_id, row.id);
+        if (current && wasCancelled(current)) return current;
+      }
+      throw error;
+    }
+  }
+
   async function bootstrap(c: Context, id: number) {
     const actor = actorFromContext(c),
       auth = await authorizeBranding(db, actor, id),
@@ -775,16 +822,24 @@ export function registerBookingRoutes(
         from:
           c.req.query("from") ?? new Date(now() - 7 * 86400000).toISOString(),
         to: c.req.query("to") ?? new Date(now() + 60 * 86400000).toISOString(),
+        cursor: c.req.query("cursor"),
       });
+      const cursor =
+        range.cursor === undefined
+          ? undefined
+          : parsed(reservationCursorSchema, range.cursor.split("|"));
       const r = await db
         .prepare(
-          `SELECT b.*,g.provider AS "grantedCalendarProvider",g.connection_id AS "grantedCalendarConnectionId",c.id AS "activeCalendarConnectionId",g.zoom_connection_id AS "grantedZoomConnectionId",z.id AS "activeZoomConnectionId" FROM tenant_bookings b LEFT JOIN tenant_booking_calendar_grants g ON g.tenant_id=b.tenant_id AND g.principal_id=b.principal_id LEFT JOIN personal_integration_connections c ON c.id=g.connection_id AND c.principal_id=b.principal_id AND c.provider=g.provider AND c.status='connected' AND c.disconnected_at IS NULL AND c.id=(SELECT active_connection.id FROM personal_integration_connections active_connection WHERE active_connection.principal_id=b.principal_id AND active_connection.provider=g.provider AND active_connection.disconnected_at IS NULL ORDER BY active_connection.updated_at DESC LIMIT 1) LEFT JOIN personal_integration_connections z ON z.id=g.zoom_connection_id AND z.principal_id=b.principal_id AND z.provider='zoom' AND z.status='connected' AND z.disconnected_at IS NULL AND z.id=(SELECT active_zoom.id FROM personal_integration_connections active_zoom WHERE active_zoom.principal_id=b.principal_id AND active_zoom.provider='zoom' AND active_zoom.status='connected' AND active_zoom.disconnected_at IS NULL ORDER BY active_zoom.updated_at DESC LIMIT 1) WHERE b.tenant_id=? AND b.starts_at>=? AND b.starts_at<? ${auth.canManage ? "" : "AND b.principal_id=?"} ORDER BY b.starts_at LIMIT 500`,
+          `SELECT b.*,g.provider AS "grantedCalendarProvider",g.connection_id AS "grantedCalendarConnectionId",c.id AS "activeCalendarConnectionId",g.zoom_connection_id AS "grantedZoomConnectionId",z.id AS "activeZoomConnectionId" FROM tenant_bookings b LEFT JOIN tenant_booking_calendar_grants g ON g.tenant_id=b.tenant_id AND g.principal_id=b.principal_id LEFT JOIN personal_integration_connections c ON c.id=g.connection_id AND c.principal_id=b.principal_id AND c.provider=g.provider AND c.status='connected' AND c.disconnected_at IS NULL AND c.id=(SELECT active_connection.id FROM personal_integration_connections active_connection WHERE active_connection.principal_id=b.principal_id AND active_connection.provider=g.provider AND active_connection.disconnected_at IS NULL ORDER BY active_connection.updated_at DESC LIMIT 1) LEFT JOIN personal_integration_connections z ON z.id=g.zoom_connection_id AND z.principal_id=b.principal_id AND z.provider='zoom' AND z.status='connected' AND z.disconnected_at IS NULL AND z.id=(SELECT active_zoom.id FROM personal_integration_connections active_zoom WHERE active_zoom.principal_id=b.principal_id AND active_zoom.provider='zoom' AND active_zoom.status='connected' AND active_zoom.disconnected_at IS NULL ORDER BY active_zoom.updated_at DESC LIMIT 1) WHERE b.tenant_id=? AND b.starts_at>=? AND b.starts_at<? ${auth.canManage ? "" : "AND b.principal_id=?"} ${cursor ? "AND (b.starts_at,b.id) > (?,?)" : ""}
+           ORDER BY b.starts_at,b.id LIMIT ?`,
         )
         .bind(
           id,
           new Date(range.from).toISOString(),
           new Date(range.to).toISOString(),
           ...(auth.canManage ? [] : [actor.principal.id]),
+          ...(cursor ?? []),
+          reservationPageSize + 1,
         )
         .all<
           BookingRow & {
@@ -795,8 +850,11 @@ export function registerBookingRoutes(
             activeZoomConnectionId: string | null;
           }
         >();
-      const views = await reservationViews(db, r.results);
-      const rows = r.results.map((row, index) => {
+      const page = r.results.slice(0, reservationPageSize);
+      const last =
+        r.results.length > reservationPageSize ? page.at(-1) : undefined;
+      const views = await reservationViews(db, page);
+      const rows = page.map((row, index) => {
         const reservation = views[index]!;
         const calendarReady = Boolean(
           row.activeCalendarConnectionId &&
@@ -833,11 +891,14 @@ export function registerBookingRoutes(
       });
       return c.json({
         data: rows,
+        ...(last ? { nextCursor: `${last.starts_at}|${last.id}` } : {}),
       });
     },
     undefined,
     rangeSchema,
     z.array(reservationSchema),
+    false,
+    { nextCursor: z.string().optional() },
   );
   route(
     "post",
@@ -1014,11 +1075,7 @@ export function registerBookingRoutes(
         throw new HTTPException(404, { message: "Reservation unavailable." });
       if (!auth.canManage && row.principal_id !== actor.principal.id)
         throw new HTTPException(403, { message: "Reservation access denied." });
-      const state = await readSettings(db, id);
-      const changed = await changeReservation(db, row, state.settings, {
-        version: input.version,
-        cancel: true,
-      });
+      const changed = await cancelReservation(row, input.version);
       return c.json({ data: await reservationView(db, changed) });
     },
     revisionSchema,
@@ -1622,16 +1679,6 @@ export function registerBookingRoutes(
     z.object({ reservation: reservationSchema, managementUrl: z.string() }),
     true,
   );
-  const cutoff = (row: BookingRow, settings: BookingSettings) => {
-    if (
-      Date.parse(row.starts_at) - now() <
-      settings.cancellationMinutes * 60000
-    )
-      throw new HTTPException(409, {
-        message:
-          "The cancellation or rescheduling deadline has passed. Contact the business.",
-      });
-  };
   async function reschedulingContext(
     row: BookingRow,
     state: Awaited<ReturnType<typeof readSettings>>,
@@ -1774,19 +1821,10 @@ export function registerBookingRoutes(
     "post",
     `${management}/cancel`,
     async (c) => {
-      const row = await managedBooking(db, c.req.param("token")!),
-        input = await body(c, revisionSchema),
-        state = await readSettings(db, row.tenant_id);
-      cutoff(row, state.settings);
-      return c.json({
-        data: await reservationView(
-          db,
-          await changeReservation(db, row, state.settings, {
-            version: input.version,
-            cancel: true,
-          }),
-        ),
-      });
+      const row = await managedBooking(db, c.req.param("token")!);
+      const input = await body(c, revisionSchema);
+      const changed = await cancelReservation(row, input.version, true);
+      return c.json({ data: await reservationView(db, changed) });
     },
     revisionSchema,
     undefined,

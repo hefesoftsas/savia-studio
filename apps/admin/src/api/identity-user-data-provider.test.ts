@@ -109,50 +109,55 @@ describe("identity user data provider", () => {
     expect(result.total).toBe(1);
   });
 
-  it("forwards a temporary password and selected roles while provisioning a user", async () => {
-    const provision = vi.fn().mockResolvedValue({
-      id: "principal-1",
-      kind: "identity-principal",
-      attributes: {
-        email: "agency.admin@savia.test",
-        displayName: "Agency Admin",
-        isActive: true,
-        globalRoles: [],
-        account: {
-          role: "user",
-          isBanned: false,
-          twoFactorEnabled: false,
+  it.each([false, true])(
+    "forwards credentials and roles with the correct provisioning scope (platform admin: %s)",
+    async (platformAdmin) => {
+      const provision = vi.fn().mockResolvedValue({
+        id: "principal-1",
+        kind: "identity-principal",
+        attributes: {
+          email: "agency.admin@savia.test",
+          displayName: "Agency Admin",
+          isActive: true,
+          globalRoles: [],
+          account: {
+            role: "user",
+            isBanned: false,
+            twoFactorEnabled: false,
+          },
         },
-      },
-      relationships: { memberships: [] },
-    });
-    const provider = createIdentityUserDataProvider({
-      provision,
-    } as unknown as IdentityClient);
+        relationships: { memberships: [] },
+      });
+      const provider = createIdentityUserDataProvider({
+        provision,
+      } as unknown as IdentityClient);
 
-    await provider.create("users", {
-      data: {
+      await provider.create("users", {
+        data: {
+          email: "agency.admin@savia.test",
+          firstName: "Agency",
+          lastName: "Admin",
+          temporaryPassword: "Temporary-password-123",
+          accessRoleIds: ["custom-test"],
+          platformAdmin,
+          tenantId: 101,
+          agencyRole: "agency_admin",
+        },
+      });
+
+      expect(provision).toHaveBeenCalledWith({
         email: "agency.admin@savia.test",
         firstName: "Agency",
         lastName: "Admin",
         temporaryPassword: "Temporary-password-123",
         accessRoleIds: ["custom-test"],
-        platformAdmin: false,
-        tenantId: 101,
-        agencyRole: "agency_admin",
-      },
-    });
-
-    expect(provision).toHaveBeenCalledWith({
-      email: "agency.admin@savia.test",
-      firstName: "Agency",
-      lastName: "Admin",
-      temporaryPassword: "Temporary-password-123",
-      accessRoleIds: ["custom-test"],
-      platformAdmin: false,
-      membership: { tenantId: 101, role: "agency_admin" },
-    });
-  });
+        platformAdmin,
+        ...(!platformAdmin
+          ? { membership: { tenantId: 101, role: "agency_admin" } }
+          : {}),
+      });
+    },
+  );
 
   it("returns an id fallback when deleting without previousData", async () => {
     const remove = vi.fn().mockResolvedValue(undefined);

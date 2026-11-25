@@ -245,3 +245,57 @@ it("publishes tenant-scoped hints after successful role and assignment changes",
     ["principal:" + f.principalId("viewer"), "account", "updated", undefined],
   ]);
 });
+
+it("lists large role catalogs and loads the permissions of a user with 100 custom roles", async () => {
+  const scope = "tenant:101";
+  const viewer = f.principalId("viewer");
+  const roleIds = Array.from({ length: 100 }, (_, index) => `bulk-${index}`);
+  for (const id of [...roleIds, "bulk-unassigned"]) {
+    await f.db
+      .prepare(
+        "INSERT INTO access_roles(id,scope,name,label,description,enabled,protected) VALUES(?,?,?,?,'',1,0)",
+      )
+      .bind(id, scope, id, id)
+      .run();
+  }
+  await f.db.batch([
+    ...roleIds.map((id) =>
+      f.db
+        .prepare(
+          "INSERT INTO access_assignments(scope,principal_id,role_id) VALUES(?,?,?)",
+        )
+        .bind(scope, viewer, id),
+    ),
+    ...["bulk-99", "bulk-unassigned"].map((id) =>
+      f.db
+        .prepare(
+          "INSERT INTO access_grants(id,scope,role_id,resource,action,predicate,fields) VALUES(?,?,?,'collection:acl_contacts','read',?,?)",
+        )
+        .bind(`${id}-grant`, scope, id, '{"all":true}', '["name"]'),
+    ),
+  ]);
+
+  const [catalog, effective] = await Promise.all([
+    f.request("agency_admin", 101, `${prefix}/roles?scope=${scope}`),
+    f.request("viewer", 101, `${prefix}/effective?scope=${scope}`),
+  ]);
+  expect([catalog.status, effective.status]).toEqual([200, 200]);
+
+  const { roles } = await catalog.json<{ roles: Array<{ id: string }> }>();
+  const bulkRoles = roles.filter(({ id }) => id.startsWith("bulk-"));
+  expect(bulkRoles.map(({ id }) => id).sort()).toEqual(
+    [...roleIds, "bulk-unassigned"].sort(),
+  );
+  expect(bulkRoles.find(({ id }) => id === "bulk-99")).toMatchObject({
+    assignedUsers: [{ id: viewer }],
+    grants: [{ id: "bulk-99-grant" }],
+  });
+  expect(bulkRoles.find(({ id }) => id === "bulk-unassigned")).toMatchObject({
+    assignedUsers: [],
+    grants: [{ id: "bulk-unassigned-grant" }],
+  });
+  const { grants } = await effective.json<{ grants: Array<{ id: string }> }>();
+  expect(
+    grants.map(({ id }) => id).filter((id) => id.startsWith("bulk-")),
+  ).toEqual(["bulk-99-grant"]);
+});

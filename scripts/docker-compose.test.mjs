@@ -6,7 +6,10 @@ const compose = await readFile("docker-compose.yml", "utf8");
 
 test("keeps Workers together instead of introducing separate network services", () => {
   assert.doesNotMatch(compose, /^  (?:api|mcp):/m);
-  assert.doesNotMatch(compose, /SAVIA_PROVIDER_(?:EXAMPLE_LOOKUP_BASE_URL|GATEWAY_URL)/);
+  assert.doesNotMatch(
+    compose,
+    /SAVIA_PROVIDER_(?:EXAMPLE_LOOKUP_BASE_URL|GATEWAY_URL)/,
+  );
 });
 
 test("makes the legacy PostgreSQL source opt-in", () => {

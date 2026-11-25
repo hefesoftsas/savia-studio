@@ -5,6 +5,7 @@ import {
 import { officeSuiteMessages } from "@/features/office-suite/messages";
 import { useMessages } from "@/i18n/core";
 import { uiMessages } from "@/i18n/locales/ui";
+import { loadingMessages } from "@/i18n/locales/loading";
 import {
   TenantBrandingProvider,
   useTenantBranding,
@@ -28,7 +29,7 @@ import {
 import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import { createAdminQueryClient } from "./queries/query-policy";
 import { usePrincipalGeneration } from "./auth/session-scope";
-import type { CallbackResult } from "./auth/auth-session";
+import { OAuthCallbackError, type CallbackResult } from "./auth/auth-session";
 import { Navigate, Route } from "react-router-dom";
 import { getDefaultAppServices, type AppServices } from "@/app-services";
 import { preloadRouteModules } from "@/route-preload";
@@ -362,8 +363,11 @@ function AppContent({
     () => window.location.pathname === "/auth/callback",
   );
   const finishCallback = useCallback(
-    ({ returnOrigin, returnRoute }: CallbackResult) => {
-      const bookings = returnRoute === "bookings" ? "#/bookings" : undefined;
+    ({ returnOrigin, returnRoute, returnBookingQuery }: CallbackResult) => {
+      const bookings =
+        returnRoute === "bookings"
+          ? "#/bookings" + (returnBookingQuery ? `?${returnBookingQuery}` : "")
+          : undefined;
       if (returnOrigin) {
         try {
           const target = new URL(returnOrigin);
@@ -571,7 +575,8 @@ function BetterAuthCallback({
   onComplete(result: CallbackResult): void;
 }) {
   const translate = useTranslate();
-  const [error, setError] = useState<string | null>(null);
+  const tLoading = useMessages(loadingMessages);
+  const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -600,10 +605,12 @@ function BetterAuthCallback({
         if (!active) return;
         setError(
           exception instanceof Error
-            ? exception.message
-            : translate("savia.auth.signInFailedDetails", {
-                _: "No fue posible completar el inicio de sesión.",
-              }),
+            ? exception
+            : new Error(
+                translate("savia.auth.signInFailedDetails", {
+                  _: "No fue posible completar el inicio de sesión.",
+                }),
+              ),
         );
       },
     );
@@ -626,15 +633,23 @@ function BetterAuthCallback({
             _: "No pudimos iniciar sesión",
           })}
         </h1>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">{error}</p>
-        <Button
-          className="mt-6 w-full"
-          onClick={() => window.location.replace(window.location.origin)}
-        >
-          {translate("savia.auth.returnHome", {
-            _: "Volver al inicio",
-          })}
-        </Button>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+          {error.message}
+        </p>
+        {error instanceof OAuthCallbackError ? (
+          <Button asChild className="mt-6 w-full">
+            <a href={error.retryHref}>{tLoading("signInAgain")}</a>
+          </Button>
+        ) : (
+          <Button
+            className="mt-6 w-full"
+            onClick={() => window.location.replace(window.location.origin)}
+          >
+            {translate("savia.auth.returnHome", {
+              _: "Volver al inicio",
+            })}
+          </Button>
+        )}
       </section>
     </main>
   );

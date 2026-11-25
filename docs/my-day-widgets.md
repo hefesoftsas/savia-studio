@@ -283,7 +283,8 @@ Sending requires an explicit **Send email** action; merely selecting a record
 or inserting context does not send anything.
 
 **Add record context** lets the user select an authorized workspace, collection,
-and record. Record lists are paginated in groups of twenty-five. Select readable
+and record. The picker requests up to twenty-five records per page and follows
+the source's pagination when available. Select readable
 fields and review the preview, then **Insert context** to append labeled values
 without replacing existing prose. Long field values are limited in the preview.
 The user can edit all inserted text. Removing context and clearing the message
@@ -312,14 +313,21 @@ Layout is private per principal and saved by
 listing and sending use the generated personal integrations OpenAPI contracts.
 Credentials and provider writes stay on the server; sends use existing audits.
 
-Collection widgets read authorized tenant record and summary endpoints. A widget
-whose collection becomes unavailable shows a recovery state. Extension widgets
+Collection widgets read authorized tenant record and summary endpoints. If
+loading the collection fails, the widget lets the user retry. If the collection
+is no longer available, the widget displays that state. Extension widgets
 receive the same limited runtime and effective permissions as extension screens;
 errors are contained within their cards.
 
 HubSpot summary widgets use the live collection total and status breakdown.
 Summaries support up to 1,000 records and show a recovery state if the query
 exceeds that limit.
+
+For connected CRM sources without status summaries, summary widgets show the
+total when the source supplies one. If the total is unavailable, the widget says
+so. Summary and item widgets omit ordering when the source cannot sort records.
+Status charts require grouping support, and action widgets require sorting by
+due date. The widget picker explains when a source lacks either capability.
 
 ## Implementation
 

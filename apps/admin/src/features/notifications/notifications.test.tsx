@@ -16,6 +16,59 @@ import { rotateSessionScope } from "@/auth/session-scope";
 
 afterEach(cleanup);
 
+it("marks every page of notifications as read from a single action", async () => {
+  let unread = 201;
+  const readAll = vi.fn(async (cursor?: string) => {
+    const updated = Math.min(unread, 100);
+    unread -= updated;
+    return {
+      updated,
+      nextCursor: unread > 0 ? `after-${cursor ? 200 : 100}` : null,
+    };
+  });
+  setup({ readAll, unreadCount: async () => unread });
+  expect(
+    await screen.findByLabelText("savia.notificationInbox.title (201)"),
+  ).toBeVisible();
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.markAllRead" }),
+  );
+
+  await waitFor(() =>
+    expect(readAll.mock.calls).toEqual([
+      [undefined],
+      ["after-100"],
+      ["after-200"],
+    ]),
+  );
+  expect(
+    await screen.findByRole("button", {
+      name: "savia.notificationInbox.title",
+    }),
+  ).toBeVisible();
+});
+
+it("refreshes unread counts when a later bulk-read page fails", async () => {
+  let unread = 101;
+  const readAll = vi.fn(async (cursor?: string) => {
+    if (cursor) throw new Error("Unavailable");
+    unread = 1;
+    return { updated: 100, nextCursor: "after-100" };
+  });
+  setup({ readAll, unreadCount: async () => unread });
+  await screen.findByLabelText("savia.notificationInbox.title (101)");
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.markAllRead" }),
+  );
+
+  expect(
+    await screen.findByText("savia.notificationInbox.actionError"),
+  ).toBeVisible();
+  expect(
+    await screen.findByLabelText("savia.notificationInbox.title (1)"),
+  ).toBeVisible();
+});
+
 function setupNoRetry(client: Partial<NotificationClient>) {
   const full = {
     inbox: async () => ({ items: [], nextCursor: null, cutoff: "" }),

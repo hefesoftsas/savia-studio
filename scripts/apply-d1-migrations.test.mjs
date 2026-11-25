@@ -20,7 +20,61 @@ function fixture() {
     shim,
     `import {DatabaseSync} from 'node:sqlite';
 const db=new DatabaseSync(${JSON.stringify(file)});db.exec('PRAGMA foreign_keys=ON');
-globalThis.fetch=async (_url,options)=>{const {sql,batch}=JSON.parse(options.body);try{if(batch)db.exec('BEGIN');const result=(batch?batch.map(s=>s.sql):[sql]).map(s=>{if(process.env.FAIL_INITIAL==='1'&&s.includes('CREATE TRIGGER'))throw Error('injected');return {results:db.prepare(s).all(),success:true};});if(batch)db.exec('COMMIT');return {ok:true,json:async()=>({success:true,result})};}catch(e){if(db.isTransaction)db.exec('ROLLBACK');return {ok:false,status:400,json:async()=>({success:false,errors:[{message:e.message}]})};}};`,
+let concurrentBatchCommitted = false;
+if (process.env.STALL_D1_BODY === '1') {
+  AbortSignal.timeout = () => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 25);
+    return controller.signal;
+  };
+}
+globalThis.fetch=async (_url,options)=>{
+  const {sql,batch}=JSON.parse(options.body);
+  if (batch && process.env.STALL_D1_BODY === '1') {
+    if (!options.signal) throw new Error('no D1 request deadline');
+    return {ok:true,json:()=>new Promise((_,reject)=>{
+      options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true});
+    })};
+  }
+  if (batch && process.env.REJECT_D1_STATEMENT === '1') {
+    return {ok:true,status:200,json:async()=>({
+      success:true,result:batch.map((_,index)=>({success:index!==0,results:[]}))
+    })};
+  }
+  if (batch && process.env.INVALID_D1_ACK) {
+    const result = batch.map(() => ({success:true,results:[]}));
+    if (process.env.INVALID_D1_ACK === 'truncated') result.pop();
+    else delete result.at(-1).success;
+    return {ok:true,status:200,json:async()=>({success:true,result})};
+  }
+  if (batch && process.env.D1_NON_JSON_STATUS) {
+    return new Response("<html>private upstream response</html>", {
+      status: Number(process.env.D1_NON_JSON_STATUS),
+      headers: {'content-type':'text/html'},
+    });
+  }
+  try {
+    if (batch) db.exec('BEGIN');
+    const result = (batch ? batch.map(statement => statement.sql) : [sql]).map(statement => {
+      if (process.env.FAIL_INITIAL === '1' && statement.includes('CREATE TRIGGER'))
+        throw new Error('injected');
+      return {results:db.prepare(statement).all(),success:true};
+    });
+    if (batch) db.exec('COMMIT');
+    if (batch && process.env.CONCURRENT_D1_BATCH === '1' && !concurrentBatchCommitted) {
+      concurrentBatchCommitted = true;
+      return {ok:false,status:400,json:async()=>({
+        success:false,errors:[{message:'table already exists'}]
+      })};
+    }
+    return {ok:true,json:async()=>({success:true,result})};
+  } catch (error) {
+    if (db.isTransaction) db.exec('ROLLBACK');
+    return {ok:false,status:400,json:async()=>({
+      success:false,errors:[{message:error.message}]
+    })};
+  }
+};`,
   );
   return {
     file,
@@ -31,6 +85,7 @@ globalThis.fetch=async (_url,options)=>{const {sql,batch}=JSON.parse(options.bod
         ["--import", shim, "scripts/apply-d1-migrations.mjs"],
         {
           encoding: "utf8",
+          timeout: 10_000,
           env: {
             ...process.env,
             CLOUDFLARE_ACCOUNT_ID: "test",
@@ -170,6 +225,31 @@ test("a failing schema batch rolls back and can be retried", () => {
   }
 });
 
+test("continues when migration history confirms a competing update applied the rejected batch", () => {
+  const f = fixture();
+  try {
+    const result = f.run({ CONCURRENT_D1_BATCH: "1" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Already applied 0001_initial\.sql/);
+    assert.match(result.stdout, /Applied 0002_bootstrap\.sql/);
+    const db = new DatabaseSync(f.file);
+    try {
+      assert.equal(
+        db
+          .prepare(
+            "SELECT count(*) AS count FROM _savia_migrations WHERE filename = ?",
+          )
+          .get("0001_initial.sql").count,
+        1,
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    f.close();
+  }
+});
+
 test("retired history is rejected before changing application data", () => {
   const f = fixture();
   try {
@@ -191,3 +271,63 @@ test("retired history is rejected before changing application data", () => {
     f.close();
   }
 });
+
+test("ends a migration when the D1 response body stalls", () => {
+  const f = fixture();
+  try {
+    const result = f.run({ STALL_D1_BODY: "1" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /D1 query timed out.*0001_initial\.sql/);
+    assert.doesNotMatch(result.stdout, /Applied /);
+  } finally {
+    f.close();
+  }
+});
+
+test("fails when D1 reports an unsuccessful statement in a successful HTTP response", () => {
+  const f = fixture();
+  try {
+    const result = f.run({ REJECT_D1_STATEMENT: "1" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /D1 statement failed.*0001_initial\.sql/);
+    assert.doesNotMatch(result.stdout, /Applied /);
+  } finally {
+    f.close();
+  }
+});
+
+for (const scenario of ["truncated", "unconfirmed"]) {
+  test(`rejects the ${scenario} acknowledgement before reporting a migration as applied`, () => {
+    const f = fixture();
+    try {
+      const result = f.run({ INVALID_D1_ACK: scenario });
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /D1 batch result is incomplete.*0001_initial\.sql/,
+      );
+      assert.doesNotMatch(result.stdout, /Applied /);
+    } finally {
+      f.close();
+    }
+  });
+}
+
+for (const status of [403, 502, 200]) {
+  test(`reports HTTP ${status} when the migration response is not JSON`, () => {
+    const f = fixture();
+    try {
+      const result = f.run({ D1_NON_JSON_STATUS: String(status) });
+      assert.equal(result.status, 1);
+      assert.ok(
+        result.stderr.includes(`D1 query failed (${status})`),
+        result.stderr,
+      );
+      assert.match(result.stderr, /0001_initial\.sql/);
+      assert.doesNotMatch(result.stderr, /private upstream response/);
+      assert.doesNotMatch(result.stdout, /Applied /);
+    } finally {
+      f.close();
+    }
+  });
+}

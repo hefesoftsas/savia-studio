@@ -1,8 +1,11 @@
 import type { UserIdentity } from "ra-core";
+import { isAllowedTenantOrigin } from "@savia/tenant-host";
+import { normalizeBookingRouteQuery } from "@savia/tenant-host/bookings-route";
 import { adminAuthorizeUrl } from "./admin-authorize-url";
 import { getSessionGeneration, rotateSessionScope } from "./session-scope";
 import { isOfflineError } from "../offline/offline-error";
 import { REQUEST_TIMEOUT_MS, withRequestTimeout } from "../api/request-timeout";
+import { OAuthCallbackError } from "./auth-session";
 import type {
   AuthPermissions,
   AuthSession,
@@ -25,6 +28,14 @@ type OAuthTokenResponse = {
   expires_in?: unknown;
   scope?: unknown;
   token_type?: unknown;
+};
+
+type OAuthErrorPayload = { error?: { message?: unknown } };
+
+type CallbackDestination = {
+  returnOrigin?: unknown;
+  returnRoute?: unknown;
+  returnBookingQuery?: unknown;
 };
 
 type IdentityResponse = {
@@ -90,10 +101,14 @@ function defaultNavigation(): BrowserNavigation {
 
 async function responseMessage(response: Response): Promise<string> {
   const payload = (await response.json().catch(() => undefined)) as
-    | {
-        error?: { message?: unknown };
-      }
-    | undefined;
+    OAuthErrorPayload | undefined;
+  return oauthErrorMessage(response, payload);
+}
+
+function oauthErrorMessage(
+  response: Response,
+  payload: OAuthErrorPayload | undefined,
+): string {
   return typeof payload?.error?.message === "string"
     ? payload.error.message
     : response.statusText || "No fue posible completar el inicio de sesión.";
@@ -136,6 +151,8 @@ export class BetterAuthOAuthSession implements AuthSession {
   private callbackPromise: Promise<CallbackResult> | null = null;
 
   private refreshPromise: Promise<void> | null = null;
+
+  private authenticationRequests = new AbortController();
 
   private refreshAllowed = true;
 
@@ -189,15 +206,16 @@ export class BetterAuthOAuthSession implements AuthSession {
     }
   }
 
-  getAuthorizeUrl(): string {
+  getAuthorizeUrl(bookingQuery?: string): string {
     return adminAuthorizeUrl(
       this.settings.apiUrl,
       this.navigation.currentUrl(),
+      bookingQuery,
     );
   }
 
-  async login(): Promise<void> {
-    this.navigation.redirect(this.getAuthorizeUrl());
+  async login(bookingQuery?: string): Promise<void> {
+    this.navigation.redirect(this.getAuthorizeUrl(bookingQuery));
   }
 
   async logout(): Promise<string> {
@@ -218,14 +236,14 @@ export class BetterAuthOAuthSession implements AuthSession {
   }
 
   async clearSession(): Promise<void> {
-    rotateSessionScope("logout");
+    this.authenticationRequests.abort();
+    this.authenticationRequests = new AbortController();
     this.principalId = undefined;
-    if (typeof window !== "undefined")
-      window.dispatchEvent(new Event("savia:session-cleared"));
     this.accessToken = null;
     this.accessTokenExpiresAt = 0;
     this.scopes.clear();
     this.callbackPromise = null;
+    this.refreshPromise = null;
     this.identityPromise = null;
     this.identitySettled = false;
     this.avatarPromise = null;
@@ -233,14 +251,18 @@ export class BetterAuthOAuthSession implements AuthSession {
     this.avatarLoaded = false;
     this.lastKnownPermissions = undefined;
     this.refreshAllowed = false;
+    rotateSessionScope("logout");
+    if (typeof window !== "undefined")
+      window.dispatchEvent(new Event("savia:session-cleared"));
   }
 
   async handleCallback(): Promise<CallbackResult> {
+    const { signal } = this.authenticationRequests;
     const callbackPromise =
       this.callbackPromise ??
-      (this.callbackPromise = this.exchangeCallback().catch(
+      (this.callbackPromise = this.exchangeCallback(signal).catch(
         (exception: unknown) => {
-          this.callbackPromise = null;
+          if (!signal.aborted) this.callbackPromise = null;
           throw exception;
         },
       ));
@@ -248,17 +270,16 @@ export class BetterAuthOAuthSession implements AuthSession {
   }
 
   async getAccessToken(): Promise<string | null> {
+    const { signal } = this.authenticationRequests;
     if (!this.accessToken && this.refreshAllowed && this.isOAuthCallbackUrl()) {
       await this.handleCallback();
-      return this.accessToken;
-    }
-    if (
+    } else if (
       (!this.accessToken || Date.now() >= this.accessTokenExpiresAt - 30_000) &&
       this.refreshAllowed
     ) {
       await this.refreshAccessToken();
     }
-    return this.accessToken;
+    return signal.aborted ? null : this.accessToken;
   }
 
   async getIdentity(): Promise<UserIdentity> {
@@ -284,29 +305,35 @@ export class BetterAuthOAuthSession implements AuthSession {
   }
 
   async getPermissions(): Promise<AuthPermissions> {
-    let signedIn = false;
+    const { signal } = this.authenticationRequests;
+    let accessToken: string | null = null;
     try {
-      signedIn = Boolean(await this.getAccessToken());
+      accessToken = await this.getAccessToken();
     } catch (exception) {
-      // A dropped network must not hide every resource: fall back to the
-      // last known permissions so cached reads stay visible offline.
-      if (isOfflineError(exception) && this.lastKnownPermissions) {
-        return this.lastKnownPermissions;
+      if (!signal.aborted) {
+        // Keep cached reads visible when an active session loses its network.
+        if (isOfflineError(exception) && this.lastKnownPermissions)
+          return this.lastKnownPermissions;
+        throw exception;
       }
-      throw exception;
     }
-    const canWrite = signedIn && this.scopes.has("savia.api.write");
     let identity: SaviaIdentity | undefined;
-    if (signedIn && this.accessToken) {
+    if (accessToken && !signal.aborted) {
       try {
-        identity = await this.saviaIdentity(this.accessToken);
+        identity = await this.saviaIdentity(accessToken);
       } catch (exception) {
-        if (isOfflineError(exception) && this.lastKnownPermissions) {
+        if (
+          !signal.aborted &&
+          isOfflineError(exception) &&
+          this.lastKnownPermissions
+        ) {
           return this.lastKnownPermissions;
         }
-        identity = undefined;
       }
     }
+    const signedIn = Boolean(accessToken) && !signal.aborted;
+    const canWrite = signedIn && this.scopes.has("savia.api.write");
+    if (!signedIn) identity = undefined;
     let canManageIdentity = false;
     if (canWrite && identity) {
       canManageIdentity = Array.isArray(identity.attributes?.globalRoles)
@@ -340,7 +367,7 @@ export class BetterAuthOAuthSession implements AuthSession {
     await this.saviaIdentity(token);
   }
 
-  private async exchangeCallback(): Promise<CallbackResult> {
+  private async exchangeCallback(signal: AbortSignal): Promise<CallbackResult> {
     const callback = new URL(this.navigation.currentUrl());
     const code = callback.searchParams.get("code");
     const state = callback.searchParams.get("state");
@@ -353,6 +380,7 @@ export class BetterAuthOAuthSession implements AuthSession {
       requestUrl(this.settings.apiUrl, "/api/auth/admin/callback"),
       {
         method: "POST",
+        signal,
         credentials: "include",
         headers: {
           Accept: "application/json",
@@ -361,19 +389,46 @@ export class BetterAuthOAuthSession implements AuthSession {
         body: JSON.stringify({ code, state }),
       },
     );
-    if (!response.ok) throw new Error(await responseMessage(response));
-    const payload = (await response.json()) as OAuthTokenResponse & {
-      returnOrigin?: unknown;
-      returnRoute?: unknown;
-    };
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => undefined)) as
+        (OAuthErrorPayload & CallbackDestination) | undefined;
+      const message = oauthErrorMessage(response, payload);
+      if (payload?.returnRoute === "bookings") {
+        const destination =
+          typeof payload.returnOrigin === "string" &&
+          isAllowedTenantOrigin(payload.returnOrigin)
+            ? payload.returnOrigin
+            : callback.href;
+        throw new OAuthCallbackError(
+          message,
+          adminAuthorizeUrl(
+            this.settings.apiUrl,
+            destination,
+            typeof payload.returnBookingQuery === "string"
+              ? payload.returnBookingQuery
+              : "",
+          ),
+        );
+      }
+      throw new Error(message);
+    }
+    const payload = (await response.json()) as OAuthTokenResponse &
+      CallbackDestination;
+    signal.throwIfAborted();
     this.applyToken(readToken(payload));
     const returnOrigin =
       typeof payload.returnOrigin === "string"
         ? payload.returnOrigin
         : undefined;
+    const returnBookingQuery =
+      payload.returnRoute === "bookings" &&
+      typeof payload.returnBookingQuery === "string"
+        ? normalizeBookingRouteQuery(payload.returnBookingQuery)
+        : "";
     return {
       returnOrigin,
       ...(payload.returnRoute === "bookings" && { returnRoute: "bookings" }),
+      ...(returnBookingQuery && { returnBookingQuery }),
     };
   }
 
@@ -392,6 +447,7 @@ export class BetterAuthOAuthSession implements AuthSession {
 
   private async refreshAccessToken(): Promise<void> {
     if (!this.refreshPromise) {
+      const { signal } = this.authenticationRequests;
       this.refreshPromise = (async () => {
         let response: Response;
         try {
@@ -399,11 +455,13 @@ export class BetterAuthOAuthSession implements AuthSession {
             requestUrl(this.settings.apiUrl, "/api/auth/admin/refresh"),
             {
               method: "POST",
+              signal,
               credentials: "include",
               headers: { Accept: "application/json" },
             },
           );
         } catch (exception) {
+          if (signal.aborted) return;
           // The network dropped mid-refresh: keep the stale token instead
           // of wiping the session. Reads keep serving the persisted cache
           // and checkSession still resolves, so the app never "logs out"
@@ -411,8 +469,9 @@ export class BetterAuthOAuthSession implements AuthSession {
           if (isOfflineError(exception) && this.accessToken) return;
           throw exception;
         }
+        if (signal.aborted) return;
         if (!response.ok) {
-          if (response.status >= 500)
+          if (response.status !== 401)
             throw Object.assign(new Error(await responseMessage(response)), {
               status: response.status,
             });
@@ -422,11 +481,10 @@ export class BetterAuthOAuthSession implements AuthSession {
           this.refreshAllowed = false;
           throw new Error(await responseMessage(response));
         }
-        this.applyToken(
-          readToken((await response.json()) as OAuthTokenResponse),
-        );
+        const payload = (await response.json()) as OAuthTokenResponse;
+        if (!signal.aborted) this.applyToken(readToken(payload));
       })().finally(() => {
-        this.refreshPromise = null;
+        if (!signal.aborted) this.refreshPromise = null;
       });
     }
     await this.refreshPromise;
@@ -461,8 +519,8 @@ export class BetterAuthOAuthSession implements AuthSession {
       return this.cachedAvatar;
     }
     if (!this.avatarPromise) {
-      this.avatarPromise = (async () => {
-        try {
+      const pending = Promise.resolve()
+        .then(async () => {
           const response = await this.fetcher(
             requestUrl(this.settings.apiUrl, "/api/auth/get-session"),
             {
@@ -471,28 +529,23 @@ export class BetterAuthOAuthSession implements AuthSession {
               headers: { Accept: "application/json" },
             },
           );
-          if (!response.ok) {
-            this.cachedAvatar = undefined;
-            this.avatarLoaded = true;
-            return undefined;
-          }
-          const payload = (await response.json()) as BetterAuthSessionResponse;
-          const raw =
-            typeof payload.user?.image === "string" &&
-            payload.user.image.length > 0
-              ? payload.user.image
-              : undefined;
-          this.cachedAvatar = raw
-            ? normalizeAvatarUrl(raw, this.settings.apiUrl)
+          const payload = response.ok
+            ? ((await response.json()) as BetterAuthSessionResponse)
             : undefined;
+          if (this.avatarPromise !== pending) return undefined;
+          const image = payload?.user?.image;
+          this.cachedAvatar =
+            typeof image === "string" && image.length > 0
+              ? normalizeAvatarUrl(image, this.settings.apiUrl)
+              : undefined;
           this.avatarLoaded = true;
           return this.cachedAvatar;
-        } catch {
-          return undefined;
-        } finally {
-          this.avatarPromise = null;
-        }
-      })();
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (this.avatarPromise === pending) this.avatarPromise = null;
+        });
+      this.avatarPromise = pending;
     }
     return this.avatarPromise;
   }
@@ -501,60 +554,67 @@ export class BetterAuthOAuthSession implements AuthSession {
     if (!this.identityPromise) {
       const requestGeneration = getSessionGeneration();
       this.identitySettled = false;
-      this.identityPromise = (async () => {
-        const response = await this.fetcher(
-          requestUrl(this.settings.apiUrl, "/v1/identity/me"),
-          {
-            method: "GET",
-            credentials: "include",
-            headers: {
-              Accept: "application/json",
-              Authorization: `Bearer ${accessToken}`,
+      const pending = this.fetcher(
+        requestUrl(this.settings.apiUrl, "/v1/identity/me"),
+        {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+        },
+      )
+        .then(async (response): Promise<SaviaIdentity> => {
+          if (!response.ok)
+            throw Object.assign(new Error(await responseMessage(response)), {
+              status: response.status,
+            });
+          const identity = ((await response.json()) as IdentityResponse).data;
+          if (
+            this.identityPromise !== pending ||
+            requestGeneration !== getSessionGeneration()
+          )
+            throw new Error(
+              "The authenticated session changed during the identity read.",
+            );
+          if (
+            !identity ||
+            typeof identity.id !== "string" ||
+            typeof identity.attributes?.displayName !== "string"
+          ) {
+            throw new Error("Savia devolvió una identidad inválida.");
+          }
+          if (
+            this.principalId !== undefined &&
+            this.principalId !== identity.id
+          ) {
+            this.lastKnownPermissions = undefined;
+            this.avatarPromise = null;
+            this.cachedAvatar = undefined;
+            this.avatarLoaded = false;
+            rotateSessionScope("principal-change");
+          }
+          this.principalId = identity.id;
+          this.identitySettled = true;
+          return {
+            id: identity.id,
+            attributes: {
+              displayName: identity.attributes.displayName,
+              email: identity.attributes.email,
+              globalRoles: identity.attributes.globalRoles,
             },
-          },
-        );
-        if (!response.ok)
-          throw Object.assign(new Error(await responseMessage(response)), {
-            status: response.status,
-          });
-        const identity = ((await response.json()) as IdentityResponse).data;
-        if (requestGeneration !== getSessionGeneration())
-          throw new Error(
-            "The authenticated session changed during the identity read.",
-          );
-        if (
-          !identity ||
-          typeof identity.id !== "string" ||
-          typeof identity.attributes?.displayName !== "string"
-        ) {
-          throw new Error("Savia devolvió una identidad inválida.");
-        }
-        if (
-          this.principalId !== undefined &&
-          this.principalId !== identity.id
-        ) {
-          this.lastKnownPermissions = undefined;
-          this.avatarPromise = null;
-          this.cachedAvatar = undefined;
-          this.avatarLoaded = false;
-          rotateSessionScope("principal-change");
-        }
-        this.principalId = identity.id;
-        this.identitySettled = true;
-        return {
-          id: identity.id,
-          attributes: {
-            displayName: identity.attributes.displayName,
-            email: identity.attributes.email,
-            globalRoles: identity.attributes.globalRoles,
-          },
-          relationships: identity.relationships,
-        };
-      })().catch((exception: unknown) => {
-        this.identityPromise = null;
-        this.identitySettled = false;
-        throw exception;
-      });
+            relationships: identity.relationships,
+          };
+        })
+        .catch((exception: unknown) => {
+          if (this.identityPromise === pending) {
+            this.identityPromise = null;
+            this.identitySettled = false;
+          }
+          throw exception;
+        });
+      this.identityPromise = pending;
     }
     return this.identityPromise;
   }

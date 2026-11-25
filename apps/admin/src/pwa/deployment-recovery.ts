@@ -1,4 +1,4 @@
-import { verifyOnlineStatus } from "../offline/connectivity-status";
+import { verifyOnlineStatus } from "../offline/connectivity-status.ts";
 
 /** Match asset-loader failures, not ordinary API/network failures. */
 export function isModuleLoadError(error: unknown): boolean {

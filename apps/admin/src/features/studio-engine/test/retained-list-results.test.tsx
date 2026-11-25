@@ -56,6 +56,20 @@ it("keeps successful rows visible after an interrupted page change and exposes r
   expect(screen.getByRole("alert")).toHaveTextContent("No connection");
   expect(screen.getByRole("button", { name: "Reintentar" })).toBeVisible();
 });
+it("shows the earliest retry time on a rate-limit error", () => {
+  render(
+    <View
+      error={Object.assign(new Error("Rate limit"), {
+        status: 429,
+        retryAt: Date.parse("2031-01-01T12:00:30Z"),
+      })}
+    />,
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Puedes reintentar a partir de",
+  );
+  expect(screen.getByRole("button", { name: "Reintentar" })).toBeEnabled();
+});
 it("does not reuse another collection or retain records after access is denied", () => {
   const { rerender } = render(<View data={[{ id: "1", name: "Ana" }]} />);
   rerender(<View scope="private" isPending />);

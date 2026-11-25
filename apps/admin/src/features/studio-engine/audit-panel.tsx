@@ -85,7 +85,11 @@ export default function Audit({ objectName }: { objectName?: string }) {
             disabled={busy || !query.data?.data.length}
             onClick={() =>
               void run(() =>
-                downloadCrm("/api/audit/export.csv" + suffix, "historial.csv"),
+                downloadCrm(
+                  "/api/audit/export.csv" + suffix,
+                  "historial.csv",
+                  "text/csv",
+                ),
               )
             }
           >

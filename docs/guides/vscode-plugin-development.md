@@ -10,8 +10,13 @@ in another tab to preserve the current draft.
 Admin deployments serve the packaged extension at
 `/downloads/savia-plugin-authoring-<version>.vsix` with a matching `.sha256` file;
 the download button follows the version in the extension manifest.
+If that version is unavailable, the download returns HTTP 404. The download
+path bypasses the application shell, including when a service worker is active.
+Cloudflare static assets serve the full VSIX when a client requests a range.
 The common admin `build` and `build:assets` commands build the extension and
 verify its checksum before copying the package into the admin static assets.
+The build stages the verified package and checksum together before replacing
+the download and removes older versions only after both files are published.
 This includes Cloudflare deployments, setup scripts and the self-hosted Docker
 image. For local Vite development, run `pnpm --filter @savia/admin build:downloads`
 once to prepare the download without building the entire interface.

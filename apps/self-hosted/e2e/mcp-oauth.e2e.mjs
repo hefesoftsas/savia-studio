@@ -139,16 +139,17 @@ test("browser login, MFA and consent produce tools, collection reads and scoped 
     code_challenge_method: "S256",
   });
   await page.goto(`${discovery.authorization_endpoint}?${query}`);
+  const login = page.locator('[data-oauth-form="sign-in"]');
   await expect(
-    page.getByLabel("Correo electrónico", { exact: true }),
+    login.getByLabel("Correo electrónico", { exact: true }),
   ).toBeVisible();
-  await page
+  await login
     .getByLabel("Correo electrónico", { exact: true })
     .fill(process.env.SAVIA_E2E_EMAIL);
-  await page
+  await login
     .getByLabel("Contraseña", { exact: true })
     .fill(process.env.SAVIA_E2E_PASSWORD);
-  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await login.getByRole("button", { name: "Continuar", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Configura tu segundo factor" }),
   ).toBeVisible();

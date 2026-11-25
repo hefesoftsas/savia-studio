@@ -1,29 +1,19 @@
 import { useEffect, useState } from "react";
 import type { ApiClient } from "@/api/api-client";
+import type { StudioObject } from "@savia/studio-shared/metadata";
+import { orderRecordTableColumns } from "@savia/studio-shared/record-table-columns";
 import { Button } from "@/components/ui/button";
 import { useMessages } from "@/i18n/core";
 import { pagesMessages } from "./messages";
+import { collectionCapabilities } from "../studio-engine/collection-capabilities";
 export type CollectionReference = {
   domain: string;
   collection: string;
   mode: "table" | "pipeline";
   viewId?: string;
 };
-type Field = {
-  label?: string;
-  type: string;
-  options?: Array<{ value: string; label: string }>;
-  hidden?: boolean;
-};
 type Row = { id: string; [key: string]: unknown };
-type Schema = {
-  label: string;
-  config: {
-    fields: Record<string, Field>;
-    fieldOrder?: string[];
-    studio?: { pipeline?: { field: string } };
-  };
-};
+const pageSize = 20;
 export function collectionHref(
   ref: { domain: string; collection: string },
   record?: string,
@@ -34,21 +24,52 @@ export function collectionHref(
 }
 const display = (value: unknown) =>
   typeof value === "object" && value !== null ? "—" : String(value ?? "—");
-export function CollectionBlock({
-  reference,
-  api,
-}: {
+
+function groupBoardRows(rows: Row[], field: string) {
+  const groups = new Map<string | number | boolean | null, Row[]>();
+  for (const row of rows) {
+    const value = row[field];
+    const key =
+      (typeof value === "string" && value !== "") ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+        ? value
+        : null;
+    const members = groups.get(key);
+    if (members) members.push(row);
+    else groups.set(key, [row]);
+  }
+  return groups;
+}
+
+type CollectionBlockProps = {
   reference: CollectionReference;
   api: ApiClient;
-}) {
+};
+
+export function CollectionBlock({ reference, api }: CollectionBlockProps) {
+  const { domain, collection, viewId } = reference;
+  return (
+    <CollectionBlockContent
+      key={JSON.stringify([domain, collection, viewId])}
+      reference={reference}
+      api={api}
+    />
+  );
+}
+
+function CollectionBlockContent({ reference, api }: CollectionBlockProps) {
   const t = useMessages(pagesMessages);
   const [page, setPage] = useState(1),
     [refresh, setRefresh] = useState(0);
   const [data, setData] = useState<{
-    schema: Schema;
+    schema: StudioObject;
     rows: Row[];
-    total: number;
+    total?: number;
+    hasNextPage: boolean;
     columns: string[];
+    columnAliases?: Record<string, string>;
+    titleField?: string;
     group: string;
   } | null>(null);
   const [error, setError] = useState(false);
@@ -67,7 +88,7 @@ export function CollectionBlock({
       name = encodeURIComponent(reference.collection);
     const options = { signal: controller.signal };
     void (async () => {
-      const objects = await api.get<{ data: Array<Schema & { name: string }> }>(
+      const objects = await api.get<{ data: StudioObject[] }>(
         `${base}/objects`,
         options,
       );
@@ -83,6 +104,8 @@ export function CollectionBlock({
                 filters?: unknown;
                 stage?: string;
                 columns?: string[];
+                columnOrder?: string[];
+                columnAliases?: Record<string, string>;
                 sort?: { field: string; order: string };
                 group?: string;
               };
@@ -91,39 +114,77 @@ export function CollectionBlock({
         : { data: [] };
       const view = views.data.find((v) => v.id === reference.viewId)?.config;
       if (reference.viewId && !view) throw new Error("View unavailable");
+      const capabilities = collectionCapabilities(schema);
       const params = new URLSearchParams({
         page: String(page),
-        perPage: "20",
-        sort: view?.sort?.field ?? "updated_at",
-        order: view?.sort?.order ?? "DESC",
+        perPage: String(pageSize),
       });
-      if (view?.q) params.set("q", view.q);
-      if (view?.searchField) params.set("searchField", view.searchField);
-      if (view?.filters) params.set("filters", JSON.stringify(view.filters));
-      if (view?.stage) params.set("stage", view.stage);
-      const rows = await api.get<{ data: Row[]; total: number }>(
-        `${base}/records/${name}?${params}`,
-        options,
-      );
-      const columns = (
+      if (capabilities.sort !== false) {
+        params.set("sort", view?.sort?.field ?? "updated_at");
+        params.set("order", view?.sort?.order ?? "DESC");
+      }
+      if (capabilities.search !== false) {
+        if (view?.q) params.set("q", view.q);
+        if (
+          view?.searchField &&
+          schema.config.studio?.collection?.kind !== "crm"
+        )
+          params.set("searchField", view.searchField);
+      }
+      if (capabilities.filter !== false) {
+        if (view?.filters) params.set("filters", JSON.stringify(view.filters));
+        if (view?.stage) params.set("stage", view.stage);
+      }
+      const rows = await api.get<{
+        data: Row[];
+        total?: number;
+        pageInfo?: { hasNextPage?: boolean };
+      }>(`${base}/records/${name}?${params}`, options);
+      if (controller.signal.aborted) return;
+      const total = typeof rows.total === "number" ? rows.total : undefined;
+      const hasNextPage =
+        rows.pageInfo?.hasNextPage ??
+        (total !== undefined && page * pageSize < total);
+      if (total !== undefined && !rows.data.length && !hasNextPage) {
+        const lastPage = Math.max(1, Math.ceil(total / pageSize));
+        if (lastPage < page) {
+          setPage(lastPage);
+          return;
+        }
+      }
+      const isVisibleField = (key: string | undefined): key is string =>
+        !!key &&
+        Object.hasOwn(schema.config.fields, key) &&
+        !schema.config.fields[key].hidden;
+      const visibleColumns = (
         view?.columns ??
         schema.config.fieldOrder ??
         Object.keys(schema.config.fields)
-      )
-        .filter(
-          (key) =>
-            schema.config.fields[key] && !schema.config.fields[key].hidden,
-        )
-        .slice(0, 5);
+      ).filter(isVisibleField);
+      const columns = orderRecordTableColumns(
+        view?.columnOrder ?? [],
+        visibleColumns,
+      ).slice(0, 5);
       const group =
-        view?.group ||
-        schema.config.studio?.pipeline?.field ||
+        [view?.group, schema.config.studio?.pipeline?.field].find(
+          isVisibleField,
+        ) ??
         Object.keys(schema.config.fields).find(
-          (key) => schema.config.fields[key].type === "Dropdown",
-        ) ||
+          (key) =>
+            isVisibleField(key) &&
+            schema.config.fields[key].type === "Dropdown",
+        ) ??
         "";
-      if (!controller.signal.aborted)
-        setData({ schema, rows: rows.data, total: rows.total, columns, group });
+      setData({
+        schema,
+        rows: rows.data,
+        total,
+        hasNextPage,
+        columns,
+        columnAliases: view?.columnAliases,
+        titleField: visibleColumns[0],
+        group,
+      });
     })().catch(() => {
       if (!controller.signal.aborted) setError(true);
     });
@@ -161,28 +222,53 @@ export function CollectionBlock({
         <>
           {!data.rows.length ? (
             <p className="py-6 text-muted-foreground">{t("No records")}</p>
+          ) : !data.columns.length ? (
+            <>
+              <p className="mb-2 text-sm text-muted-foreground">
+                {t("No displayable columns")}
+              </p>
+              <ul>
+                {data.rows.map((row) => (
+                  <li key={row.id} className="border-b py-2">
+                    <RecordLinks
+                      row={row}
+                      reference={reference}
+                      title={row.id}
+                    />
+                  </li>
+                ))}
+              </ul>
+            </>
           ) : reference.mode === "pipeline" && data.group ? (
             <div className="flex gap-4 overflow-x-auto pb-3">
-              {[...new Set(data.rows.map((r) => display(r[data.group])))].map(
-                (group) => (
-                  <section key={group} className="min-w-52 flex-1">
+              {Array.from(
+                groupBoardRows(data.rows, data.group),
+                ([group, rows]) => (
+                  <section
+                    key={`${typeof group}:${group}`}
+                    className="min-w-52 flex-1"
+                  >
                     <h4 className="mb-3 text-sm font-medium">
-                      {data.schema.config.fields[data.group]?.options?.find(
-                        (o) => o.value === group,
-                      )?.label ?? group}
+                      {group === null
+                        ? t("No group")
+                        : (data.schema.config.fields[data.group]?.options?.find(
+                            (o) => o.value === String(group),
+                          )?.label ?? String(group))}
                     </h4>
                     <ul className="space-y-2">
-                      {data.rows
-                        .filter((r) => display(r[data.group]) === group)
-                        .map((row) => (
-                          <li key={row.id} className="border-b py-3">
-                            <RecordLinks
-                              row={row}
-                              reference={reference}
-                              title={display(row[data.columns[0]])}
-                            />
-                          </li>
-                        ))}
+                      {rows.map((row) => (
+                        <li key={row.id} className="border-b py-3">
+                          <RecordLinks
+                            row={row}
+                            reference={reference}
+                            title={display(
+                              data.titleField
+                                ? row[data.titleField]
+                                : undefined,
+                            )}
+                          />
+                        </li>
+                      ))}
                     </ul>
                   </section>
                 ),
@@ -195,7 +281,9 @@ export function CollectionBlock({
                   <tr>
                     {data.columns.map((key) => (
                       <th className="border-b px-3 py-2 font-medium" key={key}>
-                        {data.schema.config.fields[key].label ?? key}
+                        {data.columnAliases?.[key]?.trim() ||
+                          data.schema.config.fields[key].label ||
+                          key}
                       </th>
                     ))}
                   </tr>
@@ -227,7 +315,8 @@ export function CollectionBlock({
           )}
           <footer className="mt-3 flex items-center justify-end gap-3 text-sm">
             <span>
-              {page} · {data.total}
+              {page}
+              {data.total === undefined ? "" : ` · ${data.total}`}
             </span>
             <Button
               size="sm"
@@ -240,7 +329,7 @@ export function CollectionBlock({
             <Button
               size="sm"
               variant="ghost"
-              disabled={page * 20 >= data.total}
+              disabled={!data.hasNextPage}
               onClick={() => setPage((n) => n + 1)}
             >
               {t("Next")}

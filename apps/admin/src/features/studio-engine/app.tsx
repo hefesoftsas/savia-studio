@@ -113,6 +113,7 @@ import {
 } from "lucide-react";
 import { CollectionImportWizard } from "./collection-import-wizard";
 import { api, pluginApi, dataProvider } from "./api";
+import { recordPath } from "./record-path";
 import {
   attachTemporaryR2Attachments,
   deleteTemporaryR2Attachments,
@@ -496,8 +497,18 @@ function App({
   } | null>(null);
   const [writeKey, setWriteKey] = useState(() => crypto.randomUUID());
   const recordId = location.get("record");
+  const requestedObject = objects.find((item) => item.name === selected);
+  const recordObject =
+    requestedObject ??
+    (recordId && embedded && runtime.tenantId === 0 && selected === "clientes"
+      ? objects.find((item) => item.name === "agency_profiles")
+      : undefined);
+  const unavailableRecordLink =
+    !!recordId &&
+    (view === "records" || view === "edit") &&
+    (!recordObject || !collectionCapabilities(recordObject).read);
   const object =
-    objects.find((o) => o.name === selected) ??
+    recordObject ??
     (view === "designer" ? designerObjects[0] : visibleObjects[0]) ??
     objects[0];
   const resolvedObjectName = object?.name ?? selected;
@@ -513,6 +524,7 @@ function App({
       ),
     enabled:
       ready &&
+      !unavailableRecordLink &&
       !!object &&
       hubspot &&
       collectionCapabilities(object).read &&
@@ -528,7 +540,7 @@ function App({
       ? remoteTotal
       : undefined;
   const objectCount = studioCollectionCount(
-    object?.config.studio?.collection,
+    object?.config.studio,
     object?.count,
     hubspotTotal,
   );
@@ -556,18 +568,20 @@ function App({
     [contribution?.extensionId],
   );
   useEffect(() => {
-    if (!ready || !object || selected === object.name) return;
+    if (!ready || !object || selected === object.name || unavailableRecordLink)
+      return;
     const normalized = new URLSearchParams(location);
     normalized.set("object", object.name);
     updateLocation(normalized, true);
     setLocation(normalized);
-  }, [location, object, ready, selected]);
+  }, [location, object, ready, selected, unavailableRecordLink]);
   const detailQuery = useQuery({
-    queryKey: ["open-record", resolvedObjectName, recordId],
-    queryFn: () => api(`/records/${resolvedObjectName}/${recordId}`),
+    queryKey: ["open-record", recordObject?.name, recordId],
+    queryFn: () => api(recordPath(resolvedObjectName, recordId!)),
     enabled:
       ready &&
       !!recordId &&
+      !unavailableRecordLink &&
       !!object &&
       collectionCapabilities(object).read &&
       (view === "records" || view === "edit"),
@@ -588,7 +602,10 @@ function App({
     setLocation(params);
   };
   const closeRecord = () => {
-    const params = new URLSearchParams({ object: selected, view: "records" });
+    const params = new URLSearchParams({
+      object: resolvedObjectName,
+      view: "records",
+    });
     updateLocation(params);
     setLocation(params);
   };
@@ -880,6 +897,16 @@ function App({
         </Button>
       </div>
     );
+  if (ready && objectsQuery.isSuccess && unavailableRecordLink)
+    return (
+      <Modal
+        title={t("Registro no disponible")}
+        description={t("La colección del enlace ya no está disponible.")}
+        onClose={closeRecord}
+      >
+        <Button onClick={closeRecord}>{t("Volver a la lista")}</Button>
+      </Modal>
+    );
   const domainContent =
     view === "integrations" ? (
       <Suspense fallback={<Loading />}>
@@ -1075,7 +1102,9 @@ function App({
                 saveOptions?.idempotencyKey ?? writeKey,
               );
             const result = await api<{ data: StudioRecord }>(
-              `/records/${object.name}${creating ? "" : "/" + target.id}`,
+              creating
+                ? `/records/${encodeURIComponent(object.name)}`
+                : recordPath(object.name, target.id),
               creating ? "POST" : "PATCH",
               creating ? data : { ...data, _version: target._version },
               creating ? { headers: { "Idempotency-Key": writeKey } } : {},
@@ -1154,6 +1183,11 @@ function App({
                 ) : null}
                 {block.objects.map((o) => {
                   const Icon = icons[o.name] ?? Boxes;
+                  const count = studioCollectionCount(
+                    o.config.studio,
+                    o.count,
+                    o.name === resolvedObjectName ? hubspotTotal : undefined,
+                  );
                   return (
                     <div className="nav-screen" key={o.name}>
                       <button
@@ -1170,13 +1204,8 @@ function App({
                       >
                         <Icon size={18} />
                         <span>{o.label}</span>
-                        {isHubspotCollection(o.config.studio?.collection) ? (
-                          o.name === resolvedObjectName &&
-                          hubspotTotal !== undefined && (
-                            <span className="nav-count">{hubspotTotal}</span>
-                          )
-                        ) : (
-                          <span className="nav-count">{o.count ?? 0}</span>
+                        {count !== undefined && (
+                          <span className="nav-count">{count}</span>
                         )}
                       </button>
                       <button
@@ -1862,7 +1891,7 @@ function DeleteRecord({
               setBusy(true);
               try {
                 await api(
-                  `/records/${object.name}/${record.id}?version=${record._version}`,
+                  `${recordPath(object.name, record.id)}?version=${record._version}`,
                   "DELETE",
                 );
                 toast.success(

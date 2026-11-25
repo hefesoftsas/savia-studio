@@ -129,7 +129,7 @@ export function registerNotifications(
     return c.json({
       data: await repository.markAllRead(
         principalId,
-        { kind: "workspace", id: tenant },
+        scopes(tenant, principalId),
         body.cursor,
       ),
     });
@@ -141,7 +141,7 @@ export function registerNotifications(
     );
     await repository.markRead(
       principalId,
-      { kind: "workspace", id: tenant },
+      scopes(tenant, principalId),
       c.req.param("id"),
       body.read,
     );
@@ -151,7 +151,7 @@ export function registerNotifications(
     const { principalId, tenant, repository } = session(c, options);
     await repository.archive(
       principalId,
-      { kind: "workspace", id: tenant },
+      scopes(tenant, principalId),
       c.req.param("id"),
     );
     return c.json({ data: { updated: true } });

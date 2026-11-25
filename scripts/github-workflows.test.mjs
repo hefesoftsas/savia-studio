@@ -87,6 +87,10 @@ test("Preview frontend warmup runs from main without deployment credentials", as
   assert.match(warmup, /push:\s*\n\s*branches: \[main\]/);
   assert.match(warmup, /ref: \$\{\{ github\.sha \}\}/);
   assert.match(warmup, /permissions:\s*\n\s*contents: read/);
+  assert.match(
+    warmup,
+    /SAVIA_CI_FLOWS_ENABLED: \$\{\{ vars\.SAVIA_CI_FLOWS_ENABLED \}\}/,
+  );
   assert.doesNotMatch(warmup, /secrets\.|deployments: write|^\s+environment:/m);
   const runtime = deploy.slice(deploy.indexOf("  deploy:\n"));
   assert.match(runtime, /github\.event\.workflow_run\.conclusion == 'success'/);

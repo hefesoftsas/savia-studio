@@ -99,6 +99,32 @@ export const settingsMessages = {
     "Unable to delete the user.",
     "Não foi possível excluir o usuário.",
   ],
+  "El tenant seleccionado alcanzó su límite de usuarios activos.": [
+    "El tenant seleccionado alcanzó su límite de usuarios activos.",
+    "The selected tenant has reached its active user limit.",
+    "O tenant selecionado atingiu seu limite de usuários ativos.",
+  ],
+  "La contraseña temporal debe tener entre 12 y 128 caracteres.": [
+    "La contraseña temporal debe tener entre 12 y 128 caracteres.",
+    "The temporary password must contain 12 to 128 characters.",
+    "A senha temporária deve ter entre 12 e 128 caracteres.",
+  ],
+  "Selecciona un tenant comercial activo y un rol.": [
+    "Selecciona un tenant comercial activo y un rol.",
+    "Select an active commercial tenant and a role.",
+    "Selecione um tenant comercial ativo e uma função.",
+  ],
+  "No se pudo confirmar el guardado. Verifica el acceso actual del usuario antes de reintentar.":
+    [
+      "No se pudo confirmar el guardado. Verifica el acceso actual del usuario antes de reintentar.",
+      "Savia could not confirm the save. Verify the user's current access before retrying.",
+      "O Savia não conseguiu confirmar o salvamento. Verifique o acesso atual do usuário antes de tentar novamente.",
+    ],
+  "No fue posible guardar los cambios del usuario.": [
+    "No fue posible guardar los cambios del usuario.",
+    "Unable to save changes to the user.",
+    "Não foi possível salvar as alterações do usuário.",
+  ],
   "Este listado muestra únicamente las personas asignadas a este tenant.": [
     "Este listado muestra únicamente las personas asignadas a este tenant.",
     "This list only shows people assigned to this tenant.",

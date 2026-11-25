@@ -360,7 +360,7 @@ test("code-only Auth custody round-trips without plugin-editor URL or Cloudflare
   }
 });
 
-test("frontend code-only custody fingerprints the plugin-editor URL", async () => {
+test("frontend code-only custody fingerprints the plugin-editor URL and Flows build setting", async () => {
   const work = await mkdtemp(
     join(tmpdir(), "savia-custody-frontend-code-only-"),
   );
@@ -402,6 +402,17 @@ test("frontend code-only custody fingerprints the plugin-editor URL", async () =
       restored: false,
       reason: "current-preview-config-changed",
     });
+    assert.deepEqual(
+      await restorePreviewRuntimeArtifact({
+        archivePath,
+        provenancePath,
+        destination: restored,
+        key,
+        env: { ...env, SAVIA_CI_FLOWS_ENABLED: "false" },
+        ...identity,
+      }),
+      { restored: false, reason: "current-preview-config-changed" },
+    );
   } finally {
     await rm(work, { recursive: true, force: true });
   }

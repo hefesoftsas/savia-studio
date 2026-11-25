@@ -71,6 +71,10 @@ docker compose restart dev                 # reinstall after dependency changes
 docker compose down                        # stop; retain dependencies and data
 ```
 
+If the MFA setup page detects an authenticator that is already configured, it
+asks for the existing authenticator code and resumes authorization after
+verification.
+
 Avoid `docker compose down -v` unless you intend to delete this Compose
 project's volumes, including local databases and any legacy PostgreSQL volume.
 Optional files in `infra/secrets/` are read through the source mount; the image
@@ -133,8 +137,33 @@ pnpm dev
 ```
 
 This applies local D1 migrations, starts auth (`:8788`), savia-request
-(`:8797`, after `setup:local` + `migrate:local`), API and the private connector gateway (`:8787`), the CRM scheduler, and admin
-Vite (`:5173`).
+(`:8797`, after `setup:local` + `migrate:local`), API and the private connector gateway (`:8787`), and admin
+Vite (`:5173`). Startup stages the VS Code extension so the download in the
+local plugin catalog serves the same packaged file as a distribution build.
+Startup checks the fixed backend ports before building or applying migrations.
+It finishes local migrations and builds, including the Flows build when
+enabled, before starting any service.
+If another checkout already owns a backend port, use that stack or stop it
+before starting a new one. Admin can use the next available port when no
+explicit Admin port is configured, and OAuth uses that same port.
+Admin starts after the API's health check confirms the API can query local D1.
+A health response in maintenance mode keeps Admin waiting.
+If a local service exits on its own, the launcher reports the service and
+its exit status and stops the rest of that stack.
+When no bridge key or MCP secret is configured, startup generates a temporary
+key shared by API and Auth so tenant user administration works locally.
+The tenant form checks the administrator's email format and the name lengths
+before submitting, and highlights fields that need correction.
+If verification email delivery is unavailable, creating an unverified tenant
+administrator returns HTTP 503 with `VERIFICATION_EMAIL_UNAVAILABLE` and rolls
+back the tenant and account. The form keeps the entered values and shows the
+delivery error next to the fields. For a disposable local account with a
+temporary password, mark its email verified only if you control the test
+identity. Clearing the temporary password field uses the password setup email
+flow. If that email cannot be delivered, tenant creation returns HTTP 503 with
+`PASSWORD_RESET_EMAIL_UNAVAILABLE` and rolls back the provisional tenant and
+account. The form retains the entered values so you can provide a temporary
+password or retry after fixing delivery.
 
 ## Verify
 

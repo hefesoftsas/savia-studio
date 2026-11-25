@@ -1,11 +1,82 @@
 import type { MessageCatalog } from "@/i18n/core";
 
 export const tenantSettingsMessages = {
+  "The temporary password must contain 12 to 128 characters.": [
+    "La contraseña temporal debe tener entre 12 y 128 caracteres.",
+    "The temporary password must contain 12 to 128 characters.",
+    "A senha temporária deve ter entre 12 e 128 caracteres.",
+  ],
+  "Select the existing user to transfer.": [
+    "Selecciona el usuario existente que quieres transferir.",
+    "Select the existing user to transfer.",
+    "Selecione o usuário existente que deseja transferir.",
+  ],
+  "This user is unavailable. Choose another active user.": [
+    "Este usuario ya no está disponible. Selecciona otro usuario activo.",
+    "This user is unavailable. Choose another active user.",
+    "Este usuário está indisponível. Selecione outro usuário ativo.",
+  ],
+  "This user is the last active member of their organization. Add another member there before transferring them.":
+    [
+      "El usuario es el último miembro activo de su organización. Agrega otro miembro allí antes de transferirlo.",
+      "This user is the last active member of their organization. Add another member there before transferring them.",
+      "Este usuário é o último membro ativo da organização. Adicione outro membro à organização antes de transferi-lo.",
+    ],
+  "This user is a platform administrator. Revoke that role before transferring them.":
+    [
+      "El usuario es administrador de plataforma. Revoca ese rol antes de transferirlo.",
+      "This user is a platform administrator. Revoke that role before transferring them.",
+      "Este usuário é um administrador da plataforma. Revogue essa função antes de transferi-lo.",
+    ],
+  "The password setup email could not be sent. Use a temporary password or check email delivery.":
+    [
+      "No se pudo enviar el correo para configurar la contraseña. Usa una contraseña temporal o revisa el servicio de correo.",
+      "The password setup email could not be sent. Use a temporary password or check email delivery.",
+      "Não foi possível enviar o e-mail para definir a senha. Use uma senha temporária ou verifique o serviço de e-mail.",
+    ],
+  "Verification email could not be sent. Check email delivery and try again.": [
+    "No se pudo enviar el correo de verificación. Revisa el servicio de correo e inténtalo de nuevo.",
+    "Verification email could not be sent. Check email delivery and try again.",
+    "Não foi possível enviar o e-mail de verificação. Verifique o serviço de e-mail e tente novamente.",
+  ],
+  "An account already uses this email. Choose an existing user or use a different email.":
+    [
+      "Ya existe una cuenta con ese correo. Selecciona un usuario existente o usa otro correo.",
+      "An account already uses this email. Choose an existing user or use a different email.",
+      "Já existe uma conta com esse e-mail. Selecione um usuário existente ou use outro e-mail.",
+    ],
+  "The request timed out. Check the tenant list before trying again.": [
+    "La solicitud tardó demasiado. Revisa la lista de tenants antes de volver a intentarlo.",
+    "The request timed out. Check the tenant list before trying again.",
+    "A solicitação demorou demais. Verifique a lista de tenants antes de tentar novamente.",
+  ],
+  "Could not create the tenant. Review the information and try again.": [
+    "No se pudo crear el tenant. Revisa los datos e inténtalo de nuevo.",
+    "Could not create the tenant. Review the information and try again.",
+    "Não foi possível criar o tenant. Revise os dados e tente novamente.",
+  ],
+  "Could not save the tenant. Review the information and try again.": [
+    "No se pudo guardar el tenant. Revisa los datos e inténtalo de nuevo.",
+    "Could not save the tenant. Review the information and try again.",
+    "Não foi possível salvar o tenant. Revise os dados e tente novamente.",
+  ],
+  "Savia could not confirm the save. Open the tenant in another tab to check the changes before retrying.":
+    [
+      "No se pudo confirmar el guardado. Abre el tenant en otra pestaña para comprobar los cambios antes de reintentar.",
+      "Savia could not confirm the save. Open the tenant in another tab to check the changes before retrying.",
+      "O Savia não conseguiu confirmar o salvamento. Abra o tenant em outra aba para conferir as alterações antes de tentar novamente.",
+    ],
   "Tenant settings": [
     "Configuración del tenant",
     "Tenant settings",
     "Configurações do tenant",
   ],
+  "This is Savia’s internal workspace. Its general settings are read-only.": [
+    "Este es el espacio interno de Savia. Su configuración general es de solo lectura.",
+    "This is Savia’s internal workspace. Its general settings are read-only.",
+    "Este é o espaço interno da Savia. Suas configurações gerais são somente para leitura.",
+  ],
+  "View users": ["Ver usuarios", "View users", "Ver usuários"],
   General: ["General", "General", "Geral"],
   Access: ["Acceso", "Access", "Acesso"],
   Configuration: ["Configuración", "Configuration", "Configuração"],
@@ -41,12 +112,6 @@ export const tenantSettingsMessages = {
     "Delete permanently",
     "Excluir permanentemente",
   ],
-  "The tenant could not be fully deleted. Retry the deletion or contact a platform administrator.":
-    [
-      "No se pudo completar la eliminación del tenant. Inténtalo de nuevo o contacta a un administrador de plataforma.",
-      "The tenant could not be fully deleted. Retry the deletion or contact a platform administrator.",
-      "Não foi possível concluir a exclusão do tenant. Tente novamente ou entre em contato com um administrador da plataforma.",
-    ],
   "The tenant name changed or did not match. Refresh the tenant and confirm using its current name.":
     [
       "El nombre del tenant cambió o no coincide. Actualiza el tenant y confirma con su nombre actual.",
@@ -58,6 +123,23 @@ export const tenantSettingsMessages = {
       "Algunos servicios de limpieza no están disponibles. Actualiza el tenant e intenta eliminarlo de nuevo.",
       "Some cleanup services are unavailable. Refresh the tenant and retry the deletion.",
       "Alguns serviços de limpeza estão indisponíveis. Atualize o tenant e tente excluí-lo novamente.",
+    ],
+  "Tenant file cleanup failed. The tenant is inactive. Retry the deletion.": [
+    "No se pudo completar la limpieza de archivos. El tenant quedó inactivo. Intenta eliminarlo de nuevo.",
+    "Tenant file cleanup failed. The tenant is inactive. Retry the deletion.",
+    "Não foi possível concluir a limpeza dos arquivos. O tenant ficou inativo. Tente excluí-lo novamente.",
+  ],
+  "Tenant authentication settings could not be removed. The tenant is inactive. Retry the deletion.":
+    [
+      "No se pudo eliminar la configuración de autenticación. El tenant quedó inactivo. Intenta eliminarlo de nuevo.",
+      "Tenant authentication settings could not be removed. The tenant is inactive. Retry the deletion.",
+      "Não foi possível excluir as configurações de autenticação. O tenant ficou inativo. Tente excluí-lo novamente.",
+    ],
+  "A tenant image is still uploading. Wait for it to finish before retrying deletion.":
+    [
+      "Hay una imagen del tenant que se está subiendo. Espera a que termine y vuelve a intentar la eliminación.",
+      "A tenant image is still uploading. Wait for it to finish before retrying deletion.",
+      "Uma imagem do tenant ainda está sendo enviada. Aguarde o envio terminar antes de tentar excluir novamente.",
     ],
   "Deleting…": ["Eliminando…", "Deleting…", "Excluindo…"],
   "Deletion did not return a result. Refresh the tenant list to check its status before retrying.":

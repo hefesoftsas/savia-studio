@@ -74,6 +74,12 @@ it("shows an inline month and the selected day's explicit time buttons together"
   expect(
     await screen.findByRole("button", { name: "9:00 AM" }),
   ).toBeInTheDocument();
+  expect(
+    screen.getByRole("heading", { name: "Monday, October 5" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("group", { name: "Available times for October 5, 2026" }),
+  ).toBeInTheDocument();
   expect(screen.getByRole("grid")).toBeInTheDocument();
   expect(document.querySelector('input[type="date"]')).toBeNull();
   expect(
@@ -82,7 +88,7 @@ it("shows an inline month and the selected day's explicit time buttons together"
   await waitFor(() => expect(onChange).not.toHaveBeenCalled());
 });
 
-it("clears a previously selected UTC slot when its availability refresh fails", async () => {
+it("keeps the selection pending when availability cannot be verified", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => {
@@ -90,6 +96,7 @@ it("clears a previously selected UTC slot when its availability refresh fails", 
     }),
   );
   const onChange = vi.fn();
+  const onReadyChange = vi.fn();
   render(
     <StoreContextProvider value={memoryStore({ locale: "en" })}>
       <AppLocaleProvider>
@@ -115,6 +122,7 @@ it("clears a previously selected UTC slot when its availability refresh fails", 
             },
           }}
           onChange={onChange}
+          onReadyChange={onReadyChange}
         />
       </AppLocaleProvider>
     </StoreContextProvider>,
@@ -122,32 +130,33 @@ it("clears a previously selected UTC slot when its availability refresh fails", 
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Available times could not be loaded",
   );
-  await waitFor(() => expect(onChange).toHaveBeenCalledWith(undefined));
+  expect(onReadyChange).toHaveBeenCalledWith(false);
+  expect(onReadyChange).not.toHaveBeenCalledWith(true);
+  expect(onChange).not.toHaveBeenCalled();
+  expect(screen.queryByText("No available times")).not.toBeInTheDocument();
 });
 
-it("keeps the UTC slot identity when the display time zone changes", async () => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () =>
-      Response.json({
-        data: {
-          displayTimeZone: "America/New_York",
-          businessTimeZone: "America/Bogota",
-          days: [
-            {
-              date: "2026-10-05",
-              slots: [
-                {
-                  startsAt: "2026-10-05T14:00:00Z",
-                  endsAt: "2026-10-05T14:30:00Z",
-                },
-              ],
-            },
-          ],
-        },
-      }),
-    ),
+it("verifies a preselected time once per zone and keeps its UTC identity", async () => {
+  const loadAvailability = vi.fn(async () =>
+    Response.json({
+      data: {
+        displayTimeZone: "America/New_York",
+        businessTimeZone: "America/Bogota",
+        days: [
+          {
+            date: "2026-10-05",
+            slots: [
+              {
+                startsAt: "2026-10-05T14:00:00Z",
+                endsAt: "2026-10-05T14:30:00Z",
+              },
+            ],
+          },
+        ],
+      },
+    }),
   );
+  vi.stubGlobal("fetch", loadAvailability);
   const onChange = vi.fn();
   const onTimeZoneChange = vi.fn();
   function ControlledAvailability() {
@@ -189,6 +198,7 @@ it("keeps the UTC slot identity when the display time zone changes", async () =>
     </StoreContextProvider>,
   );
   await screen.findByRole("button", { name: "9:00 AM" });
+  expect(loadAvailability).toHaveBeenCalledTimes(1);
   fireEvent.change(screen.getByLabelText("Time zone"), {
     target: { value: "America/New_York" },
   });
@@ -201,4 +211,5 @@ it("keeps the UTC slot identity when the display time zone changes", async () =>
       }),
     ),
   );
+  expect(loadAvailability).toHaveBeenCalledTimes(2);
 });

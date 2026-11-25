@@ -61,6 +61,62 @@ describe("edge gateway", () => {
     expect(api.fetch).not.toHaveBeenCalled();
   });
 
+  it.each([".vsix", ".vsix.sha256"])(
+    "returns 404 for a missing extension download ending in %s",
+    async (suffix) => {
+      const assets = {
+        fetch: vi.fn(
+          async () =>
+            new Response("<html>Admin</html>", {
+              headers: { "content-type": "text/html;charset=UTF-8" },
+            }),
+        ),
+      };
+      const api = { fetch: vi.fn() };
+      const response = await gatewayFetch(
+        new Request(
+          `https://savia-preview.hefesoft.com/downloads/savia-plugin-authoring-0.1.0${suffix}`,
+        ),
+        { API: api, ASSETS: assets },
+      );
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.text()).not.toContain("<html>");
+      expect(api.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("serves the VS Code package as an attachment and preserves range metadata", async () => {
+    const filename = "savia-plugin-authoring-0.1.0.vsix";
+    const bytes = Uint8Array.of(0x50, 0x4b);
+    const assets = {
+      fetch: vi.fn(
+        async () =>
+          new Response(bytes, {
+            status: 206,
+            headers: { "content-range": "bytes 0-1/10" },
+          }),
+      ),
+    };
+    const response = await gatewayFetch(
+      new Request(`https://savia-preview.hefesoft.com/downloads/${filename}`, {
+        headers: { range: "bytes=0-1" },
+      }),
+      { API: { fetch: vi.fn() }, ASSETS: assets },
+    );
+
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-range")).toBe("bytes 0-1/10");
+    expect(response.headers.get("content-type")).toBe(
+      "application/octet-stream",
+    );
+    expect(response.headers.get("content-disposition")).toBe(
+      `attachment; filename="${filename}"`,
+    );
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+  });
+
   it("keeps Savia Flows deep links on the child HTML shell", async () => {
     const api = { fetch: vi.fn(async () => Response.json({ via: "api" })) };
     let assetRequest: Request | undefined;
@@ -346,7 +402,9 @@ describe("edge gateway", () => {
   it("resolves the tenant slug only for direct tenant subdomains", () => {
     expect(
       tenantSlugFromRequest(
-        new Request("https://example-organization.savia.hefesoft.com/v1/tenants"),
+        new Request(
+          "https://example-organization.savia.hefesoft.com/v1/tenants",
+        ),
       ),
     ).toBe("example-organization");
     expect(
@@ -374,7 +432,9 @@ describe("edge gateway", () => {
 
     expect(api.fetch).toHaveBeenCalledOnce();
     const forwarded = api.fetch.mock.calls[0]?.[0];
-    expect(forwarded?.headers.get(TENANT_SLUG_HEADER)).toBe("example-organization");
+    expect(forwarded?.headers.get(TENANT_SLUG_HEADER)).toBe(
+      "example-organization",
+    );
     expect(assets.fetch).not.toHaveBeenCalled();
   });
 

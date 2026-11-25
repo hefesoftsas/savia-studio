@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 8
     env:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
+      SAVIA_CI_FLOWS_ENABLED: ${{ vars.SAVIA_CI_FLOWS_ENABLED }}
     steps:
       - uses: actions/checkout@v4
         with:

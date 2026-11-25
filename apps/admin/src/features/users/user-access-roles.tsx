@@ -1,5 +1,5 @@
 import { useAccessRealtime } from "@/realtime/use-access-realtime";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { useWatch } from "react-hook-form";
 import { useInput } from "ra-core";
@@ -9,6 +9,7 @@ import { createAccessControlClient } from "@/api/access-control-client";
 import { useMessages } from "@/i18n/core";
 import { accessMessages } from "@/i18n/locales/access";
 import { Button } from "@/components/ui/button";
+import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/access-control";
 
 export function UserAccessRoles() {
   const { apiClient } = useAppServices();
@@ -23,20 +24,43 @@ export function UserAccessRoles() {
   useAccessRealtime(scope);
   const { field } = useInput({ source: "accessRoleIds", defaultValue: [] });
   const previousScope = useRef(scope);
-  useEffect(() => {
-    if (previousScope.current !== scope) {
-      previousScope.current = scope;
-      field.onChange([]);
-    }
-  }, [scope, field.onChange]);
+  const [removedRoles, setRemovedRoles] = useState(false);
   const roles = useQuery({
     queryKey: ["access-control", "roles", scope],
     enabled: Boolean(scope),
     queryFn: () => createAccessControlClient(apiClient).listRoles(scope),
   });
-  const available =
-    roles.data?.roles.filter((role) => !role.protected && role.enabled) ?? [];
+  const available = useMemo(
+    () =>
+      roles.data?.roles.filter((role) => !role.protected && role.enabled) ?? [],
+    [roles.data],
+  );
   const selected: string[] = field.value ?? [];
+  const atRoleLimit = selected.length >= MAX_CUSTOM_ROLES_PER_USER;
+  useEffect(() => {
+    if (previousScope.current !== scope) {
+      previousScope.current = scope;
+      field.onChange([]);
+      setRemovedRoles(false);
+      return;
+    }
+    if (!roles.isSuccess || roles.isFetching || roles.isPlaceholderData) return;
+    const selectedIds: string[] = field.value ?? [];
+    const availableIds = new Set(available.map((role) => role.id));
+    const next = selectedIds.filter((id) => availableIds.has(id));
+    if (next.length < selectedIds.length) {
+      field.onChange(next);
+      setRemovedRoles(true);
+    }
+  }, [
+    scope,
+    field.value,
+    field.onChange,
+    available,
+    roles.isSuccess,
+    roles.isFetching,
+    roles.isPlaceholderData,
+  ]);
   return (
     <fieldset className="space-y-3 border-t pt-4 md:col-span-2">
       <legend className="text-sm font-medium">{t("Tenant roles")}</legend>
@@ -45,6 +69,19 @@ export function UserAccessRoles() {
           "Select roles created in Roles and permissions for this tenant. They add access to the base role.",
         )}
       </p>
+      {removedRoles && (
+        <p role="status" className="text-sm">
+          {t("Some selected roles are no longer available and were removed.")}
+        </p>
+      )}
+      {atRoleLimit && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {t(
+            "You can assign up to %{count} custom roles per user. Deselect a role to choose another.",
+            { count: MAX_CUSTOM_ROLES_PER_USER },
+          )}
+        </p>
+      )}
       {!scope ? (
         <p className="text-sm">{t("Select a tenant to see its roles.")}</p>
       ) : roles.isPending ? (
@@ -77,6 +114,7 @@ export function UserAccessRoles() {
               type="checkbox"
               className="mt-1"
               checked={selected.includes(role.id)}
+              disabled={atRoleLimit && !selected.includes(role.id)}
               onBlur={field.onBlur}
               onChange={(event) =>
                 field.onChange(

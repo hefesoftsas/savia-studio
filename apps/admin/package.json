@@ -15,7 +15,7 @@
     "typecheck": "pnpm run generate:api && tsc --noEmit",
     "test": "vitest run --maxWorkers=1 $VITEST_SHARD_ARGS",
     "test:watch": "vitest",
-    "verify:build": "node ../../scripts/check-spa-build.mjs dist",
+    "verify:build": "node ../../scripts/check-spa-build.mjs",
     "measure:build": "node ../../scripts/measure-spa-build.mjs dist"
   },
   "dependencies": {

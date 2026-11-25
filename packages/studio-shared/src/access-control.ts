@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const MAX_CUSTOM_ROLES_PER_USER = 100;
+
 export type AccessScope = "platform" | `tenant:${number}`;
 export type AccessAction =
   | "read"

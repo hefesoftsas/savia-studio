@@ -17,7 +17,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await env.AUTH_DB.exec("DELETE FROM auth_notice_events").catch(() => undefined);
+  await env.AUTH_DB.exec("DELETE FROM auth_notice_events").catch(
+    () => undefined,
+  );
 });
 
 describe("auth notice source events", () => {
@@ -26,7 +28,17 @@ describe("auth notice source events", () => {
       `INSERT INTO "user"(id,name,email,emailVerified,image,createdAt,updatedAt,role,twoFactorEnabled)
        VALUES (?,?,?,?,?,?,?,?,?)`,
     )
-      .bind("u1", "Test", "test@example.test", 0, null, "2026-09-20", "2026-09-20", "user", 0)
+      .bind(
+        "u1",
+        "Test",
+        "test@example.test",
+        0,
+        null,
+        "2026-09-20",
+        "2026-09-20",
+        "user",
+        0,
+      )
       .run();
     await env.AUTH_DB.prepare(`UPDATE "user" SET emailVerified=1 WHERE id=?`)
       .bind("u1")
@@ -120,16 +132,21 @@ describe("auth notice source events", () => {
 
   it("rejects unauthenticated bridge access", async () => {
     const denied = await authWorker.fetch(
-      new Request("https://savia-auth.internal/_internal/notification-events/read?limit=10"),
+      new Request(
+        "https://savia-auth.internal/_internal/notification-events/read?limit=10",
+      ),
       env,
     );
     expect(denied.status).toBe(403);
     const ackDenied = await authWorker.fetch(
-      new Request("https://savia-auth.internal/_internal/notification-events/ack", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: ["x"] }),
-      }),
+      new Request(
+        "https://savia-auth.internal/_internal/notification-events/ack",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: ["x"] }),
+        },
+      ),
       env,
     );
     expect(ackDenied.status).toBe(403);
@@ -137,10 +154,15 @@ describe("auth notice source events", () => {
 
   it("authorizes the bridge only with the configured key", () => {
     const request = (key?: string) =>
-      new Request("https://savia-auth.internal/_internal/notification-events/read", {
-        headers: key ? { "x-savia-bridge-key": key } : {},
-      });
-    expect(authNoticeBridgeAuthorized(undefined, request("anything"))).toBe(false);
+      new Request(
+        "https://savia-auth.internal/_internal/notification-events/read",
+        {
+          headers: key ? { "x-savia-bridge-key": key } : {},
+        },
+      );
+    expect(authNoticeBridgeAuthorized(undefined, request("anything"))).toBe(
+      false,
+    );
     expect(authNoticeBridgeAuthorized("secret", request())).toBe(false);
     expect(authNoticeBridgeAuthorized("secret", request("wrong"))).toBe(false);
     expect(authNoticeBridgeAuthorized("secret", request("secret"))).toBe(true);

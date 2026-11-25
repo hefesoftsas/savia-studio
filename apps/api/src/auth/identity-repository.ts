@@ -14,6 +14,7 @@ import {
   assertPrincipalCanLoseActiveMembership,
   assignOrTransferMembership,
   syncPlatformAdministratorMembership,
+  type MembershipDestinationOptions,
 } from "./tenant-membership-invariants";
 import type {
   AgencyMembership,
@@ -381,6 +382,7 @@ export async function grantMembership(
   principalId: string,
   tenantId: number,
   role: AgencyRole,
+  options?: MembershipDestinationOptions,
 ): Promise<AgencyMembership> {
   if (!isRegisteredAgencyRole(role))
     throw new Error("Invalid tenant membership role");
@@ -400,7 +402,7 @@ export async function grantMembership(
       "Revoke platform administration with a commercial tenant before transferring this user",
     );
   }
-  return assignOrTransferMembership(d1, principalId, tenantId, role);
+  return assignOrTransferMembership(d1, principalId, tenantId, role, options);
 }
 
 export async function removeMembership(

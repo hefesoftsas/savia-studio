@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import pg from "pg";
 import { migratePostgres } from "../src/postgres/migrations.js";
+import { openSqliteDatabase } from "../src/sqlite.js";
 const url = process.env.SAVIA_TEST_POSTGRES_URL;
 const live = url ? describe : describe.skip;
 // Native fixtures create hundreds of tables/indexes; concurrent image builds can delay DDL.
@@ -98,6 +99,38 @@ import {
 const root = resolve(import.meta.dirname, "../../..");
 const coreDirectory = join(root, "packages/db/postgres");
 const requestDirectory = join(root, "apps/savia-request/postgres");
+async function sourceSqliteCheckCounts() {
+  const sqlite = openSqliteDatabase(":memory:");
+  try {
+    for (const filename of readdirSync(join(root, "packages/db/migrations"))
+      .filter((name) => name.endsWith(".sql"))
+      .sort()) {
+      const source = readFileSync(
+        join(root, "packages/db/migrations", filename),
+        "utf8",
+      );
+      for (const statement of source
+        .split("--> statement-breakpoint")
+        .map((sql) => sql.trim())
+        .filter(Boolean))
+        await sqlite.exec(statement);
+    }
+    return new Map(
+      (
+        await sqlite
+          .prepare(
+            "SELECT name,sql FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+          )
+          .all<{ name: string; sql: string }>()
+      ).results.map(({ name, sql }) => [
+        name,
+        [...sql.matchAll(/\bCHECK\s*\(/gi)].length,
+      ]),
+    );
+  } finally {
+    sqlite.close();
+  }
+}
 if (postgresTestsRequired && !url)
   it("requires the live PostgreSQL URL", () => {
     throw new Error("SAVIA_TEST_POSTGRES_URL is required.");
@@ -119,9 +152,19 @@ live("native baseline parity", () => {
           directory: requestDirectory,
           seed: false,
         });
+        const collectionSourceKindCheck = await db
+          .prepare(
+            `SELECT pg_get_constraintdef(oid) AS definition
+             FROM pg_constraint
+             WHERE conrelid='savia_core.studio_collection_sources'::regclass
+               AND conname='studio_collection_sources_kind_check'`,
+          )
+          .first<{ definition: string }>();
+        expect(collectionSourceKindCheck?.definition).toContain("mcp");
         const manifest = JSON.parse(
           readFileSync(join(coreDirectory, "manifest.json"), "utf8"),
         );
+        const sqliteCheckCounts = await sourceSqliteCheckCounts();
         const tables = (
           await db
             .prepare(
@@ -177,7 +220,8 @@ live("native baseline parity", () => {
           expect(
             constraints.find((c) => c.name === table.name && c.contype === "c")
               ?.n ?? 0,
-          ).toBe(table.checkCount);
+            table.name,
+          ).toBe(sqliteCheckCounts.get(table.name));
         }
         const triggers = (
           await db
@@ -549,6 +593,72 @@ live("native baseline parity", () => {
     },
     nativeDdlTimeout,
   );
+});
+
+live("native migration compatibility", () => {
+  it("repairs an already-applied Flows trigger migration with its old checksum", async () => {
+    await withPostgresFixture(async (_db, connectionString) => {
+      await migratePostgres({
+        connectionString,
+        schema: "savia_core",
+        directory: coreDirectory,
+        seed: false,
+      });
+      const pool = createPostgresPool({ connectionString });
+      const client = await pool.connect();
+      try {
+        await client.query("SET check_function_bodies TO off");
+        const definition = await client.query<{ definition: string }>(
+          "SELECT pg_get_functiondef('savia_core.savia_flows_capture_collection_event()'::regprocedure) AS definition",
+        );
+        await client.query(
+          definition.rows[0].definition.replaceAll(
+            "active_schema",
+            "current_schema",
+          ),
+        );
+        await client.query(
+          "UPDATE savia_core._savia_postgres_migrations SET checksum=$1 WHERE filename=$2",
+          [
+            "35aa3bd9d34a2b1f73e704b3f88cb70bcdb699ce9111eca8206a70a30593ade0",
+            "0057_savia_flows_collection_events.sql",
+          ],
+        );
+        await client.query(
+          "UPDATE savia_core._savia_postgres_migrations SET checksum=$1 WHERE filename=$2",
+          [
+            "b358d11b71f37983bbae64bdc8b764281bd1973b8f1996fc99ef918d41f76a92",
+            "0058_savia_flows_native_causation.sql",
+          ],
+        );
+        await client.query(
+          "DELETE FROM savia_core._savia_postgres_migrations WHERE filename='0063_savia_flows_reserved_alias.sql'",
+        );
+      } finally {
+        client.release();
+        await closePostgresPool(pool);
+      }
+
+      expect(
+        await migratePostgres({
+          connectionString,
+          schema: "savia_core",
+          directory: coreDirectory,
+          seed: false,
+        }),
+      ).toContain("0063_savia_flows_reserved_alias.sql");
+      const verify = createPostgresPool({ connectionString });
+      try {
+        const definition = await verify.query<{ definition: string }>(
+          "SELECT pg_get_functiondef('savia_core.savia_flows_capture_collection_event()'::regprocedure) AS definition",
+        );
+        expect(definition.rows[0].definition).toContain("active_schema");
+        expect(definition.rows[0].definition).not.toContain("current_schema");
+      } finally {
+        await closePostgresPool(verify);
+      }
+    });
+  });
 });
 
 it("pins every source migration checksum for both native baselines", () => {

@@ -3,6 +3,7 @@ import { fetchTenantWorkspaces } from "@/api/tenant-workspaces-client";
 import {
   isHubspotCollection,
   matchTenantApiBasePath,
+  studioCollectionCount,
 } from "@/features/studio/studio-navigation";
 import type { MyDayWidget } from "@savia/studio-shared/my-day-widgets";
 import type {
@@ -25,7 +26,12 @@ export type ObjectsResponse = {
       studio?: {
         screen?: { hidden?: unknown };
         requestPage?: unknown;
-        collection?: { kind?: unknown; sourceId?: unknown };
+        business?: unknown;
+        collection?: {
+          kind?: unknown;
+          sourceId?: unknown;
+          capabilities?: { sort?: unknown };
+        };
       };
     };
   }>;
@@ -35,6 +41,19 @@ type RecordsResponse = {
   data: WidgetRecord[];
   total?: number;
 };
+
+function normalizeWidgetRecords(response: RecordsResponse): WidgetRecordsPage {
+  const total =
+    typeof response.total === "number" &&
+    Number.isSafeInteger(response.total) &&
+    response.total >= 0
+      ? response.total
+      : undefined;
+  return {
+    data: Array.isArray(response.data) ? response.data : [],
+    ...(total !== undefined ? { total } : {}),
+  };
+}
 
 type SummaryResponse = {
   data: Array<{ value?: unknown; count?: unknown; amount?: unknown }>;
@@ -61,15 +80,15 @@ export function normalizeCollections(
 ): WidgetCollection[] {
   return response.data
     .filter(isVisibleObject)
-    .map((row) => ({
-      apiBasePath,
-      name: String(row.name),
-      label: objectLabel(row),
-      ...(typeof row.count === "number" &&
-      !isHubspotCollection(row.config?.studio?.collection)
-        ? { count: row.count }
-        : {}),
-    }))
+    .map((row) => {
+      const count = studioCollectionCount(row.config?.studio, row.count);
+      return {
+        apiBasePath,
+        name: String(row.name),
+        label: objectLabel(row),
+        ...(count !== undefined ? { count } : {}),
+      };
+    })
     .sort((left, right) => left.label.localeCompare(right.label, "es"));
 }
 
@@ -80,6 +99,9 @@ export function normalizeSchema(
 ): WidgetCollectionSchema | undefined {
   const row = response.data.find((candidate) => candidate.name === collection);
   if (!row || !isVisibleObject(row)) return undefined;
+  const source = row.config?.studio?.collection;
+  const hubspot = isHubspotCollection(source);
+  const listOnlyCrm = source?.kind === "crm" && !hubspot;
   const fields = Object.entries(row.config?.fields ?? {})
     .filter(
       (entry): entry is [string, { type?: unknown; label?: unknown }] =>
@@ -96,9 +118,11 @@ export function normalizeSchema(
     name: collection,
     label: objectLabel(row),
     fields,
-    ...(isHubspotCollection(row.config?.studio?.collection)
-      ? { hubspot: true }
+    ...(hubspot ? { hubspot: true } : {}),
+    ...(source?.kind === "crm" || source?.capabilities?.sort === false
+      ? { sortSupported: false }
       : {}),
+    ...(listOnlyCrm ? { summarySupported: false } : {}),
   };
 }
 
@@ -139,30 +163,29 @@ export async function describeWidgetCollection(
 export async function listWidgetRecords(
   apiClient: ApiClient,
   widget: Extract<MyDayWidget, { apiBasePath: string; collection: string }>,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; sortSupported?: boolean },
 ): Promise<WidgetRecordsPage> {
   const limit = widget.config?.limit ?? 5;
   const parameters = new URLSearchParams({
     page: "1",
     perPage: String(limit),
-    sort: widget.config?.sort ?? "updated_at",
-    order: widget.config?.order ?? "DESC",
   });
+  if (options?.sortSupported !== false) {
+    parameters.set("sort", widget.config?.sort ?? "updated_at");
+    parameters.set("order", widget.config?.order ?? "DESC");
+  }
   const response = await apiClient.get<RecordsResponse>(
     `${recordsPath(widget)}?${parameters}`,
     { signal: options?.signal },
   );
-  return {
-    data: Array.isArray(response.data) ? response.data : [],
-    total: typeof response.total === "number" ? response.total : 0,
-  };
+  return normalizeWidgetRecords(response);
 }
 export async function loadWidgetSummary(
   apiClient: ApiClient,
   widget: Extract<MyDayWidget, { apiBasePath: string; collection: string }>,
   groupField?: string,
   options?: { signal?: AbortSignal },
-): Promise<{ total?: number; groups: WidgetSummaryGroup[] }> {
+): Promise<{ total?: number; groups?: WidgetSummaryGroup[] }> {
   const parameters = new URLSearchParams();
   if (groupField) parameters.set("group", groupField);
   if (groupField && widget.config?.amountField)
@@ -171,14 +194,30 @@ export async function loadWidgetSummary(
     `${recordsPath(widget)}/summary${parameters.size ? `?${parameters}` : ""}`,
     { signal: options?.signal },
   );
-  return {
-    total: response.total,
-    groups: (Array.isArray(response.data) ? response.data : []).map((row) => ({
+  const total = response?.total;
+  if (!Array.isArray(response?.data)) return { total };
+  const groups: WidgetSummaryGroup[] = [];
+  const requiresAmount = Boolean(groupField && widget.config?.amountField);
+  for (const row of response.data) {
+    if (
+      !row ||
+      typeof row.count !== "number" ||
+      !Number.isSafeInteger(row.count) ||
+      row.count < 0 ||
+      (requiresAmount &&
+        (typeof row.amount !== "number" || !Number.isFinite(row.amount)))
+    )
+      return { total };
+    groups.push({
       value: row.value == null ? "—" : String(row.value),
-      count: typeof row.count === "number" ? row.count : 0,
-      amount: typeof row.amount === "number" ? row.amount : 0,
-    })),
-  };
+      count: row.count,
+      amount:
+        typeof row.amount === "number" && Number.isFinite(row.amount)
+          ? row.amount
+          : 0,
+    });
+  }
+  return { total, groups };
 }
 
 export async function summarizeWidgetRecords(
@@ -187,8 +226,14 @@ export async function summarizeWidgetRecords(
   groupField: string,
   options?: { signal?: AbortSignal },
 ): Promise<WidgetSummaryGroup[]> {
-  return (await loadWidgetSummary(apiClient, widget, groupField, options))
-    .groups;
+  const { groups } = await loadWidgetSummary(
+    apiClient,
+    widget,
+    groupField,
+    options,
+  );
+  if (!groups) throw new Error("Collection summary groups are unavailable");
+  return groups;
 }
 
 export function widgetDeepLink(widget: MyDayWidget): string {
@@ -217,12 +262,9 @@ export async function listWidgetRecordsForReview(
     sort: dateField,
     order: "ASC",
   });
-  const response = await apiClient.get<{
-    data: WidgetRecord[];
-    total?: number;
-  }>(`${recordsPath(widget)}?${parameters}`, { signal: options?.signal });
-  return {
-    data: Array.isArray(response.data) ? response.data : [],
-    total: typeof response.total === "number" ? response.total : 0,
-  };
+  const response = await apiClient.get<RecordsResponse>(
+    `${recordsPath(widget)}?${parameters}`,
+    { signal: options?.signal },
+  );
+  return normalizeWidgetRecords(response);
 }

@@ -184,6 +184,25 @@ test("rejects changed public build inputs and altered artifact files", async (t)
   });
 });
 
+test("rebuilds Preview frontend assets when the Flows build setting changes", async (t) => {
+  const input = await fixture(t);
+  const enabled = { ...env, SAVIA_CI_FLOWS_ENABLED: "true" };
+  await stagePreviewFrontendArtifact({ ...input, env: enabled });
+  await clearGeneratedOutputs(input.root);
+
+  await assert.rejects(
+    restorePreviewFrontendArtifact({
+      ...input,
+      env: { ...env, SAVIA_CI_FLOWS_ENABLED: "false" },
+    }),
+    /metadata does not match/,
+  );
+  await assert.rejects(lstat(join(input.root, "apps/admin/dist")), {
+    code: "ENOENT",
+  });
+  await restorePreviewFrontendArtifact({ ...input, env: enabled });
+});
+
 test("rejects symlinks and unexpected artifact files", async (t) => {
   const input = await fixture(t);
   await stagePreviewFrontendArtifact({ ...input, env });

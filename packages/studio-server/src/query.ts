@@ -5,51 +5,16 @@ import {
   type JsonOperator,
 } from "@savia/db/dialect";
 import type { StudioObject } from "@savia/studio-shared/metadata";
-import { z } from "zod";
+import { resolveRecordSearchFields } from "@savia/studio-shared/record-search-fields";
 import { fail } from "./context";
 import type { AccessPolicy } from "@savia/studio-shared/access-control";
 import { compileAccessWhere } from "./access-query";
 import { accessColumns, requireQueryAccess } from "./access-authorization";
 import { recordSearchCandidate } from "./record-search";
-export const filterSchema = z.object({
-  logic: z.enum(["and", "or"]).default("and"),
-  conditions: z
-    .array(
-      z.object({
-        field: z.string(),
-        op: z.enum([
-          "eq",
-          "ne",
-          "gt",
-          "gte",
-          "lt",
-          "lte",
-          "contains",
-          "startsWith",
-          "endsWith",
-          "empty",
-          "in",
-        ]),
-        value: z.unknown().optional(),
-      }),
-    )
-    .max(20),
-});
-function resolveSearchFields(
-  object: StudioObject,
-  params: Record<string, string | undefined>,
-) {
-  if (params.searchFields) {
-    return params.searchFields
-      .split(",")
-      .map((field) => field.trim())
-      .filter((field) => object.config.fields[field])
-      .slice(0, 20);
-  }
-  if (params.searchField && object.config.fields[params.searchField])
-    return [params.searchField];
-  return [];
-}
+import { parseRecordFilters } from "./record-filters";
+
+export { filterSchema } from "./record-filters";
+
 export function buildWhere(
   object: StudioObject,
   tenant: string,
@@ -82,6 +47,12 @@ export function buildWhere(
     args.push(...access.bindings);
   }
   if (params.q) {
+    const searchFields = resolveRecordSearchFields(
+      object,
+      params.searchField,
+      params.searchFields,
+    );
+    if (!searchFields) return fail("Campo de búsqueda desconocido.", 422);
     const query = params.q.slice(0, 200);
     const pattern = "%" + query.replace(/[\\%_]/g, "\\$&") + "%";
     const candidate =
@@ -90,7 +61,6 @@ export function buildWhere(
       where += ` AND studio_records.rowid IN (SELECT rowid FROM studio_record_search_fts WHERE studio_record_search_fts MATCH ? AND tenant_id=? AND object_name=?)`;
       args.push(candidate, tenant, object.name);
     }
-    const searchFields = resolveSearchFields(object, params);
     if (searchFields.length) {
       where += ` AND (${searchFields
         .map((field) =>
@@ -117,13 +87,7 @@ export function buildWhere(
   if (params.emptyStage === "true" && object.config.fields[pipeline])
     where += ` AND (${dialect.jsonText("data", "$." + pipeline)} IS NULL OR ${dialect.jsonText("data", "$." + pipeline)}='')`;
   if (params.filters) {
-    let raw;
-    try {
-      raw = JSON.parse(params.filters);
-    } catch {
-      return fail("Filtros inválidos.", 422);
-    }
-    const filters = filterSchema.parse(raw);
+    const filters = parseRecordFilters(params.filters);
     const parts: string[] = [];
     for (const condition of filters.conditions) {
       if (!object.config.fields[condition.field])

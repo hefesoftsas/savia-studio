@@ -1,5 +1,8 @@
 ALTER TABLE savia_core.studio_collection_sources
-  DROP CONSTRAINT studio_collection_sources_kind_check;
+  DROP CONSTRAINT IF EXISTS crm_collection_sources_kind_check;
+--> statement-breakpoint
+ALTER TABLE savia_core.studio_collection_sources
+  DROP CONSTRAINT IF EXISTS studio_collection_sources_kind_check;
 --> statement-breakpoint
 ALTER TABLE savia_core.studio_collection_sources
   ADD CONSTRAINT studio_collection_sources_kind_check

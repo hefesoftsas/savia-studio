@@ -12,7 +12,14 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Columns3, ListFilter, Search, Table2, Trash2 } from "lucide-react";
+import {
+  Columns3,
+  ListFilter,
+  LoaderCircle,
+  Search,
+  Table2,
+  Trash2,
+} from "lucide-react";
 import MicrosoftExcel from "@thesvg/react/microsoft-excel";
 import { useEffect, useState } from "react";
 import type { CollectionCapabilities } from "./collection-capabilities";
@@ -39,6 +46,8 @@ export function RecordsCommandToolbar({
   filters,
   onFiltersChange,
   canExportCsv,
+  csvSearchPending,
+  exportingCsv,
   onExportCsv,
   trash,
   onTrashToggle,
@@ -62,6 +71,8 @@ export function RecordsCommandToolbar({
   filters: RecordsFilters;
   onFiltersChange: (next: RecordsFilters) => void;
   canExportCsv: boolean;
+  csvSearchPending: boolean;
+  exportingCsv: boolean;
   onExportCsv: () => void;
   trash: boolean;
   onTrashToggle: () => void;
@@ -81,6 +92,17 @@ export function RecordsCommandToolbar({
   const [draftFilters, setDraftFilters] = useState(filters);
   const activeFilters = filters.conditions.length;
   const searchEnabled = capabilities.search !== false;
+  const supportsFieldSearch = object.config.studio?.collection?.kind !== "crm";
+  const selectedField =
+    searchField && Object.hasOwn(object.config.fields, searchField)
+      ? object.config.fields[searchField]
+      : undefined;
+  const selectedOption = searchOptions.find(
+    (option) => option.key === searchField,
+  );
+  const searchLabel =
+    (supportsFieldSearch && (selectedOption?.label ?? selectedField?.label)) ||
+    object.label.toLowerCase();
   const filtersEnabled = capabilities.filter !== false;
 
   useEffect(() => {
@@ -118,18 +140,25 @@ export function RecordsCommandToolbar({
     >
       {searchEnabled && (
         <div className="records-command-search">
-          {object.config.studio?.collection?.kind !== "crm" && (
+          {supportsFieldSearch && (
             <label className="records-command-field">
               <span className="view-config-sr-only">
                 {t("Buscar por campo")}
               </span>
               <select
                 aria-label={t("Buscar por campo")}
+                aria-invalid={!!searchField && !selectedField}
                 className="select-input"
                 value={searchField}
                 onChange={(event) => onSearchFieldChange(event.target.value)}
               >
                 <option value="">{t("Todos los campos")}</option>
+                {searchField && !selectedOption && (
+                  <option value={searchField} disabled={!selectedField}>
+                    {selectedField?.label ??
+                      t("Campo no disponible (%{p0})", { p0: searchField })}
+                  </option>
+                )}
                 {searchOptions.map((option) => (
                   <option key={option.key} value={option.key}>
                     {option.label}
@@ -141,22 +170,8 @@ export function RecordsCommandToolbar({
           <div className="search-wrap">
             <Search size={17} aria-hidden="true" />
             <Input
-              aria-label={
-                object.config.studio?.collection?.kind !== "crm" && searchField
-                  ? t("Buscar en %{p0}", {
-                      p0:
-                        object.config.fields[searchField]?.label ?? searchField,
-                    })
-                  : t("Buscar en %{p0}", { p0: object.label.toLowerCase() })
-              }
-              placeholder={
-                object.config.studio?.collection?.kind !== "crm" && searchField
-                  ? t("Buscar en %{p0}…", {
-                      p0:
-                        object.config.fields[searchField]?.label ?? searchField,
-                    })
-                  : t("Buscar en %{p0}…", { p0: object.label.toLowerCase() })
-              }
+              aria-label={t("Buscar en %{p0}", { p0: searchLabel })}
+              placeholder={t("Buscar en %{p0}…", { p0: searchLabel })}
               value={searchQuery}
               onChange={(event) => onSearchQueryChange(event.target.value)}
             />
@@ -254,9 +269,18 @@ export function RecordsCommandToolbar({
                 variant="outline"
                 size="icon"
                 aria-label={t("Exportar a CSV")}
+                aria-busy={exportingCsv}
+                disabled={exportingCsv || csvSearchPending}
                 onClick={onExportCsv}
               >
-                <MicrosoftExcel aria-hidden className="size-4" />
+                {exportingCsv ? (
+                  <LoaderCircle
+                    aria-hidden
+                    className="size-4 motion-safe:animate-spin"
+                  />
+                ) : (
+                  <MicrosoftExcel aria-hidden className="size-4" />
+                )}
               </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom" sideOffset={6}>

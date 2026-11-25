@@ -76,6 +76,14 @@ function encode(value: string): string {
   return encodeURIComponent(value);
 }
 
+function collectionTotal(value: unknown, minimum = 0): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= minimum
+    ? value
+    : null;
+}
+
 export class SaviaApiClient {
   private readonly baseUrl: string;
   private readonly accessToken: string | undefined;
@@ -291,6 +299,7 @@ export class SaviaApiClient {
               collection?: { kind?: string; sourceId?: string };
               screen?: { hidden?: boolean };
               requestPage?: unknown;
+              business?: unknown;
             };
           };
         }
@@ -301,6 +310,7 @@ export class SaviaApiClient {
         data: result.data
           .filter((object) => object.config?.studio?.collection?.kind === "crm")
           .map((object) =>
+            object.count !== undefined ||
             object.config?.studio?.collection?.sourceId === "hubspot"
               ? { ...object, count: null }
               : object,
@@ -352,14 +362,18 @@ export class SaviaApiClient {
             }
           }
         }
-        const binding = object.config?.studio?.collection;
+        const studio = object.config?.studio;
+        const binding = studio?.collection;
         const hubspot =
           binding?.kind === "crm" && binding.sourceId === "hubspot";
         return {
           name: object.name ?? "",
           label: object.label ?? object.name ?? "",
           description: object.description ?? "",
-          recordCount: hubspot ? null : object.count,
+          recordCount:
+            binding?.kind || studio?.requestPage || studio?.business
+              ? null
+              : object.count,
           ...(hubspot ? { sourceId: "hubspot" } : {}),
           kind:
             binding?.kind ??
@@ -461,7 +475,15 @@ export class SaviaApiClient {
         typeof filters === "string" ? filters : JSON.stringify(filters),
       );
     }
-    return this.request(`${path}?${params}`);
+    const response = await this.request<{ data?: unknown; total?: unknown }>(
+      `${path}?${params}`,
+    );
+    return Array.isArray(response?.data)
+      ? {
+          ...response,
+          total: collectionTotal(response.total, response.data.length),
+        }
+      : response;
   }
 
   async lookupDaneCity(city: string, department?: string) {
@@ -513,19 +535,22 @@ export class SaviaApiClient {
       true,
     );
     const path = this.studioPath(tenantId, `records/${encode(object)}`);
-    if (collection.sourceId === "hubspot") {
+    const hubspot = collection.sourceId === "hubspot";
+    if (hubspot) {
       if (options.filters !== undefined)
         throw new Error(
           "HubSpot collection aggregates do not support structured filters.",
         );
-      if (!options.groupBy) {
+      if (!options.groupBy && options.amountField === undefined) {
         const response = await this.request<{ total?: number }>(
           `${path}/summary`,
         );
-        return { total: response.total ?? null };
+        return { total: collectionTotal(response.total) };
       }
     }
-    if (!options.groupBy) {
+    if (!options.groupBy && options.amountField !== undefined && !hubspot)
+      throw new Error("groupBy is required to sum a field in this collection.");
+    if (!options.groupBy && options.amountField === undefined) {
       const params = new URLSearchParams({ page: "1", perPage: "1" });
       if (options.filters !== undefined) {
         params.set(
@@ -538,9 +563,10 @@ export class SaviaApiClient {
       const response = await this.request<{ total: number }>(
         `${path}?${params}`,
       );
-      return { total: response.total ?? null };
+      return { total: collectionTotal(response.total) };
     }
-    const params = new URLSearchParams({ group: options.groupBy });
+    const params = new URLSearchParams();
+    if (options.groupBy) params.set("group", options.groupBy);
     if (options.amountField !== undefined) {
       params.set("amountField", options.amountField);
     }

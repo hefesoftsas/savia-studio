@@ -205,7 +205,7 @@ export default function RecordDetail({
   const managedCustomer = !supportsLocalRecordTools(object);
   const capabilities = collectionCapabilities(object);
   const client = useQueryClient(),
-    base = `${object.name}/${record.id}`;
+    base = `${encodeURIComponent(object.name)}/${encodeURIComponent(record.id)}`;
   const detail = useQuery({
     queryKey: ["record-detail", object.name, record.id, relationPage],
     queryFn: () =>
@@ -226,7 +226,7 @@ export default function RecordDetail({
     ],
     queryFn: () =>
       api<{ data: RecordRelationGroup[] }>(
-        `/record-links/${encodeURIComponent(object.name)}/${encodeURIComponent(String(record.id))}?page=1&perPage=20&includeRecords=false`,
+        `/record-links/${base}?page=1&perPage=20&includeRecords=false`,
       ),
   });
   const relationGroups =

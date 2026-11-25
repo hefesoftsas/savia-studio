@@ -2,9 +2,15 @@ import { MailWidgetBody } from "./mail-widget";
 import type { MailState } from "./use-my-day-mail";
 import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
 import { matchTenantApiBasePath } from "@/features/studio/studio-navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ExternalLink, RefreshCw } from "lucide-react";
-import type { ApiClient } from "@/api/api-client";
+import { ApiClientError, type ApiClient } from "@/api/api-client";
+import { RequestTimeoutError } from "@/api/request-timeout";
+import { formatRetryTime } from "@/api/retry-after";
+import { isOfflineError } from "@/offline/offline-error";
+import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
+import { getLogoutPending } from "@/auth/logout-progress";
+import { useSessionGeneration } from "@/auth/session-scope";
 import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
 import type { MyDayWidget } from "@savia/studio-shared/my-day-widgets";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -42,7 +48,11 @@ import { PluginWidgetBody } from "./plugin-widget";
 import { parsePluginKind, pluginContributionFor } from "./plugins";
 import { AgendaWidgetBody, QuickTaskWidgetBody } from "./agenda-widget";
 import { OfficeDocumentsWidgetBody } from "./office-documents-widget";
-import type { WidgetCollectionSchema, WidgetRecord } from "./types";
+import type {
+  WidgetCollectionSchema,
+  WidgetRecord,
+  WidgetSummaryGroup,
+} from "./types";
 import { widgetMessages } from "./widget-messages";
 
 function formatCount(value: number, locale: string): string {
@@ -111,43 +121,206 @@ function WidgetSkeleton() {
   );
 }
 
+type WidgetSchemaResult =
+  | { status: "pending" | "missing" | "failed" }
+  | { status: "ready"; schema: WidgetCollectionSchema };
+
+type WidgetSchemaRequest = {
+  apiClient: ApiClient;
+  apiBasePath: string;
+  collection: string;
+  sessionGeneration: number;
+  revision: number;
+  result: WidgetSchemaResult;
+  refreshFailed?: boolean;
+};
+
+function isTemporaryWidgetError(error: unknown): boolean {
+  return error instanceof ApiClientError
+    ? error.status >= 500 || error.status === 408 || error.status === 429
+    : error instanceof RequestTimeoutError || isOfflineError(error);
+}
+
+function WidgetSchemaFallback({
+  status,
+  retry,
+}: {
+  status: "pending" | "missing" | "failed";
+  retry: () => void;
+}) {
+  const t = useMessages(widgetMessages);
+  if (status === "failed")
+    return (
+      <WidgetError
+        message={t("Could not read this collection.")}
+        onRetry={retry}
+      />
+    );
+  if (status === "missing")
+    return (
+      <p className="text-sm text-muted-foreground">
+        {t(
+          "This collection is no longer available. Remove it from your dashboard.",
+        )}
+      </p>
+    );
+  return <WidgetSkeleton />;
+}
+
 function useWidgetSchema(
   apiClient: ApiClient | undefined,
   widget: Extract<MyDayWidget, { apiBasePath: string; collection: string }>,
-) {
-  const [schema, setSchema] = useState<WidgetCollectionSchema | null>(null);
-  const [missing, setMissing] = useState(false);
+): WidgetSchemaResult & { retry: () => void; refreshFailed: boolean } {
+  const [request, setRequest] = useState<WidgetSchemaRequest | null>(null);
   const [revision, setRevision] = useState(0);
-  const tenantId = matchTenantApiBasePath(widget.apiBasePath);
+  const sessionGeneration = useSessionGeneration();
+  const { apiBasePath, collection } = widget;
+  const isCurrentScope = useCallback(
+    (request: WidgetSchemaRequest | null): request is WidgetSchemaRequest =>
+      request !== null &&
+      request.apiClient === apiClient &&
+      request.apiBasePath === apiBasePath &&
+      request.collection === collection &&
+      request.sessionGeneration === sessionGeneration,
+    [apiClient, apiBasePath, collection, sessionGeneration],
+  );
+  const retry = () => setRevision((value) => value + 1);
+  const tenantId = matchTenantApiBasePath(apiBasePath);
   useRealtimeRefresh({
     topics: ["studio"],
     tenantId: Number(tenantId),
     enabled: tenantId !== undefined,
-    refresh: () => setRevision((value) => value + 1),
+    refresh: retry,
   });
   useEffect(() => {
-    if (!apiClient) return;
+    if (!apiClient || getLogoutPending()) return;
     let active = true;
-    void describeWidgetCollection(
+    const scope = {
       apiClient,
-      widget.apiBasePath,
-      widget.collection,
-    ).then(
-      (result) => {
+      apiBasePath,
+      collection,
+      sessionGeneration,
+      revision,
+    };
+    const finish = (result: WidgetSchemaResult) => {
+      if (active) setRequest({ ...scope, result });
+    };
+    void describeWidgetCollection(apiClient, apiBasePath, collection).then(
+      (schema) =>
+        finish(schema ? { status: "ready", schema } : { status: "missing" }),
+      (error: unknown) => {
         if (!active) return;
-        setSchema(result ?? null);
-        setMissing(!result);
-      },
-      () => {
-        if (active) setMissing(true);
+        setRequest((previous) => {
+          if (
+            isCurrentScope(previous) &&
+            previous.result.status === "ready" &&
+            isTemporaryWidgetError(error)
+          )
+            return { ...previous, revision, refreshFailed: true };
+          return { ...scope, result: { status: "failed" } };
+        });
       },
     );
     return () => {
       active = false;
     };
-  }, [apiClient, widget.apiBasePath, widget.collection, revision]);
-  return { schema, missing };
+  }, [
+    apiClient,
+    apiBasePath,
+    collection,
+    sessionGeneration,
+    revision,
+    isCurrentScope,
+  ]);
+  const current = isCurrentScope(request) ? request : null;
+  const result =
+    current &&
+    (current.revision === revision || current.result.status === "ready")
+      ? current.result
+      : { status: "pending" as const };
+  return {
+    ...result,
+    retry,
+    refreshFailed:
+      current?.revision === revision && current.refreshFailed === true,
+  };
 }
+
+function WidgetRefreshStatus({
+  metadata,
+  error,
+  onRetry,
+}: {
+  metadata: { refreshFailed: boolean; retry: () => void };
+  error?: string;
+  onRetry: () => void;
+}) {
+  const t = useMessages(widgetMessages);
+  return (
+    <ReadRefreshStatus
+      error={
+        metadata.refreshFailed ? t("Could not read this collection.") : error
+      }
+      onRetry={metadata.refreshFailed ? metadata.retry : onRetry}
+    />
+  );
+}
+
+function useWidgetResult<T extends object>(
+  schema: WidgetCollectionSchema | null,
+  selectionKey: string,
+) {
+  const [request, setRequest] = useState<{
+    schema: WidgetCollectionSchema | null;
+    selectionKey: string;
+    data?: T;
+    failure?: { status?: number; retryAt?: number };
+  }>();
+  const setResult = useCallback(
+    (result?: { data: T } | { error: unknown }) => {
+      setRequest((previous) => {
+        const current =
+          previous?.schema === schema && previous.selectionKey === selectionKey
+            ? previous
+            : undefined;
+        if (!result)
+          return current?.failure
+            ? { ...current, failure: undefined }
+            : current;
+        if ("data" in result)
+          return { schema, selectionKey, data: result.data };
+        return {
+          schema,
+          selectionKey,
+          failure:
+            result.error instanceof ApiClientError
+              ? { status: result.error.status, retryAt: result.error.retryAt }
+              : {},
+          data: isTemporaryWidgetError(result.error)
+            ? current?.data
+            : undefined,
+        };
+      });
+    },
+    [schema, selectionKey],
+  );
+  const result =
+    request?.schema === schema && request.selectionKey === selectionKey
+      ? request
+      : undefined;
+  return [
+    result?.data,
+    Boolean(result?.failure),
+    setResult,
+    result?.failure,
+  ] as const;
+}
+
+type SummaryWidgetResult = {
+  total: number | undefined;
+  groups: WidgetSummaryGroup[] | null;
+  breakdownUnavailable?: boolean;
+};
 
 export function SummaryWidgetBody({
   apiClient,
@@ -158,96 +331,146 @@ export function SummaryWidgetBody({
 }) {
   const t = useMessages(widgetMessages);
   const uiLocale = intlLocale(useAppLocale());
-  const [total, setTotal] = useState<number | null>(null);
-  const [groups, setGroups] = useState<
-    { value: string; count: number; amount: number }[] | null
-  >(null);
-  const [failed, setFailed] = useState(false);
   const [nonce, setNonce] = useState(0);
   const tenantId = matchTenantApiBasePath(widget.apiBasePath);
+  const metadata = useWidgetSchema(apiClient, widget);
+  const schema = metadata.status === "ready" ? metadata.schema : null;
+  const detected = schema ? autoDetectWidgetConfig(schema) : {};
+  const statusField =
+    schema?.summarySupported === false
+      ? undefined
+      : (widget.config?.statusField ?? detected.statusField);
+  const amountField = widget.config?.amountField ?? detected.amountField;
+  const limit = widget.config?.limit ?? 5;
+  const [result, failed, setResult, failure] =
+    useWidgetResult<SummaryWidgetResult>(
+      schema,
+      JSON.stringify([statusField, amountField]),
+    );
+
   useRealtimeRefresh({
     topics: ["records"],
     tenantId: Number(tenantId),
     enabled: tenantId !== undefined,
     accepts: (event) => event.collection === widget.collection,
-    refresh: () => setNonce((value) => value + 1),
+    refresh: () => {
+      if (
+        schema?.hubspot &&
+        failure?.retryAt !== undefined &&
+        Date.now() < failure.retryAt
+      )
+        return;
+      setNonce((value) => value + 1);
+    },
   });
-  const { schema, missing } = useWidgetSchema(apiClient, widget);
-  const detected = schema ? autoDetectWidgetConfig(schema) : {};
-  const statusField = widget.config?.statusField ?? detected.statusField;
-  const amountField = widget.config?.amountField ?? detected.amountField;
-  const limit = widget.config?.limit ?? 5;
 
   useEffect(() => {
-    if (!apiClient) return;
-    // Wait for the schema so auto-detected group fields apply to
-    // widgets saved without an explicit status field.
-    if (schema === null && !missing) return;
+    if (!apiClient || !schema) return;
     let active = true;
-    setFailed(false);
+    setResult();
+    const finish = (result: SummaryWidgetResult) => {
+      if (active) setResult({ data: result });
+    };
     void (async () => {
       try {
         const effective: MyDayWidget = {
           ...widget,
           config: { ...widget.config, amountField },
         };
-        if (schema?.hubspot) {
+        if (schema.hubspot) {
+          let fallbackToTotal = false;
           const summary = await loadWidgetSummary(
             apiClient,
             effective,
             statusField,
-          );
+          ).catch((error: unknown) => {
+            if (
+              !active ||
+              !statusField ||
+              !(error instanceof ApiClientError) ||
+              error.status !== 422
+            )
+              throw error;
+            fallbackToTotal = true;
+            return loadWidgetSummary(apiClient, effective);
+          });
           if (
             summary.total === undefined ||
             !Number.isSafeInteger(summary.total) ||
             summary.total < 0
           )
             throw new Error("HubSpot collection total is unavailable");
-          if (!active) return;
-          setTotal(summary.total);
-          setGroups(statusField ? summary.groups : null);
+          finish({
+            total: summary.total,
+            groups:
+              statusField && !fallbackToTotal ? (summary.groups ?? null) : null,
+            breakdownUnavailable:
+              Boolean(statusField) &&
+              (fallbackToTotal || summary.groups === undefined),
+          });
           return;
         }
         const [page, breakdown] = await Promise.all([
-          listWidgetRecords(apiClient, {
-            ...widget,
-            config: { ...widget.config, limit: 1 },
-          }),
+          listWidgetRecords(
+            apiClient,
+            { ...widget, config: { ...widget.config, limit: 1 } },
+            { sortSupported: schema.sortSupported },
+          ),
           statusField
             ? summarizeWidgetRecords(apiClient, effective, statusField)
             : Promise.resolve(null),
         ]);
-        if (!active) return;
-        setTotal(page.total);
-        setGroups(breakdown);
-      } catch {
-        if (active) setFailed(true);
+        finish({ total: page.total, groups: breakdown });
+      } catch (error) {
+        if (active) setResult({ error });
       }
     })();
     return () => {
       active = false;
     };
-  }, [apiClient, widget, schema, missing, statusField, amountField, nonce]);
+  }, [apiClient, widget, schema, statusField, amountField, nonce, setResult]);
 
-  if (!apiClient) return <WidgetSkeleton />;
-  if (failed)
-    return (
-      <WidgetError
-        message={t("Could not load this summary.")}
-        onRetry={() => setNonce((value) => value + 1)}
-      />
-    );
-  if (total === null) return <WidgetSkeleton />;
+  if (metadata.status !== "ready")
+    return <WidgetSchemaFallback {...metadata} />;
+  const retry = () => setNonce((value) => value + 1);
+  const retryTime = schema?.hubspot
+    ? formatRetryTime(failure, uiLocale)
+    : undefined;
+  const error = retryTime
+    ? t("HubSpot reached its request limit. You can retry from %{p0}.", {
+        p0: retryTime,
+      })
+    : schema?.hubspot && failure?.status === 429
+      ? t("HubSpot reached its request limit. Try again later.")
+      : t("Could not load this summary.");
+  if (failed && !result) return <WidgetError message={error} onRetry={retry} />;
+  if (!result) return <WidgetSkeleton />;
+  const { total, groups, breakdownUnavailable } = result;
 
   return (
     <div className="space-y-3">
-      <div className="flex items-baseline gap-2">
-        <span className="text-3xl font-semibold tabular-nums">
-          {formatCount(total, uiLocale)}
-        </span>
-        <span className="text-sm text-muted-foreground">{t("records")}</span>
-      </div>
-      {groups?.length ? (
+      <WidgetRefreshStatus
+        metadata={metadata}
+        error={failed ? error : undefined}
+        onRetry={retry}
+      />
+      {total === undefined ? (
+        <p className="text-sm text-muted-foreground">
+          {t("The record total is unavailable.")}
+        </p>
+      ) : (
+        <div className="flex items-baseline gap-2">
+          <span className="text-3xl font-semibold tabular-nums">
+            {formatCount(total, uiLocale)}
+          </span>
+          <span className="text-sm text-muted-foreground">{t("records")}</span>
+        </div>
+      )}
+      {breakdownUnavailable ? (
+        <p className="text-sm text-muted-foreground">
+          {t("The status breakdown is unavailable.")}
+        </p>
+      ) : groups?.length ? (
         <ul className="divide-y rounded-lg border">
           {groups.slice(0, limit).map((group) => (
             <li
@@ -268,7 +491,9 @@ export function SummaryWidgetBody({
             </li>
           ))}
         </ul>
-      ) : schema === null || statusField ? null : (
+      ) : total === undefined ||
+        metadata.schema.summarySupported === false ||
+        statusField ? null : (
         <p className="text-sm text-muted-foreground">
           {t("No status field: showing the collection total.")}
         </p>
@@ -286,10 +511,6 @@ export function ItemsWidgetBody({
 }) {
   const t = useMessages(widgetMessages);
   const uiLocale = intlLocale(useAppLocale());
-  const [records, setRecords] = useState<
-    { id: string; title: string; status?: string; date?: string }[] | null
-  >(null);
-  const [failed, setFailed] = useState(false);
   const [nonce, setNonce] = useState(0);
   const tenantId = matchTenantApiBasePath(widget.apiBasePath);
   useRealtimeRefresh({
@@ -299,73 +520,94 @@ export function ItemsWidgetBody({
     accepts: (event) => event.collection === widget.collection,
     refresh: () => setNonce((value) => value + 1),
   });
-  const { schema, missing } = useWidgetSchema(apiClient, widget);
+  const metadata = useWidgetSchema(apiClient, widget);
+  const schema = metadata.status === "ready" ? metadata.schema : null;
+  const { limit, sort, order, statusField, dateField } = widget.config ?? {};
+  const [records, failed, setRecords] = useWidgetResult<
+    { id: string; title: string; status?: string; date?: string }[]
+  >(
+    schema,
+    JSON.stringify([limit, sort, order, statusField, dateField, uiLocale]),
+  );
 
   useEffect(() => {
-    if (!apiClient) return;
+    if (!apiClient || !schema) return;
     let active = true;
-    setFailed(false);
-    void listWidgetRecords(apiClient, widget).then(
+    setRecords();
+    void listWidgetRecords(apiClient, widget, {
+      sortSupported: schema.sortSupported,
+    }).then(
       (page) => {
         if (!active) return;
-        setRecords(
-          page.data.map((record) => ({
+        setRecords({
+          data: page.data.map((record) => ({
             id: String(record.id),
-            title: recordTitle(record, schema ?? undefined),
-            status:
-              recordStatus(record, widget.config?.statusField) ?? undefined,
-            date: formatRecordDate(record, widget.config?.dateField, uiLocale),
+            title: recordTitle(record, schema),
+            status: recordStatus(record, statusField) ?? undefined,
+            date: formatRecordDate(record, dateField, uiLocale),
           })),
-        );
+        });
       },
-      () => {
-        if (active) setFailed(true);
+      (error: unknown) => {
+        if (active) setRecords({ error });
       },
     );
     return () => {
       active = false;
     };
-  }, [apiClient, widget, schema, nonce]);
+  }, [
+    apiClient,
+    widget,
+    schema,
+    nonce,
+    uiLocale,
+    statusField,
+    dateField,
+    setRecords,
+  ]);
 
-  if (!apiClient) return <WidgetSkeleton />;
-  if (missing)
-    return (
-      <p className="text-sm text-muted-foreground">
-        {t(
-          "This collection is no longer available. Remove it from your dashboard.",
-        )}
-      </p>
-    );
-  if (failed)
-    return (
-      <WidgetError
-        message={t("Could not load these items.")}
-        onRetry={() => setNonce((value) => value + 1)}
-      />
-    );
-  if (records === null) return <WidgetSkeleton />;
+  if (metadata.status !== "ready")
+    return <WidgetSchemaFallback {...metadata} />;
+  const retry = () => setNonce((value) => value + 1);
+  const error = t("Could not load these items.");
+  if (failed && !records)
+    return <WidgetError message={error} onRetry={retry} />;
+  if (!records) return <WidgetSkeleton />;
+  const refreshStatus = (
+    <WidgetRefreshStatus
+      metadata={metadata}
+      error={failed ? error : undefined}
+      onRetry={retry}
+    />
+  );
   if (records.length === 0)
     return (
-      <p className="text-sm text-muted-foreground">
-        {t("There are no records in this collection yet.")}
-      </p>
+      <>
+        {refreshStatus}
+        <p className="text-sm text-muted-foreground">
+          {t("There are no records in this collection yet.")}
+        </p>
+      </>
     );
 
   return (
-    <ul className="divide-y rounded-lg border">
-      {records.map((record) => (
-        <li key={record.id} className="px-3 py-2">
-          <p className="truncate text-sm font-medium">{record.title}</p>
-          <p className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
-            {record.status ? <span>{record.status}</span> : null}
-            {record.date ? <span>{record.date}</span> : null}
-            {!record.status && !record.date ? (
-              <span>{t("No details")}</span>
-            ) : null}
-          </p>
-        </li>
-      ))}
-    </ul>
+    <div className="space-y-3">
+      {refreshStatus}
+      <ul className="divide-y rounded-lg border">
+        {records.map((record) => (
+          <li key={record.id} className="px-3 py-2">
+            <p className="truncate text-sm font-medium">{record.title}</p>
+            <p className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
+              {record.status ? <span>{record.status}</span> : null}
+              {record.date ? <span>{record.date}</span> : null}
+              {!record.status && !record.date ? (
+                <span>{t("No details")}</span>
+              ) : null}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -378,10 +620,6 @@ export function ChartWidgetBody({
 }) {
   const t = useMessages(widgetMessages);
   const uiLocale = intlLocale(useAppLocale());
-  const [groups, setGroups] = useState<
-    { value: string; count: number; amount: number }[] | null
-  >(null);
-  const [failed, setFailed] = useState(false);
   const [nonce, setNonce] = useState(0);
   const tenantId = matchTenantApiBasePath(widget.apiBasePath);
   useRealtimeRefresh({
@@ -391,17 +629,22 @@ export function ChartWidgetBody({
     accepts: (event) => event.collection === widget.collection,
     refresh: () => setNonce((value) => value + 1),
   });
-  const { schema, missing } = useWidgetSchema(apiClient, widget);
+  const metadata = useWidgetSchema(apiClient, widget);
+  const schema = metadata.status === "ready" ? metadata.schema : null;
   const detected = schema ? autoDetectWidgetConfig(schema) : {};
   const groupField = widget.config?.groupField ?? detected.statusField;
   const amountField = widget.config?.amountField ?? detected.amountField;
   const limit = widget.config?.limit ?? 5;
+  const unsupported = schema?.summarySupported === false;
+  const [groups, failed, setGroups] = useWidgetResult<WidgetSummaryGroup[]>(
+    schema,
+    JSON.stringify([groupField, amountField]),
+  );
 
   useEffect(() => {
-    if (!apiClient || !groupField) return;
-    if (schema === null && !missing) return;
+    if (!apiClient || !schema || unsupported || !groupField) return;
     let active = true;
-    setFailed(false);
+    setGroups();
     void summarizeWidgetRecords(
       apiClient,
       { ...widget, config: { ...widget.config, amountField } },
@@ -409,19 +652,35 @@ export function ChartWidgetBody({
       undefined,
     ).then(
       (breakdown) => {
-        if (active) setGroups(breakdown);
+        if (active) setGroups({ data: breakdown });
       },
-      () => {
-        if (active) setFailed(true);
+      (error: unknown) => {
+        if (active) setGroups({ error });
       },
     );
     return () => {
       active = false;
     };
-  }, [apiClient, widget, schema, missing, groupField, amountField, nonce]);
+  }, [
+    apiClient,
+    widget,
+    schema,
+    unsupported,
+    groupField,
+    amountField,
+    nonce,
+    setGroups,
+  ]);
 
-  if (!apiClient) return <WidgetSkeleton />;
-  if (missing || (schema && !groupField))
+  if (metadata.status !== "ready")
+    return <WidgetSchemaFallback {...metadata} />;
+  if (unsupported)
+    return (
+      <p className="text-sm text-muted-foreground">
+        {t("This source does not support charts by status.")}
+      </p>
+    );
+  if (!groupField)
     return (
       <p className="text-sm text-muted-foreground">
         {t(
@@ -429,50 +688,61 @@ export function ChartWidgetBody({
         )}
       </p>
     );
-  if (failed)
-    return (
-      <WidgetError
-        message={t("Could not load this chart.")}
-        onRetry={() => setNonce((value) => value + 1)}
-      />
-    );
-  if (groups === null) return <WidgetSkeleton />;
+  const retry = () => setNonce((value) => value + 1);
+  const error = t("Could not load this chart.");
+  if (failed && !groups) return <WidgetError message={error} onRetry={retry} />;
+  if (!groups) return <WidgetSkeleton />;
+  const refreshStatus = (
+    <WidgetRefreshStatus
+      metadata={metadata}
+      error={failed ? error : undefined}
+      onRetry={retry}
+    />
+  );
   if (groups.length === 0)
     return (
-      <p className="text-sm text-muted-foreground">
-        {t("No data to chart yet.")}
-      </p>
+      <>
+        {refreshStatus}
+        <p className="text-sm text-muted-foreground">
+          {t("No data to chart yet.")}
+        </p>
+      </>
     );
 
   const visible = groups.slice(0, limit);
   const max = Math.max(1, ...visible.map((group) => group.count));
 
   return (
-    <ul className="space-y-2.5">
-      {visible.map((group) => (
-        <li key={group.value}>
-          <div className="flex items-center justify-between gap-2 text-sm">
-            <span className="min-w-0 flex-1 truncate font-medium">
-              {group.value}
-            </span>
-            <span className="tabular-nums text-muted-foreground">
-              {amountField ? `${formatAmount(group.amount, uiLocale)} · ` : ""}
-              {formatCount(group.count, uiLocale)}
-            </span>
-          </div>
-          <div
-            className="mt-1 h-2 overflow-hidden rounded-full bg-muted"
-            role="img"
-            aria-label={`${group.value}: ${formatCount(group.count, uiLocale)}`}
-          >
+    <div className="space-y-3">
+      {refreshStatus}
+      <ul className="space-y-2.5">
+        {visible.map((group) => (
+          <li key={group.value}>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="min-w-0 flex-1 truncate font-medium">
+                {group.value}
+              </span>
+              <span className="tabular-nums text-muted-foreground">
+                {amountField
+                  ? `${formatAmount(group.amount, uiLocale)} · `
+                  : ""}
+                {formatCount(group.count, uiLocale)}
+              </span>
+            </div>
             <div
-              className="h-full rounded-full bg-primary/70"
-              style={{ width: `${Math.round((group.count / max) * 100)}%` }}
-            />
-          </div>
-        </li>
-      ))}
-    </ul>
+              className="mt-1 h-2 overflow-hidden rounded-full bg-muted"
+              role="img"
+              aria-label={`${group.value}: ${formatCount(group.count, uiLocale)}`}
+            >
+              <div
+                className="h-full rounded-full bg-primary/70"
+                style={{ width: `${Math.round((group.count / max) * 100)}%` }}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -486,16 +756,6 @@ export function ActionsWidgetBody({
   const locale = useAppLocale();
   const uiLocale = intlLocale(locale);
   const t = useMessages(widgetMessages);
-  const [items, setItems] = useState<
-    | {
-        id: string;
-        title: string;
-        day: string;
-        bucket: "overdue" | "today" | "week";
-      }[]
-    | null
-  >(null);
-  const [failed, setFailed] = useState(false);
   const [nonce, setNonce] = useState(0);
   const tenantId = matchTenantApiBasePath(widget.apiBasePath);
   useRealtimeRefresh({
@@ -505,71 +765,86 @@ export function ActionsWidgetBody({
     accepts: (event) => event.collection === widget.collection,
     refresh: () => setNonce((value) => value + 1),
   });
-  const { schema, missing } = useWidgetSchema(apiClient, widget);
+  const metadata = useWidgetSchema(apiClient, widget);
+  const schema = metadata.status === "ready" ? metadata.schema : null;
   const detected = schema ? autoDetectWidgetConfig(schema) : {};
   const dateField = widget.config?.dateField ?? detected.dateField;
   const limit = widget.config?.limit ?? 5;
+  const unsupported = schema?.sortSupported === false;
+  const [items, failed, setItems] = useWidgetResult<
+    {
+      id: string;
+      title: string;
+      day: string;
+      bucket: "overdue" | "today" | "week";
+    }[]
+  >(schema, dateField ?? "");
 
   useEffect(() => {
-    if (!apiClient || !dateField) return;
-    if (schema === null && !missing) return;
+    if (!apiClient || !schema || unsupported || !dateField) return;
     let active = true;
-    setFailed(false);
+    setItems();
     void listWidgetRecordsForReview(apiClient, widget, dateField).then(
       (page) => {
         if (!active) return;
-        setItems(
-          bucketActionItems(page.data, dateField).map((entry) => ({
+        setItems({
+          data: bucketActionItems(page.data, dateField).map((entry) => ({
             id: String(entry.record.id),
-            title: recordTitle(entry.record, schema ?? undefined),
+            title: recordTitle(entry.record, schema),
             day: entry.day,
             bucket: entry.bucket,
           })),
-        );
+        });
       },
-      () => {
-        if (active) setFailed(true);
+      (error: unknown) => {
+        if (active) setItems({ error });
       },
     );
     return () => {
       active = false;
     };
-  }, [apiClient, widget, schema, missing, dateField, nonce]);
+  }, [apiClient, widget, schema, unsupported, dateField, nonce, setItems]);
 
-  if (!apiClient) return <WidgetSkeleton />;
-  if (missing)
-    return (
-      <p className="text-sm text-muted-foreground">
-        {t(
-          "This collection is no longer available. Remove it from your dashboard.",
-        )}
-      </p>
-    );
-  if (!dateField && schema)
+  if (metadata.status !== "ready")
+    return <WidgetSchemaFallback {...metadata} />;
+  if (!dateField)
     return (
       <p className="text-sm text-muted-foreground">
         {t("This collection has no date field for due dates.")}
       </p>
     );
-  if (failed)
-    return (
-      <WidgetError
-        message={t("Could not load these actions.")}
-        onRetry={() => setNonce((value) => value + 1)}
-      />
-    );
-  if (items === null) return <WidgetSkeleton />;
-  if (items.length === 0)
+  if (unsupported)
     return (
       <p className="text-sm text-muted-foreground">
-        {t("Nothing is due in the next 7 days.")}
+        {t("This source cannot sort records by due date.")}
       </p>
+    );
+  const retry = () => setNonce((value) => value + 1);
+  const error = t("Could not load these actions.");
+  if (failed && !items) return <WidgetError message={error} onRetry={retry} />;
+  if (!items) return <WidgetSkeleton />;
+  const refreshStatus = (
+    <WidgetRefreshStatus
+      metadata={metadata}
+      error={failed ? error : undefined}
+      onRetry={retry}
+    />
+  );
+  if (items.length === 0)
+    return (
+      <>
+        {refreshStatus}
+        <p className="text-sm text-muted-foreground">
+          {t("Nothing is due in the next 7 days.")}
+        </p>
+      </>
     );
 
   const overdue = items.filter((item) => item.bucket === "overdue").length;
 
   return (
     <div className="space-y-3">
+      {refreshStatus}
       {overdue > 0 ? (
         <p className="text-sm font-medium text-destructive">
           {new Intl.NumberFormat(uiLocale).format(overdue)}{" "}

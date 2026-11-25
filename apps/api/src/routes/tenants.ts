@@ -12,8 +12,16 @@ import {
 import { guard, transaction } from "@savia/studio-server/services";
 import { dialectFor } from "@savia/db/dialect";
 import { tableNames, foreignKeys } from "../lib/database-schema";
-import { deleteTenantBrandingAssets } from "../tenant-branding/service";
-import { createRoute, type OpenAPIHono, z } from "@hono/zod-openapi";
+import {
+  deactivateTenantForDeletion,
+  deleteTenantBrandingAssets,
+} from "../tenant-branding/service";
+import {
+  createRoute,
+  type OpenAPIHono,
+  type RouteHandler,
+  z,
+} from "@hono/zod-openapi";
 import {
   normalizeTenantSlug,
   parseTenantSlugFromHostname,
@@ -32,6 +40,7 @@ import {
   upsertPrincipal,
 } from "../auth/identity-repository";
 import {
+  assertPrincipalCanLoseActiveMembership,
   assignOrTransferMembership,
   TenantMembershipInvariantError,
 } from "../auth/tenant-membership-invariants";
@@ -170,12 +179,14 @@ const response = {
   description: "Tenant",
   content: { "application/json": { schema: z.object({ data: tenantSchema }) } },
 };
+const errorSchema = z.object({ code: z.string(), message: z.string() });
+const transferConflictReason = z.enum(["PLATFORM_ADMIN", "LAST_ACTIVE_MEMBER"]);
 const errorResponse = {
   description: "Rejected",
   content: {
     "application/json": {
       schema: z.object({
-        error: z.object({ code: z.string(), message: z.string() }),
+        error: errorSchema,
       }),
     },
   },
@@ -249,7 +260,23 @@ const createDefinition = createRoute({
       content: { "application/json": { schema: inputSchema } },
     },
   },
-  responses: { 201: response, ...errors, 503: errorResponse },
+  responses: {
+    201: response,
+    ...errors,
+    409: {
+      ...errorResponse,
+      content: {
+        "application/json": {
+          schema: z.object({
+            error: errorSchema.extend({
+              reason: transferConflictReason.optional(),
+            }),
+          }),
+        },
+      },
+    },
+    503: errorResponse,
+  },
 });
 const updateDefinition = createRoute({
   method: "patch",
@@ -298,8 +325,11 @@ const conflict = {
 const userMissing = {
   error: { code: "USER_NOT_FOUND", message: "El usuario no existe." },
 };
-function memberConflict(message: string) {
-  return { error: { code: "TENANT_CONFLICT", message } };
+function memberConflict(
+  reason: z.infer<typeof transferConflictReason>,
+  message: string,
+) {
+  return { error: { code: "TENANT_CONFLICT", reason, message } };
 }
 
 /**
@@ -377,6 +407,7 @@ async function createTenantWithExistingMember(
   if ((await listGlobalRoles(db, principal.id)).includes("platform_admin"))
     return c.json(
       memberConflict(
+        "PLATFORM_ADMIN",
         "El usuario es administrador de plataforma. Revoca ese rol antes de transferirlo a un tenant.",
       ),
       409,
@@ -391,6 +422,8 @@ async function createTenantWithExistingMember(
     .first<{ tenant_id: number }>();
   let emailScopeChanged = false;
   try {
+    if (previousMembership)
+      await assertPrincipalCanLoseActiveMembership(db, principal.id);
     tenantId = await insertTenant(db, input, now);
     if (userAdministrator && principal.issuer === userAdministrator.issuer) {
       await userAdministrator.updateUser(
@@ -405,19 +438,27 @@ async function createTenantWithExistingMember(
       principal.id,
       tenantId,
       input.existingMember.role,
+      { allowInactiveTenant: input.isActive === false },
     );
   } catch (error) {
-    if (emailScopeChanged)
-      await userAdministrator!.updateUser(
-        principal.subject,
-        { tenantId: previousMembership?.tenant_id ?? null },
-        c.req.raw,
-      );
-    if (tenantId !== undefined)
-      await db.prepare("DELETE FROM tenants WHERE id=?").bind(tenantId).run();
-    if (error instanceof TenantMembershipInvariantError)
+    try {
+      if (emailScopeChanged)
+        await userAdministrator!.updateUser(
+          principal.subject,
+          { tenantId: previousMembership?.tenant_id ?? null },
+          c.req.raw,
+        );
+    } finally {
+      if (tenantId !== undefined)
+        await db.prepare("DELETE FROM tenants WHERE id=?").bind(tenantId).run();
+    }
+    if (
+      error instanceof TenantMembershipInvariantError &&
+      error.code === "LAST_ACTIVE_MEMBER"
+    )
       return c.json(
         memberConflict(
+          "LAST_ACTIVE_MEMBER",
           "El usuario es el último miembro activo de su organización. Agrega otro miembro allí antes de transferirlo.",
         ),
         409,
@@ -461,7 +502,7 @@ export function registerTenantRoutes(
   realtime?: RealtimeHubClient,
   documents?: R2Bucket,
   saviaRequestService?: SaviaRequestService,
-  deleteEmailSettings?: (tenantId: number) => Promise<void>,
+  deleteTenantSettings?: (tenantId: number) => Promise<void>,
   setTenantSSOActivity?: (tenantId: number, active: boolean) => Promise<void>,
 ) {
   app.openapi(listRoute, async (c) => {
@@ -544,7 +585,7 @@ export function registerTenantRoutes(
     if (!row) return c.json(missing, 404);
     return c.json({ data: document(row) }, 200);
   });
-  app.openapi(createDefinition, async (c) => {
+  const createTenant: RouteHandler<typeof createDefinition> = async (c) => {
     requirePlatformAdministrator(actorFromContext(c));
     const input = c.req.valid("json");
     if (input.existingMember) {
@@ -597,6 +638,7 @@ export function registerTenantRoutes(
         principal.id,
         tenantId,
         input.initialUser!.role,
+        { allowInactiveTenant: input.isActive === false },
       );
       if (!input.initialUser!.temporaryPassword) {
         await userAdministrator.sendPasswordReset(
@@ -605,14 +647,20 @@ export function registerTenantRoutes(
         );
       }
     } catch (error) {
-      if (principalId) await deletePrincipal(db, principalId);
-      if (tenantId)
-        await db.prepare("DELETE FROM tenants WHERE id=?").bind(tenantId).run();
-      if (authenticatedUser) {
-        await userAdministrator.deleteUser(
-          authenticatedUser.subject,
-          c.req.raw,
-        );
+      try {
+        if (principalId) await deletePrincipal(db, principalId);
+        if (tenantId !== undefined)
+          await db
+            .prepare("DELETE FROM tenants WHERE id=?")
+            .bind(tenantId)
+            .run();
+      } finally {
+        if (authenticatedUser) {
+          await userAdministrator.deleteUser(
+            authenticatedUser.subject,
+            c.req.raw,
+          );
+        }
       }
       if (isUniqueConstraint(error) || error instanceof TenantSlugConflictError)
         return c.json(conflict, 409);
@@ -626,6 +674,24 @@ export function registerTenantRoutes(
     if (principalId)
       notifyTenantRoom(realtime, c, "users", "created", principalId);
     return c.json({ data: document(row!) }, 201);
+  };
+  app.openapi(createDefinition, createTenant, (result, c) => {
+    if (result.success) return;
+    const passwordInvalid = result.error.issues.some(
+      ({ path }) => path.join(".") === "initialUser.temporaryPassword",
+    );
+    return c.json(
+      {
+        error: passwordInvalid
+          ? {
+              code: "TENANT_TEMPORARY_PASSWORD_INVALID",
+              message:
+                "The temporary password must contain 12 to 128 characters.",
+            }
+          : { code: "VALIDATION_ERROR", message: "Invalid request" },
+      },
+      400,
+    );
   });
   app.openapi(updateDefinition, async (c) => {
     requirePlatformAdministrator(actorFromContext(c));
@@ -723,10 +789,28 @@ export function registerTenantRoutes(
           },
           503,
         );
+      const confirmationChanged = {
+        error: {
+          code: "TENANT_CONFIRMATION_REQUIRED",
+          message:
+            "El tenant cambió durante la eliminación. Recarga y confirma con su nombre actual.",
+        },
+      };
       // Disable access before inventory so new tenant requests cannot add data.
-      await deleteTenantBrandingAssets(db, documents, id);
-      const plan = await tenantPurgePlan(db, id);
+      if (!(await deactivateTenantForDeletion(db, id, commercial.name)))
+        return c.json(confirmationChanged, 409);
+      // Keep branding in the inventory so a failed preflight cannot erase it.
       const companionKeys = await tenantCompanionKeys(documents, id);
+      const plan = await tenantPurgePlan(db, id, companionKeys);
+      const confirmedTenantQuery =
+        "SELECT 1 FROM tenants WHERE id=? AND kind='commercial' AND name=? AND is_active=0";
+      const confirmedTenantArgs = [id, commercial.name];
+      const stillConfirmed = () =>
+        db
+          .prepare(confirmedTenantQuery)
+          .bind(...confirmedTenantArgs)
+          .first();
+      if (!(await stillConfirmed())) return c.json(confirmationChanged, 409);
       if (saviaRequestService) {
         try {
           const result = await saviaRequestService.fetch(
@@ -753,37 +837,42 @@ export function registerTenantRoutes(
           );
         }
       }
-      const stillConfirmed = await db
-        .prepare(
-          "SELECT 1 FROM tenants WHERE id=? AND kind='commercial' AND name=? AND is_active=0",
-        )
-        .bind(id, commercial.name)
-        .first();
-      if (!stillConfirmed)
-        return c.json(
-          {
-            error: {
-              code: "TENANT_CONFIRMATION_REQUIRED",
-              message:
-                "El tenant cambió durante la eliminación. Recarga y confirma con su nombre actual.",
+      if (!(await stillConfirmed())) return c.json(confirmationChanged, 409);
+      if (deleteTenantSettings) {
+        try {
+          await deleteTenantSettings(id);
+        } catch {
+          return c.json(
+            {
+              error: {
+                code: "TENANT_AUTH_CLEANUP_UNAVAILABLE",
+                message:
+                  "No se pudo eliminar la configuración de autenticación. El tenant queda inactivo; reintenta la eliminación.",
+              },
             },
-          },
-          409,
-        );
-      await deleteEmailSettings?.(id);
-      await deleteTenantFiles(documents, [
-        ...new Set([...plan.keys, ...companionKeys]),
-      ]);
+            503,
+          );
+        }
+        if (!(await stillConfirmed())) return c.json(confirmationChanged, 409);
+      }
+      await deleteTenantFiles(documents, plan.keys);
       const unchanged = guard(
         db,
-        "SELECT EXISTS(SELECT 1 FROM tenants WHERE id=? AND kind='commercial' AND name=? AND is_active=0)",
-        [id, commercial.name],
+        `SELECT EXISTS(${confirmedTenantQuery})`,
+        confirmedTenantArgs,
       );
-      await transaction(db, [
-        unchanged.start,
-        ...plan.statements,
-        unchanged.end,
-      ]);
+      try {
+        await transaction(db, [
+          unchanged.start,
+          ...plan.statements,
+          unchanged.end,
+        ]);
+      } catch (error) {
+        // The batch guard can fail after external file cleanup has started.
+        const confirmed = await stillConfirmed().catch(() => undefined);
+        if (confirmed === null) return c.json(confirmationChanged, 409);
+        throw error;
+      }
       notifyTenantRoom(realtime, c, "tenants", "deleted", id);
       return c.body(null, 204);
     }
@@ -821,8 +910,8 @@ export function registerTenantRoutes(
         return c.json(conflict, 409);
     }
     // Remove credentials before deleting the core row: numeric tenant IDs may
-    // be reused, so a new tenant must never inherit a former tenant's SMTP.
-    await deleteEmailSettings?.(id);
+    // be reused, so a new tenant must never inherit a former tenant's settings.
+    await deleteTenantSettings?.(id);
     await deleteTenantBrandingAssets(db, documents, id);
     try {
       const deleted = await db

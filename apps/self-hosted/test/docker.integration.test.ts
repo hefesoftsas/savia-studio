@@ -238,7 +238,7 @@ test.skipIf(!origin || !email || !password)(
       );
       const internal = await request("/_internal/session", {}, false);
       expect(internal.headers.get("content-type")).toContain("text/html");
-      expect(await internal.text()).toContain('<div id="root"></div>');
+      expect(await internal.text()).toContain('<div id="root">');
       const signIn = await json("/api/auth/sign-in/email", 200, "POST", {
         email,
         password,
@@ -353,6 +353,7 @@ test.skipIf(!origin || !email || !password)(
             lastName: "Smoke",
             role: "tenant_admin",
             temporaryPassword: `Docker-${randomUUID()}-Aa1!`,
+            emailVerified: true,
           },
         })
       ).data;
@@ -463,7 +464,7 @@ test.skipIf(!origin || !email || !password)(
 
       const published = (
         await json("/v1/public-forms", 201, "POST", {
-          domainId: `tenant:${tenant.id}`,
+          tenantId: tenant.id,
           objectName: collection,
           kind: "record",
         })

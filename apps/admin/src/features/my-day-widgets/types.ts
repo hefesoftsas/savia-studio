@@ -32,6 +32,8 @@ export type WidgetCollectionSchema = {
   label: string;
   fields: WidgetCollectionField[];
   hubspot?: true;
+  sortSupported?: false;
+  summarySupported?: false;
 };
 
 export type WidgetRecord = {
@@ -43,7 +45,7 @@ export type WidgetRecord = {
 
 export type WidgetRecordsPage = {
   data: WidgetRecord[];
-  total: number;
+  total?: number;
 };
 
 export type WidgetSummaryGroup = {

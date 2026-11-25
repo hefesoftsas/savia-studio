@@ -180,6 +180,7 @@ export function workerConfig(
       not_found_handling: "single-page-application",
       run_worker_first: [
         "/companion-downloads.json",
+        "/downloads/*",
         "/register",
         "/public/forms",
         "/public/forms/*",

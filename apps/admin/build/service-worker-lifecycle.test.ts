@@ -57,6 +57,8 @@ it("activates the generated replacement worker without waiting for old tabs to c
       "/plugin-editor",
       "/plugin-editor?version=2",
       "/plugin-editor.html?version=2",
+      "/downloads/savia-plugin-authoring-0.1.0.vsix",
+      "/downloads/savia-plugin-authoring-0.1.0.vsix.sha256",
     ]) {
       expect(
         navigationDenylist.some((pattern) => pattern.test(path)),

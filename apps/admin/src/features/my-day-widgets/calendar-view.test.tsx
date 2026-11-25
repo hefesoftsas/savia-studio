@@ -191,17 +191,19 @@ describe("My Day calendar views", () => {
     expect(
       tenantBookingsLink(
         "centro-medico",
-        "2026-10-03T14:00:00.000Z",
+        "2026-10-03T02:00:00.000Z",
         "savia.hefesoft.com",
+        "America/Bogota",
       ),
     ).toBe(
-      "https://centro-medico.savia.hefesoft.com/#/bookings?tab=reservations&date=2026-10-03",
+      "https://centro-medico.savia.hefesoft.com/#/bookings?tab=reservations&date=2026-10-02",
     );
     expect(
       tenantBookingsLink(
         "centro-medico",
         "2026-10-03T14:00:00.000Z",
         "localhost",
+        "America/Bogota",
       ),
     ).toBeNull();
   });

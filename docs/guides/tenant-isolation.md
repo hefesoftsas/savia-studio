@@ -17,26 +17,115 @@ sent to the API. Empty scope remains the platform-only shared catalog.
 Studio routes use `/v1/studio/<tenantId>/api/*`; navigation uses `tenantId`.
 
 The reserved platform workspace is tenant `0`. Only platform administrators can
-open it. Other workspaces require an active tenant and authorized membership or
+open it. Its detail page is read-only and links to the platform users list.
+Other workspaces require an active tenant and authorized membership or
 platform administration. Custom access policies remain tenant-scoped. Global
 `platform` administration is a privilege scope, not a separate data workspace.
+
+The tenant settings editor enables saving when the name or active status has
+changed. Surrounding whitespace in the name does not count as a change.
+The editor sends only the changed fields, preserving changes made elsewhere
+to fields left untouched in the form.
+The API confirms the save before the editor returns to the list. If the save
+fails, the editor keeps the draft. If Savia cannot confirm the result, open the
+tenant in another tab to check the saved settings before retrying.
 
 Platform administrators can permanently delete a commercial tenant from its
 edit page. The action requires typing the tenant's exact current name and
 deletes its associated data. The UI sends
 `DELETE /v1/tenants/{id}?cascade=true&confirmation=<exact tenant name>` only
-after that confirmation. The ordinary tenant delete request remains unchanged.
+after that confirmation. If the API rejects the name confirmation, the dialog
+clears it and waits for the current tenant details before accepting a new
+confirmation. The ordinary tenant delete endpoint remains available to API
+clients.
+The API rechecks the confirmed name as part of deactivation. If the name
+changed before that point, the tenant stays in its current state and external
+cleanup does not begin.
+After deactivation, the API inventories data and files, including branding,
+and rechecks the confirmed name before beginning external cleanup. A change
+during inventory requires a new confirmation and leaves those files intact.
+The API also rechecks the name after cleaning up Savia Request and Auth
+settings, before removing files. When a change is detected at this stage,
+completed external steps stay applied and the administrator must confirm the
+current name to continue.
+The final database batch verifies confirmation again. If the tenant changed
+during file cleanup, the batch leaves its database records intact and asks
+for fresh confirmation. Files already removed from storage stay removed.
 If an external cleanup step fails, the API reports the failure and leaves the
 tenant inactive so an administrator can retry the cleanup. Shared identity
 principals are preserved. Core database cleanup runs as a batch; external file
 and service cleanup can be partial when a remote service fails.
+File inventory includes Companion recordings. The purge preserves any file
+that another tenant or a shared database record still references.
+If file inventory or deletion fails, the API returns
+`TENANT_FILE_CLEANUP_UNAVAILABLE`. The dialog identifies the failed file
+cleanup and refreshes the tenant so the administrator can retry.
+An incomplete Companion file listing halts the operation before external
+cleanup begins.
+If Auth cannot remove its tenant settings, the API returns
+`TENANT_AUTH_CLEANUP_UNAVAILABLE` and stops before deleting files. The
+administrator can retry the deletion after Auth recovers.
+An in-progress branding image upload blocks deletion before cleanup starts.
+The confirmation dialog identifies the upload so the administrator knows when
+to retry.
 The full deletion can take up to two minutes before the browser stops waiting.
-If it times out, refresh the tenant list to check its state before retrying.
+The confirmation dialog keeps the failure message visible. If the connection
+drops or the result is otherwise unknown, refresh the tenant list to verify its
+state before retrying.
+
+The tenant and user lists remove deleted rows when they receive a realtime
+event. Paginated results fetch fresh rows and totals, including when a
+deletion shifts rows from another page. Tenant names with numeric suffixes
+sort in numeric order, so `Demo 2` appears before `Demo 10`.
 
 The users list resolves tenant names through the authorized tenant data provider.
 Its scope heading and access column show the tenant name, never an internal ID.
 If the name is unavailable, the heading stays generic and the access cell uses
 an empty-value marker; platform and no-access badges keep their existing meaning.
+
+When editing a user who already belongs to a tenant, select the destination
+explicitly if the current tenant is absent from the available choices.
+When removing platform administration, select an active commercial tenant and
+the user's new role before saving. This also applies when there is only one
+active commercial tenant. When creating a user or removing platform access,
+search by tenant name or URL identifier to find choices beyond the first page.
+The same search is available when transferring an existing user. Transfer
+destinations are active commercial tenants. If the transfer fails, the
+selected tenant and role stay in the form with an error message.
+The transfer endpoint and the user update endpoint validate the destination
+before updating the account in Auth. They check it again when writing the
+membership.
+If a combined profile and membership update is rejected while saving
+access, Savia restores the previous profile and tenant settings in Auth.
+It saves the principal's display name only after the access change succeeds.
+When a user update supplies only a first name or surname, the API preserves
+the omitted part of the current display name.
+Successful transfers publish an access-control update to both the source and
+destination tenants so authorized subscribers can refresh membership data.
+The tenant administrator's users list uses these scoped updates to refresh
+its rows and active-user count. Suspending, reactivating, or deleting a user
+also publishes a scoped update to the user's tenant.
+Profile and email-verification changes publish updates to the user's tenant
+and the platform list, including changes made by a tenant administrator.
+Tenant administrators also receive those updates in the user detail and
+editor. The editor preserves unsaved changes and offers to reload the record.
+Events for other users do not interrupt the current edit.
+Switching records clears the previous record's notice and any queued refresh.
+If the reload fails temporarily, the editor keeps the draft and the reload
+action. A successful reload discards the draft if the editor stayed untouched
+while it loaded. Edits made during the reload are preserved.
+The reload button pauses while the editor is saving or a reload is in progress.
+The user editor waits for the server to confirm changes. A rejected change
+keeps the editor open with its selections and shows the error there.
+Saving identity details only sends a platform access change if the platform
+administrator toggle was changed. Tenant transfers use the assigned-tenant tab.
+An access or verification change preserves the current name when the name
+fields are untouched. Saving requires a change to an editable field.
+Changing only the first name or surname sends just that field.
+Existing accounts with a missing name or surname can be edited without
+filling in the missing part. New accounts still require both fields.
+The API trims surrounding spaces from supplied names and rejects names
+consisting only of whitespace.
 
 Tenant administrators can manage users assigned to their own tenant. The user
 creation form fixes the new user's tenant to that administrator's tenant and
@@ -46,6 +135,13 @@ optional active user limit for an authorized commercial tenant. The user-capacit
 the number of active users, including tenant administrators; a blank limit is
 unlimited. The API enforces the limit when creating or reactivating users, so a
 client-side count never grants permission to exceed it.
+
+When creating a user, you can assign up to 100 enabled custom roles from the
+destination tenant in addition to the base role. A refresh that confirms a
+selected custom role was disabled or removed clears that role and shows a
+notice. Other selected roles stay in the form. The limit applies to each
+user's assignments. The role catalog can list more than 100 custom roles.
+When a selection reaches the limit, remove a selected role to choose another.
 
 The data-domain catalog, creation operation, runtime routes, and `domain:<slug>`
 ACL scopes have been removed. Create workspaces through tenant management.

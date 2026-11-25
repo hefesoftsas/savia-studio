@@ -76,12 +76,18 @@ async function ensurePlatformTenant(d1: D1Database): Promise<TenantRow> {
   return tenant(d1, PLATFORM_TENANT_ID);
 }
 
-export async function ensureActiveCommercialTenant(
+export type MembershipDestinationOptions = { allowInactiveTenant?: boolean };
+
+async function ensureCommercialTenant(
   d1: D1Database,
   tenantId: number,
+  { allowInactiveTenant = false }: MembershipDestinationOptions = {},
 ): Promise<void> {
   const selected = await tenant(d1, tenantId);
-  if (selected.kind !== "commercial" || !selected.is_active) {
+  if (
+    selected.kind !== "commercial" ||
+    (!allowInactiveTenant && !selected.is_active)
+  ) {
     throw new TenantMembershipInvariantError(
       selected.kind === "platform"
         ? "PLATFORM_TENANT_RESERVED"
@@ -93,13 +99,21 @@ export async function ensureActiveCommercialTenant(
   }
 }
 
+export async function ensureActiveCommercialTenant(
+  d1: D1Database,
+  tenantId: number,
+): Promise<void> {
+  await ensureCommercialTenant(d1, tenantId);
+}
+
 export async function assignOrTransferMembership(
   d1: D1Database,
   principalId: string,
   tenantId: number,
   role: AgencyRole,
+  options?: MembershipDestinationOptions,
 ): Promise<AgencyMembership> {
-  await ensureActiveCommercialTenant(d1, tenantId);
+  await ensureCommercialTenant(d1, tenantId, options);
   const current = await d1
     .prepare(
       "SELECT tenant_id,is_active FROM identity_tenant_membership WHERE principal_id=?",

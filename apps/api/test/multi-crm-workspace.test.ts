@@ -401,6 +401,26 @@ it("rechecks permissions and rejects readonly/unknown fields, invalid pagination
   ).toBe(405);
   expect(state.calls).toEqual([]);
 });
+
+it.each([
+  ["salesforce", 81],
+  ["zoho", 100],
+  ["pipedrive", 100],
+] as const)(
+  "stops %s pagination at its supported page limit",
+  async (provider, maxPage) => {
+    expect((await install(provider)).status).toBe(200);
+    const url = `records/${provider}_contacts?perPage=25`;
+    const last = await request(`${url}&page=${maxPage}`);
+    expect(last.status).toBe(200);
+    expect(await last.json()).toMatchObject({
+      data: [{ id: "123" }],
+      pageInfo: { hasNextPage: false, hasPreviousPage: true },
+      meta: { maxPage, pageLimitReached: true },
+    });
+    expect((await request(`${url}&page=${maxPage + 1}`)).status).toBe(422);
+  },
+);
 it("lists only same-provider same-account installed relationship groups", async () => {
   await install();
   await install("zoho");

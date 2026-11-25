@@ -19,6 +19,10 @@ import {
   type WorkspaceCapabilities,
   type WorkspaceDescription,
 } from "./workspace-adapter";
+import {
+  workspacePageLimit,
+  workspaceRecordPagination,
+} from "./workspace-pagination";
 
 const providerNames = {
   salesforce: "Salesforce",
@@ -77,19 +81,20 @@ export async function handlesRemoteWorkspace(
     match && (await bindingFor(context, decodeURIComponent(match[1]))),
   );
 }
-function paging(url: URL) {
+function paging(url: URL, provider: RemoteProviderId) {
   const page = Number(url.searchParams.get("page") ?? 1);
   const perPage = Number(url.searchParams.get("perPage") ?? 25);
   if (
     !Number.isSafeInteger(page) ||
     page < 1 ||
-    page > 100 ||
     !Number.isSafeInteger(perPage) ||
     perPage < 1 ||
     perPage > 100
   )
-    fail("Invalid pagination (maximum 100 pages and 100 records per page).");
-  return { page, perPage };
+    fail("Invalid pagination (maximum 100 records per page).");
+  const maxPage = workspacePageLimit(provider, perPage);
+  if (page > maxPage) fail(`Invalid pagination (maximum ${maxPage} pages).`);
+  return { page, perPage, maxPage };
 }
 function validateValues(
   input: unknown,
@@ -570,7 +575,7 @@ export function createRemoteWorkspaceApp(context: CollectionGatewayContext) {
     if (surface === "record-links") {
       if (!id || !description.capabilities.read || !binding.capabilities.read)
         fail("CRM relations are unavailable.", 405);
-      const page = paging(new URL(c.req.url));
+      const { maxPage, ...page } = paging(new URL(c.req.url), binding.provider);
       await remote.get(conn, binding.resource, id, fields);
       const rows = await db
         .prepare(
@@ -675,7 +680,7 @@ export function createRemoteWorkspaceApp(context: CollectionGatewayContext) {
               ([key, field]) => ({ key, label: field.label }),
             ),
             ...(result.total === undefined ? {} : { total: result.total }),
-            hasNextPage: result.hasNextPage,
+            hasNextPage: result.hasNextPage && page.page < maxPage,
             canEdit: Boolean(
               remote.setLink &&
               remote.canEditLink?.(binding.resource, target.resource) &&
@@ -713,7 +718,7 @@ export function createRemoteWorkspaceApp(context: CollectionGatewayContext) {
       fail("This CRM operation is not available.", 405);
     if (operation === "list") {
       const url = new URL(c.req.url),
-        page = paging(url);
+        { maxPage, ...page } = paging(url, binding.provider);
       if (
         url.searchParams.has("filters") ||
         url.searchParams.has("stage") ||
@@ -733,10 +738,7 @@ export function createRemoteWorkspaceApp(context: CollectionGatewayContext) {
         data: result.records.map(project),
         ...page,
         ...(result.total === undefined ? {} : { total: result.total }),
-        pageInfo: {
-          hasNextPage: result.hasNextPage,
-          hasPreviousPage: page.page > 1,
-        },
+        ...workspaceRecordPagination(page.page, maxPage, result.hasNextPage),
       });
     }
     if (operation === "read") {

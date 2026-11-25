@@ -73,7 +73,9 @@ node --import ./apps/self-hosted/node_modules/tsx/dist/loader.mjs apps/self-host
 
 The importer checks schema compatibility, copies all three stores in one
 transaction, verifies mapped values and row counts, and advances generated ID
-sequences. It skips core SQLite-derived counts, summaries, read cache and FTS
+sequences. It initializes the current authentication and registration schema.
+Optional destination-only authentication tables must be empty. It skips core
+SQLite-derived counts, summaries, read cache and FTS
 index tables. Native counts and configured summaries are rebuilt, and configured
 JSON indexes are installed in the import transaction; the D1 read cache and FTS5
 index are not copied. It refuses a destination containing any existing tables. A failed import can leave
@@ -97,6 +99,10 @@ pnpm --filter @savia/self-hosted test:postgres
 The required lane fails when its connection setting is missing, instead of
 silently skipping native tests. Tests create uniquely named databases and remove
 only their own fixtures.
+
+The migration suite verifies both a fresh database and an upgrade from the
+original Flows trigger migrations. Migration 0063 repairs the trigger on an
+existing database while preserving the recorded migration history.
 
 The [SQL compatibility inventory](postgres-sql-compatibility.md) describes the native query and migration boundaries.
 

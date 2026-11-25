@@ -318,6 +318,85 @@ it("treats Zoho no-content as an empty terminal page", async () => {
     }),
   ).toEqual({ records: [], hasNextPage: false });
 });
+it.each([
+  ["salesforce", { records: [{ Id: "not-a-contact-id" }] }],
+  ["zoho", { data: [{ id: "  " }] }],
+  ["pipedrive", { success: true, data: [{ id: Number.MAX_SAFE_INTEGER + 1 }] }],
+] as const)(
+  "rejects a %s list with an unusable record ID",
+  async (provider, body) => {
+    const adapter = createRemoteWorkspaceAdapter(
+      provider,
+      nango(async () => Response.json(body)),
+    );
+    await expect(
+      adapter.list(conn(provider), "contacts", {
+        page: 1,
+        perPage: 25,
+        fields: [],
+      }),
+    ).rejects.toMatchObject({ code: "NANGO_REQUEST_FAILED" });
+  },
+);
+it.each([
+  ["zoho", { data: [{ id: "123" }], info: { more_records: "true" } }],
+  [
+    "pipedrive",
+    {
+      success: true,
+      data: [{ id: 123 }],
+      additional_data: { pagination: { more_items_in_collection: "true" } },
+    },
+  ],
+] as const)(
+  "rejects invalid %s pagination on lists and relationships",
+  async (provider, body) => {
+    const adapter = createRemoteWorkspaceAdapter(
+      provider,
+      nango(async () => Response.json(body)),
+    );
+    const options = { page: 1, perPage: 25, fields: [] };
+    await expect(
+      adapter.list(conn(provider), "contacts", options),
+    ).rejects.toMatchObject({
+      code: "NANGO_REQUEST_FAILED",
+    });
+    await expect(
+      adapter.links(conn(provider), "companies", "123", "contacts", options),
+    ).rejects.toMatchObject({
+      code: "NANGO_REQUEST_FAILED",
+    });
+  },
+);
+it.each([
+  ["salesforce", "003000000000001", { Id: "003000000000002AAA" }],
+  ["zoho", "123", { data: [{ id: "124" }] }],
+  ["zoho", "123", { data: [{ id: "123" }, { id: "124" }] }],
+  ["pipedrive", "123", { success: true, data: { id: 124 } }],
+  ["pipedrive", "123", { success: false, data: { id: 123 } }],
+] as const)(
+  "rejects an inconsistent %s detail for %s",
+  async (provider, id, body) => {
+    const adapter = createRemoteWorkspaceAdapter(
+      provider,
+      nango(async () => Response.json(body)),
+    );
+    await expect(
+      adapter.get(conn(provider), "contacts", id, []),
+    ).rejects.toMatchObject({
+      code: "NANGO_REQUEST_FAILED",
+    });
+  },
+);
+it("accepts the case-safe Salesforce ID for a request using its 15-character form", async () => {
+  const adapter = createRemoteWorkspaceAdapter(
+    "salesforce",
+    nango(async () => Response.json({ Id: "003000000000001AAA" })),
+  );
+  await expect(
+    adapter.get(conn("salesforce"), "contacts", "003000000000001", []),
+  ).resolves.toMatchObject({ id: "003000000000001AAA" });
+});
 it("reports upstream authorization and rate limits without exposing provider payloads", async () => {
   for (const status of [401, 403, 429]) {
     const adapter = createRemoteWorkspaceAdapter(

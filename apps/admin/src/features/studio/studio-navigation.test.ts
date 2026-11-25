@@ -143,7 +143,10 @@ it("keeps tenant scope and distinguishes identical objects across tenants", () =
 });
 
 it("omits unknown collection counts while preserving explicit zero and positive counts", () => {
-  const unknown = summarizeStudioObject({ name: "contracts", label: "Contratos" })!;
+  const unknown = summarizeStudioObject({
+    name: "contracts",
+    label: "Contratos",
+  })!;
   const zero = summarizeStudioObject({
     name: "empty",
     label: "Vacía",
@@ -164,6 +167,28 @@ it("omits unknown collection counts while preserving explicit zero and positive 
   );
 });
 
+it.each([
+  { collection: { kind: "crm", sourceId: "salesforce" } },
+  { collection: { kind: "postgres", sourceId: "external_db" } },
+  { business: "managed-agency" },
+])(
+  "omits local metadata counts from a source-backed screen $collection",
+  (studio) => {
+    const object = summarizeStudioObject({
+      name: "external_contacts",
+      count: 0,
+      config: { studio },
+    });
+    expect(object?.count).toBeUndefined();
+  },
+);
+
+it("does not turn invalid local count metadata into zero", () => {
+  expect(
+    summarizeStudioObject({ name: "local", count: "unknown" })?.count,
+  ).toBeUndefined();
+});
+
 it("uses only the HubSpot total for HubSpot navigation badges", () => {
   const contacts = {
     name: "hubspot_contacts",
@@ -171,12 +196,8 @@ it("uses only the HubSpot total for HubSpot navigation badges", () => {
     config: { studio: { collection: { kind: "crm", sourceId: "hubspot" } } },
   };
   expect(summarizeStudioObject(contacts)?.count).toBeUndefined();
-  expect(studioCollectionCount(contacts.config.studio.collection, 0, 6)).toBe(
-    6,
-  );
-  expect(studioCollectionCount(contacts.config.studio.collection, 0, 0)).toBe(
-    0,
-  );
+  expect(studioCollectionCount(contacts.config.studio, 0, 6)).toBe(6);
+  expect(studioCollectionCount(contacts.config.studio, 0, 0)).toBe(0);
 });
 
 it("matches agency API bases on the canonical path and the legacy alias", () => {

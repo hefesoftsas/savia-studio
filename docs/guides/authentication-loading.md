@@ -40,14 +40,66 @@ The shared loading style is delivered through the existing authentication CSS
 route; it does not require a new script or animation library. It represents
 pending work and does not add a minimum display time or delay navigation.
 
-Admin API requests have a 15-second deadline; JSON and OAuth session requests
-also apply that deadline while reading the response body. Page-file uploads and
+Admin API requests preserve the HTTP status when an error response has
+an empty, invalid, interrupted, or stalled JSON body. If the server already sent a
+`Retry-After` deadline with HTTP 429, the client preserves it even when the
+response body times out.
+Admin queries handle HTTP 401 and 403 on the first failure and clear any
+protected data they previously cached. HTTP 429 is also reported on the first
+failure so the client does not automatically repeat a rate-limited request.
+The client also reads JSON media types such as JSON:API and uses the problem
+detail or title when an error arrives as `application/problem+json`.
+Successful no-content responses are accepted even if they declare a JSON media type.
+The JSON client rejects an HTML page returned by an API route, even if its
+HTTP status indicates success. Callers that need HTML use the raw response API.
+For JSON writes, the client preserves caller-supplied request headers, including
+an explicit content type, and adds authentication headers to a copy.
+Admin API requests allow up to 15 seconds to obtain an access token, then start
+the request's separate deadline. The standard request deadline is 15 seconds
+and covers the body for JSON and OAuth session requests. Requests that callers
+cancel before they start never reach the network. Page-file uploads and
 companion recording uploads use a five-minute deadline to allow larger files
 and slower connections to finish. If the application splash or a route fallback
 remains visible for 15 seconds, it replaces the spinner or skeleton with
 actions to retry or return to sign-in. The users list also shows a retry action
 when its data request fails, including when it reaches the request deadline.
 
+The OAuth sign-in and second-factor forms restore the failed form after 15
+seconds if the authentication request stalls, including while reading its
+response. The user can then explicitly retry.
+The SSO connection lookup has the same deadline and restores its form on timeout.
+Editing the SSO email or starting another lookup clears the previous connection
+choices. Only results for the current email are offered.
+Choosing one of several SSO connections blocks additional selections while
+the sign-in request is pending. If it fails, the choices become available again.
+When sign-in requires a second factor, keyboard focus moves to the
+authenticator code after its form appears, including after returning from SSO.
+After a failed code verification, focus returns to the current code field
+so the user can correct it and retry.
+Tenant discovery on the sign-in email field only remembers confirmed results.
+A later blur can try again after an unconfirmed or timed-out lookup.
+If tenant navigation stalls, the same email can trigger a new lookup while the
+manual continuation link remains available until the next navigation begins.
+Submitting the sign-in form or choosing a social provider cancels any pending
+tenant redirect. A late lookup cannot interrupt the sign-in attempt or replace
+its response.
+If the browser does not finish navigating to a social provider, the page
+restores the sign-in controls along with the manual continuation link.
+
+The Admin OAuth bridge waits up to four seconds for the authentication client
+metadata and up to ten seconds for authorization, code exchange, or session
+renewal, including reading the provider response.
+It returns an uncached service-unavailable response when it cannot start
+authorization.
+
+Clearing the browser session cancels pending OAuth token exchanges and renewals.
+Responses from those requests cannot restore the old session after sign-out.
+An avatar request can only update the cache while it remains current, so an
+older response cannot overwrite the profile photo after a profile refresh.
+An invalidated identity request cannot replace the current principal or clear a
+newer identity result, even if the previous request fails.
+A permission lookup still in progress at sign-out returns signed-out permissions
+and cannot repopulate the session's offline cache.
 Explicit logout waits for the server sign-out and workspace cleanup before
 clearing mounted queries and redirecting to authorization. Clearing auth queries
 while asynchronous cleanup is still pending can trigger another authentication
@@ -157,13 +209,14 @@ OAuth client metadata endpoints (`/_internal/oauth/admin-client` and
 before awaiting the Better Auth database adapter. These reads remain scoped to
 the request, so policy changes do not wait for a cross-request cache to expire.
 
-A temporary OAuth renewal failure (network error, rate limit, provider server
-error or malformed token response) returns `503 AUTHENTICATION_UNAVAILABLE` and
-preserves the renewal cookie and origin record. A later retry can reuse that
+A temporary OAuth renewal failure (timeout, network error, rate limit, provider
+server error or malformed token response) returns `503 AUTHENTICATION_UNAVAILABLE`
+and preserves the renewal cookie and origin record. A later retry can reuse that
 session. Only a confirmed `invalid_grant` or `invalid_token` from the provider
-clears renewal state and returns 401. When an unmated or expired refresh cookie
+clears renewal state and returns 401. The browser stops trying to renew only
+when it receives HTTP 401. A rate-limit response from the edge remains
+retryable. When an unmated or expired refresh cookie
 triggers session cleanup, the API reuses the single `admin_oauth_session_origins`
 lookup instead of issuing a redundant `DELETE` write when no row exists, and
 cancels unconsumed internal Auth service response streams. Deployment
 unavailability must not sign users out permanently.
-

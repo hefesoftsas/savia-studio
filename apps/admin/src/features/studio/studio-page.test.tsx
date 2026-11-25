@@ -142,6 +142,39 @@ describe("Studio tenant integration", () => {
     expect(screen.queryByLabelText("Tenant")).not.toBeInTheDocument();
   });
 
+  it.each(["", "&tenantId=unknown", "&tenantId=0"])(
+    "keeps a record link with no valid authorized tenant out of the only available workspace (%s)",
+    async (tenantQuery) => {
+      mount(
+        servicesFor([tenant]),
+        `/studio?object=orders&record=12${tenantQuery}`,
+      );
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "El espacio de trabajo del enlace no está disponible.",
+      );
+      expect(workspaceRendered).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Norte" }));
+      expect(await screen.findByText(/Espacio CRM/)).toHaveTextContent(
+        "tenantId=101",
+      );
+      expect(screen.getByText(/Espacio CRM/)).not.toHaveTextContent("record=");
+      expect(screen.getByText(/Espacio CRM/)).not.toHaveTextContent("object=");
+    },
+  );
+
+  it("opens a record link in its explicitly selected workspace", async () => {
+    mount(
+      servicesFor([platform, tenant]),
+      "/studio?tenantId=101&object=orders&record=12",
+    );
+    expect(await screen.findByText(/Espacio CRM/)).toHaveTextContent(
+      "object=orders&record=12",
+    );
+    expect(getStudioRuntime().apiBasePath).toBe(tenant.apiBasePath);
+  });
+
   it("clears the authorized workspace after a background tenant access denial", async () => {
     let denyReads = false;
     const apiClient = {

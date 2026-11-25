@@ -8,6 +8,7 @@ import {
 } from "../src/auth/better-auth";
 import {
   ensureBootstrapAdministrator,
+  findPrincipalBySubject,
   grantMembership,
   setPrincipalActive,
   upsertPrincipal,
@@ -35,6 +36,42 @@ beforeAll(async () => {
       await env.DB.exec(statement);
 });
 let counter = 980000;
+
+it.each(["fixture", "x".repeat(129)])(
+  "returns a field-specific error for an invalid temporary password",
+  async (temporaryPassword) => {
+    const createUser = vi.fn();
+    const app = createTestApp({
+      auth: platformAdministratorAuthenticator(),
+      userAdministrator: {
+        issuer: "savia:better-auth",
+        createUser,
+      } as unknown as IdentityUserAdministrator,
+    });
+    const response = await app.request(
+      "/v1/tenants",
+      post({
+        name: "Invalid password fixture",
+        initialUser: {
+          email: "password-validation@example.test",
+          firstName: "Demo",
+          lastName: "Admin",
+          role: "tenant_admin",
+          emailVerified: true,
+          temporaryPassword,
+        },
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "TENANT_TEMPORARY_PASSWORD_INVALID",
+        message: "The temporary password must contain 12 to 128 characters.",
+      },
+    });
+    expect(createUser).not.toHaveBeenCalled();
+  },
+);
 
 it("binds a new tenant account to its email settings and sends a password setup link", async () => {
   const subject = "mail-initial-" + crypto.randomUUID();
@@ -73,6 +110,72 @@ it("binds a new tenant account to its email settings and sends a password setup 
     expect.any(Request),
   );
   expect(sendPasswordReset).toHaveBeenCalledWith(subject, expect.any(Request));
+});
+
+it("rolls back tenant provisioning when Auth cannot deliver the password setup email", async () => {
+  const subject = "failed-password-setup-" + crypto.randomUUID();
+  const email = "failed-password-setup@example.test";
+  const fetch = vi.fn(async (request: Request) => {
+    const path = new URL(request.url).pathname;
+    if (request.method === "POST" && path === "/_internal/users")
+      return Response.json({
+        user: {
+          id: subject,
+          email,
+          name: "Setup Admin",
+          role: "user",
+          isBanned: false,
+          twoFactorEnabled: false,
+        },
+      });
+    if (
+      request.method === "POST" &&
+      path === `/_internal/users/${subject}/password-reset`
+    )
+      return Response.json(
+        { error: { code: "PASSWORD_RESET_EMAIL_UNAVAILABLE" } },
+        { status: 503 },
+      );
+    if (request.method === "DELETE" && path === `/_internal/users/${subject}`)
+      return new Response(null, { status: 204 });
+    throw new Error("Unexpected Auth request");
+  });
+  const userAdministrator = betterAuthUserAdministrator(
+    { fetch },
+    "trusted-key",
+  )!;
+  const response = await createTestApp({
+    auth: platformAdministratorAuthenticator(),
+    userAdministrator,
+  }).request(
+    "/v1/tenants",
+    post({
+      name: "Failed password setup",
+      initialUser: {
+        email,
+        firstName: "Setup",
+        lastName: "Admin",
+        role: "tenant_admin",
+        emailVerified: true,
+      },
+    }),
+  );
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({
+    error: {
+      code: "PASSWORD_RESET_EMAIL_UNAVAILABLE",
+      message: "Password reset email delivery is unavailable",
+    },
+  });
+  expect(fetch.mock.calls.map(([request]) => request.method)).toEqual([
+    "POST",
+    "POST",
+    "DELETE",
+  ]);
+  expect(await tenantByName("Failed password setup")).toBeNull();
+  expect(
+    await findPrincipalBySubject(env.DB, userAdministrator.issuer, subject),
+  ).toBeUndefined();
 });
 
 it("returns an email conflict and rolls back tenant creation when Auth rejects a duplicate", async () => {
@@ -132,6 +235,56 @@ it("returns an email conflict and rolls back tenant creation when Auth rejects a
     tenant_id: source.id,
     role: "viewer",
   });
+});
+
+it("removes the newly provisioned Auth account even when tenant cleanup fails", async () => {
+  const subject = "failed-tenant-cleanup-" + crypto.randomUUID();
+  const deleteUser = vi.fn().mockResolvedValue(undefined);
+  const sendPasswordReset = vi
+    .fn()
+    .mockRejectedValue(new Error("Delivery failed"));
+  const userAdministrator = {
+    issuer: "savia:better-auth",
+    createUser: vi.fn().mockResolvedValue({ subject }),
+    sendPasswordReset,
+    deleteUser,
+  } as unknown as IdentityUserAdministrator;
+  await env.DB.exec(
+    "CREATE TRIGGER fail_provisional_tenant_delete BEFORE DELETE ON tenants " +
+      "WHEN OLD.id_slug = 'failed-provisional-cleanup' " +
+      "BEGIN SELECT RAISE(ABORT, 'Tenant cleanup failed'); END;",
+  );
+  try {
+    const response = await createTestApp({
+      auth: platformAdministratorAuthenticator(),
+      userAdministrator,
+    }).request(
+      "/v1/tenants",
+      post({
+        name: "Failed provisional cleanup",
+        idSlug: "failed-provisional-cleanup",
+        initialUser: {
+          email: "failed-cleanup@example.test",
+          firstName: "Test",
+          lastName: "Admin",
+          role: "tenant_admin",
+          emailVerified: true,
+        },
+      }),
+    );
+    expect(response.status).toBe(500);
+    expect(sendPasswordReset).toHaveBeenCalledWith(
+      subject,
+      expect.any(Request),
+    );
+    expect(await tenantByName("Failed provisional cleanup")).not.toBeNull();
+    expect(deleteUser).toHaveBeenCalledWith(subject, expect.any(Request));
+  } finally {
+    await env.DB.exec("DROP TRIGGER fail_provisional_tenant_delete");
+    await env.DB.prepare("DELETE FROM tenants WHERE id_slug=?")
+      .bind("failed-provisional-cleanup")
+      .run();
+  }
 });
 
 it("keeps unknown Auth conflicts as service unavailable", async () => {
@@ -252,14 +405,99 @@ it("updates the email tenant when transferring an existing account", async () =>
     expect.any(Request),
   );
 });
-it("restores the email tenant when a transfer is rejected", async () => {
+it("creates an inactive tenant with its new first administrator", async () => {
+  const subject = "inactive-tenant-admin-" + crypto.randomUUID();
+  const email = "inactive-tenant-admin@example.test";
+  const userAdministrator = {
+    issuer: "savia:better-auth",
+    createUser: vi.fn().mockResolvedValue({ subject }),
+    deleteUser: vi.fn(),
+    sendPasswordReset: vi.fn(),
+  } as unknown as IdentityUserAdministrator;
+  const response = await createTestApp({
+    auth: platformAdministratorAuthenticator(),
+    userAdministrator,
+  }).request(
+    "/v1/tenants",
+    post({
+      name: "Inactive tenant with new administrator",
+      isActive: false,
+      initialUser: {
+        email,
+        firstName: "Inactive",
+        lastName: "Administrator",
+        role: "tenant_admin",
+        temporaryPassword: "Test-Fixture-Password-123!",
+        emailVerified: true,
+      },
+    }),
+  );
+  expect(response.status).toBe(201);
+  const { data } = (await response.json()) as {
+    data: { id: number; isActive: boolean };
+  };
+  expect(data.isActive).toBe(false);
+  const principal = await findPrincipalBySubject(
+    env.DB,
+    userAdministrator.issuer,
+    subject,
+  );
+  expect(await membershipOf(principal!.id)).toEqual({
+    tenant_id: data.id,
+    role: "tenant_admin",
+  });
+  expect(userAdministrator.sendPasswordReset).not.toHaveBeenCalled();
+});
+it("creates an inactive tenant by transferring an existing administrator", async () => {
   const source = await tenant();
+  const staying = await member(
+    "inactive-destination-stays@example.test",
+    source.id,
+    "tenant_admin",
+  );
+  const moving = await member(
+    "inactive-destination-moves@example.test",
+    source.id,
+  );
+  const response = await app().request(
+    "/v1/tenants",
+    post({
+      name: "Inactive tenant with transferred administrator",
+      isActive: false,
+      existingMember: { principalId: moving.id, role: "tenant_admin" },
+    }),
+  );
+  expect(response.status).toBe(201);
+  const { data } = (await response.json()) as {
+    data: { id: number; isActive: boolean };
+  };
+  expect(data.isActive).toBe(false);
+  expect(await membershipOf(moving.id)).toEqual({
+    tenant_id: data.id,
+    role: "tenant_admin",
+  });
+  expect(await membershipOf(staying.id)).toMatchObject({
+    tenant_id: source.id,
+  });
+  await expect(
+    grantMembership(env.DB, staying.id, data.id, "viewer"),
+  ).rejects.toMatchObject({ code: "COMMERCIAL_TENANT_REQUIRED" });
+});
+it("restores the email scope when transfer eligibility changes during provisioning", async () => {
+  const source = await tenant();
+  const staying = await member("smtp-staying-member@example.test", source.id);
   const moving = await member(
     "smtp-final-member@example.test",
     source.id,
     "tenant_admin",
   );
-  const updateUser = vi.fn().mockResolvedValue({});
+  const updateUser = vi
+    .fn()
+    .mockImplementationOnce(async () => {
+      await setPrincipalActive(env.DB, staying.id, false);
+      return {};
+    })
+    .mockResolvedValueOnce({});
   const userAdministrator = {
     issuer: "savia:better-auth",
     updateUser,
@@ -275,6 +513,7 @@ it("restores the email tenant when a transfer is rejected", async () => {
     }),
   );
   expect(response.status).toBe(409);
+  expect(updateUser).toHaveBeenCalledTimes(2);
   expect(updateUser).toHaveBeenLastCalledWith(
     moving.subject,
     { tenantId: source.id },
@@ -282,6 +521,51 @@ it("restores the email tenant when a transfer is rejected", async () => {
   );
   expect(await membershipOf(moving.id)).toMatchObject({ tenant_id: source.id });
   expect(await tenantByName("Rejected SMTP transfer")).toBeNull();
+});
+it("removes the provisional tenant even if restoring the Auth scope fails", async () => {
+  const source = await tenant();
+  const staying = await member("smtp-rollback-staying@example.test", source.id);
+  const moving = await member(
+    "smtp-rollback-failure@example.test",
+    source.id,
+    "tenant_admin",
+  );
+  const updateUser = vi
+    .fn()
+    .mockImplementationOnce(async () => {
+      await setPrincipalActive(env.DB, staying.id, false);
+      return {};
+    })
+    .mockRejectedValueOnce(new Error("Auth unavailable during rollback"));
+  const userAdministrator = {
+    issuer: "savia:better-auth",
+    updateUser,
+  } as unknown as IdentityUserAdministrator;
+  const response = await createTestApp({
+    auth: platformAdministratorAuthenticator(),
+    userAdministrator,
+  }).request(
+    "/v1/tenants",
+    post({
+      name: "Failed SMTP rollback",
+      idSlug: "failed-smtp-rollback",
+      existingMember: { principalId: moving.id, role: "tenant_admin" },
+    }),
+  );
+  expect(response.status).toBe(500);
+  expect(updateUser).toHaveBeenCalledTimes(2);
+  expect(updateUser).toHaveBeenLastCalledWith(
+    moving.subject,
+    { tenantId: source.id },
+    expect.any(Request),
+  );
+  expect(await membershipOf(moving.id)).toMatchObject({ tenant_id: source.id });
+  expect(await tenantByName("Failed SMTP rollback")).toBeNull();
+  expect(
+    await env.DB.prepare("SELECT slug FROM tenant_slug_aliases WHERE slug=?")
+      .bind("failed-smtp-rollback")
+      .first(),
+  ).toBeNull();
 });
 it("transfers an existing user as first member and keeps the source tenant", async () => {
   const source = await tenant(),
@@ -354,16 +638,32 @@ it("rejects platform administrators without touching tenants", async () => {
     }),
   );
   expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({
+    error: { code: "TENANT_CONFLICT", reason: "PLATFORM_ADMIN" },
+  });
   expect(await tenantByName("Super agency")).toBe(null);
   expect(await membershipOf(principal.id)).toEqual({
     tenant_id: 0,
     role: "tenant_admin",
   });
 });
-it("rejects transferring the last active member and compensates the tenant row", async () => {
+it("rejects transferring the last active member before allocating a tenant or updating Auth", async () => {
   const source = await tenant(),
     only = await member("only@example.test", source.id, "tenant_admin");
-  const response = await app().request(
+  const updateUser = vi.fn().mockResolvedValue({});
+  const userAdministrator = {
+    issuer: "savia:better-auth",
+    updateUser,
+  } as unknown as IdentityUserAdministrator;
+  const tenantSequence = () =>
+    env.DB.prepare(
+      "SELECT next_id FROM server_id_sequences WHERE resource='tenants'",
+    ).first();
+  const previousSequence = await tenantSequence();
+  const response = await createTestApp({
+    auth: platformAdministratorAuthenticator(),
+    userAdministrator,
+  }).request(
     "/v1/tenants",
     post({
       name: "Lonely agency",
@@ -371,7 +671,12 @@ it("rejects transferring the last active member and compensates the tenant row",
     }),
   );
   expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({
+    error: { code: "TENANT_CONFLICT", reason: "LAST_ACTIVE_MEMBER" },
+  });
   expect(await tenantByName("Lonely agency")).toBe(null);
+  expect(updateUser).not.toHaveBeenCalled();
+  expect(await tenantSequence()).toEqual(previousSequence);
   expect(await membershipOf(only.id)).toEqual({
     tenant_id: source.id,
     role: "tenant_admin",

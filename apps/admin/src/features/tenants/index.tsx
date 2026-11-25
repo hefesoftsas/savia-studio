@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { z } from "zod";
 import { useMessages } from "@/i18n/core";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { tenantSettingsMessages } from "./settings-messages";
@@ -11,41 +12,47 @@ import { ResourceEditSync } from "@/realtime/resource-realtime";
 import type { ResourceProps } from "ra-core";
 import { EmailVerificationField } from "@/features/users/email-verification-field";
 import {
+  LinkBase,
   maxLength,
   minLength,
   required,
   useCreatePath,
   useRecordContext,
   useDelete,
-  useNotify,
+  useEditContext,
   usePermissions,
   useRedirect,
   useRefresh,
+  useSaveContext,
   useTranslate,
 } from "ra-core";
 import { TenantUserCapacity } from "@/features/users/tenant-user-capacity";
 import { TenantPagesSearchSettingsPanel } from "@/features/tenant-pages-search/tenant-pages-search-settings-panel";
 import { TenantApiKeysPanel } from "@/features/tenant-api-keys/tenant-api-keys";
 import { TenantSignInLinks } from "@/features/tenant-sso/tenant-sign-in-links";
-import { useWatch } from "react-hook-form";
+import { useFormContext, useWatch } from "react-hook-form";
 import { useQueryClient } from "@tanstack/react-query";
-import { Building2, Trash2 } from "lucide-react";
+import { Building2, CircleAlert, Trash2 } from "lucide-react";
 import {
   AutocompleteInput,
   BooleanInput,
+  CancelButton,
   Create,
   CreateButton,
   DataTable,
   Edit,
   EditButton,
+  FormToolbar,
   List,
   RadioButtonGroupInput,
   ReferenceInput,
+  SaveButton,
   SelectInput,
   SimpleForm,
   TextInput,
 } from "@/components/admin";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -60,13 +67,17 @@ import { applyRealtimeListEvent } from "@/realtime/realtime-list";
 import { useRealtimeTopics } from "@/realtime/use-realtime";
 import type { UserRecord } from "@/api/identity-user-data-provider";
 import type { TenantRecord } from "@/api/tenant-data-provider";
+import { ApiClientError } from "@/api/api-client";
 import type { AuthPermissions } from "@/auth/auth-session";
 import { isOfflineError } from "@/offline/offline-error";
+
+const tenantDeletionResultUnknown =
+  "Deletion did not return a result. Refresh the tenant list to check its status before retrying.";
 
 function tenantCascadeDeleteErrorMessage(
   error: unknown,
 ): keyof typeof tenantSettingsMessages {
-  const code = tenantCascadeDeleteErrorCode(error);
+  const code = tenantMutationErrorCode(error);
   const candidate =
     typeof error === "object" && error !== null
       ? (error as Record<string, unknown>)
@@ -74,18 +85,26 @@ function tenantCascadeDeleteErrorMessage(
 
   if (code === "TENANT_CLEANUP_UNAVAILABLE")
     return "Some cleanup services are unavailable. Refresh the tenant and retry the deletion.";
-  if (code === "REQUEST_TIMEOUT")
-    return "Deletion did not return a result. Refresh the tenant list to check its status before retrying.";
-  if (isOfflineError(error))
-    return "The tenant could not be fully deleted. Retry the deletion or contact a platform administrator.";
+  if (code === "TENANT_FILE_CLEANUP_UNAVAILABLE")
+    return "Tenant file cleanup failed. The tenant is inactive. Retry the deletion.";
+  if (code === "TENANT_AUTH_CLEANUP_UNAVAILABLE")
+    return "Tenant authentication settings could not be removed. The tenant is inactive. Retry the deletion.";
+  if (code === "TENANT_BRANDING_UPLOAD_IN_PROGRESS")
+    return "A tenant image is still uploading. Wait for it to finish before retrying deletion.";
   if (code === "TENANT_CONFIRMATION_REQUIRED" || candidate.status === 409)
     return "The tenant name changed or did not match. Refresh the tenant and confirm using its current name.";
   if (code === "TENANT_NOT_FOUND" || candidate.status === 404)
     return "This tenant no longer exists. Return to the tenant list and refresh it.";
+  if (
+    code === "REQUEST_TIMEOUT" ||
+    candidate.status === 408 ||
+    isOfflineError(error)
+  )
+    return tenantDeletionResultUnknown;
   return "Could not delete the tenant. Retry or contact a platform administrator.";
 }
 
-function tenantCascadeDeleteErrorCode(error: unknown): string | undefined {
+function tenantMutationErrorCode(error: unknown): string | undefined {
   const candidate =
     typeof error === "object" && error !== null
       ? (error as Record<string, unknown>)
@@ -104,6 +123,73 @@ function tenantCascadeDeleteErrorCode(error: unknown): string | undefined {
   return code;
 }
 
+const temporaryPasswordSource = "initialUser.temporaryPassword";
+
+type TenantCreateSubmissionError = {
+  message: keyof typeof tenantSettingsMessages;
+  field?: typeof temporaryPasswordSource;
+};
+
+function tenantCreateErrorMessage(
+  error: unknown,
+  code: string | undefined,
+): keyof typeof tenantSettingsMessages {
+  switch (code) {
+    case "VERIFICATION_EMAIL_UNAVAILABLE":
+      return "Verification email could not be sent. Check email delivery and try again.";
+    case "PASSWORD_RESET_EMAIL_UNAVAILABLE":
+      return "The password setup email could not be sent. Use a temporary password or check email delivery.";
+    case "IDENTITY_EMAIL_CONFLICT":
+      return "An account already uses this email. Choose an existing user or use a different email.";
+    case "USER_NOT_FOUND":
+      return "This user is unavailable. Choose another active user.";
+    case "TENANT_EXISTING_USER_REQUIRED":
+      return "Select the existing user to transfer.";
+    case "TENANT_TEMPORARY_PASSWORD_INVALID":
+      return "The temporary password must contain 12 to 128 characters.";
+    case "TENANT_CONFLICT": {
+      const details =
+        error instanceof ApiClientError
+          ? (error.details as
+              { error?: { reason?: unknown } } | null | undefined)
+          : undefined;
+      if (details?.error?.reason === "LAST_ACTIVE_MEMBER")
+        return "This user is the last active member of their organization. Add another member there before transferring them.";
+      if (details?.error?.reason === "PLATFORM_ADMIN")
+        return "This user is a platform administrator. Revoke that role before transferring them.";
+      break;
+    }
+    case "REQUEST_TIMEOUT":
+      return "The request timed out. Check the tenant list before trying again.";
+  }
+  return "Could not create the tenant. Review the information and try again.";
+}
+
+function requiredName(max: number) {
+  const validateRequired = required();
+  const validateLength = maxLength(max);
+  return Object.assign(
+    (value: string | null | undefined, values: unknown) => {
+      const trimmed = value?.trim();
+      return (
+        validateRequired(trimmed, values) ?? validateLength(trimmed, values)
+      );
+    },
+    { isRequired: true },
+  );
+}
+
+const validateTenantName = requiredName(200);
+const validateAdminName = requiredName(100);
+const adminEmailSchema = z.email();
+const validateAdminEmail = [
+  required(),
+  (value: unknown) =>
+    adminEmailSchema.safeParse(value).success
+      ? undefined
+      : "ra.validation.email",
+];
+
 function TenantFields() {
   const translate = useTranslate();
   return (
@@ -113,7 +199,7 @@ function TenantFields() {
         label={translate("savia.tenants.fields.name", {
           _: "Nombre del tenant",
         })}
-        validate={required()}
+        validate={validateTenantName}
       />
       <p className="text-sm text-muted-foreground md:col-span-2">
         {translate("savia.tenants.fields.urlHelper", {
@@ -133,9 +219,26 @@ function TenantFields() {
   );
 }
 
-function InitialTenantUserFields() {
+function InitialTenantUserFields({
+  submissionError,
+}: {
+  submissionError?: TenantCreateSubmissionError;
+}) {
   const translate = useTranslate();
+  const t = useMessages(tenantSettingsMessages);
+  const { getValues, setError } = useFormContext();
   const memberMode = useWatch({ name: "memberMode" }) ?? "new";
+
+  useEffect(() => {
+    if (!submissionError?.field || getValues("memberMode") === "existing")
+      return;
+    setError(
+      submissionError.field,
+      { type: "server", message: t(submissionError.message) },
+      { shouldFocus: true },
+    );
+  }, [getValues, setError, submissionError, t]);
+
   return (
     <>
       <RadioButtonGroupInput
@@ -169,24 +272,24 @@ function InitialTenantUserFields() {
               _: "Correo del primer administrador",
             })}
             type="email"
-            validate={required()}
+            validate={validateAdminEmail}
           />
           <TextInput
             source="initialUser.firstName"
             label={translate("savia.tenants.fields.initialAdminFirstName", {
               _: "Nombres del primer administrador",
             })}
-            validate={required()}
+            validate={validateAdminName}
           />
           <TextInput
             source="initialUser.lastName"
             label={translate("savia.tenants.fields.initialAdminLastName", {
               _: "Apellidos del primer administrador",
             })}
-            validate={required()}
+            validate={validateAdminName}
           />
           <TextInput
-            source="initialUser.temporaryPassword"
+            source={temporaryPasswordSource}
             label={translate("savia.tenants.fields.temporaryPassword", {
               _: "Contraseña temporal",
             })}
@@ -202,6 +305,13 @@ function InitialTenantUserFields() {
           <EmailVerificationField source="initialUser.emailVerified" />
         </>
       )}
+      {submissionError &&
+        (!submissionError.field || memberMode === "existing") && (
+          <Alert variant="destructive">
+            <CircleAlert aria-hidden="true" />
+            <AlertDescription>{t(submissionError.message)}</AlertDescription>
+          </Alert>
+        )}
     </>
   );
 }
@@ -300,6 +410,13 @@ function TenantListActions() {
   );
 }
 
+function tenantUsersPath(usersPath: string, tenantId: number) {
+  const query = new URLSearchParams({
+    filter: JSON.stringify({ tenantId }),
+  });
+  return `${usersPath}?${query}`;
+}
+
 function TenantList() {
   const translate = useTranslate();
   const createPath = useCreatePath();
@@ -313,9 +430,7 @@ function TenantList() {
     >
       <DataTable<TenantRecord>
         rowClick={(_id, _resource, record) =>
-          `${usersPath}?filter=${encodeURIComponent(
-            JSON.stringify({ tenantId: record.id }),
-          )}`
+          tenantUsersPath(usersPath, record.id)
         }
         bulkActionButtons={false}
       >
@@ -370,13 +485,29 @@ function TenantList() {
 
 function TenantCreate() {
   const translate = useTranslate();
+  const [submissionError, setSubmissionError] =
+    useState<TenantCreateSubmissionError>();
   return (
     <Create
       title={translate("savia.tenants.newTenant", { _: "Nuevo tenant" })}
       redirect="edit"
+      mutationOptions={{
+        onMutate: () => setSubmissionError(undefined),
+        onError: (error) => {
+          const code = tenantMutationErrorCode(error);
+          setSubmissionError({
+            message: tenantCreateErrorMessage(error, code),
+            field:
+              code === "TENANT_TEMPORARY_PASSWORD_INVALID"
+                ? temporaryPasswordSource
+                : undefined,
+          });
+        },
+      }}
     >
       <SimpleForm
         className="max-w-2xl"
+        noValidate
         defaultValues={{
           isActive: true,
           memberMode: "new",
@@ -384,7 +515,7 @@ function TenantCreate() {
         }}
       >
         <TenantFields />
-        <InitialTenantUserFields />
+        <InitialTenantUserFields submissionError={submissionError} />
       </SimpleForm>
     </Create>
   );
@@ -464,8 +595,25 @@ function TenantApiKeysEditor() {
   );
 }
 
+const tenantSettingsResetOptions = { keepDirtyValues: true };
+
+function TenantSettingsToolbar() {
+  const record = useRecordContext<TenantRecord>();
+  const [name, isActive] = useWatch({ name: ["name", "isActive"] });
+  const patch = tenantSettingsPatch({ name, isActive }, record);
+  return (
+    <FormToolbar>
+      <div className="flex flex-row justify-end gap-2">
+        <CancelButton />
+        <SaveButton disabled={Object.keys(patch).length === 0} />
+      </div>
+    </FormToolbar>
+  );
+}
+
 function TenantEditSections() {
   const record = useRecordContext<TenantRecord>();
+  const { save } = useSaveContext();
   const { apiClient } = useAppServices();
   const t = useMessages(tenantSettingsMessages);
   const [tab, setTab] = useState("general");
@@ -524,7 +672,12 @@ function TenantEditSections() {
       >
         <SimpleForm
           className="max-w-2xl"
-          resetOptions={{ keepDirtyValues: true }}
+          resetOptions={tenantSettingsResetOptions}
+          toolbar={<TenantSettingsToolbar />}
+          onSubmit={async (values: Partial<TenantRecord>) => {
+            const patch = tenantSettingsPatch(values, record);
+            if (Object.keys(patch).length > 0) return save?.(patch);
+          }}
         >
           <ResourceEditSync resource="tenants" />
           <TenantFields />
@@ -580,27 +733,63 @@ function TenantEditSections() {
   );
 }
 
-function TenantEditBody() {
+type TenantEditSubmissionError = {
+  tenantId: string;
+  message: keyof typeof tenantSettingsMessages;
+};
+
+function TenantEditBody({
+  submissionError,
+}: {
+  submissionError?: TenantEditSubmissionError;
+}) {
   const record = useRecordContext<TenantRecord>();
+  const t = useMessages(tenantSettingsMessages);
+  const createPath = useCreatePath();
+  if (record?.kind === "platform") {
+    const usersPath = createPath({ resource: "users", type: "list" });
+    return (
+      <div className="grid max-w-2xl justify-items-start gap-4">
+        <p className="text-sm text-muted-foreground">
+          {t(
+            "This is Savia’s internal workspace. Its general settings are read-only.",
+          )}
+        </p>
+        <Button asChild variant="outline">
+          <LinkBase to={tenantUsersPath(usersPath, record.id)}>
+            {t("View users")}
+          </LinkBase>
+        </Button>
+      </div>
+    );
+  }
   return (
     <>
-      <TenantEditSections key={record?.id} />
-      <TenantCascadeDelete key={record?.id} />
+      {submissionError?.tenantId === String(record?.id) && (
+        <Alert variant="destructive" className="max-w-4xl">
+          <CircleAlert aria-hidden="true" />
+          <AlertDescription>{t(submissionError.message)}</AlertDescription>
+        </Alert>
+      )}
+      <TenantEditSections key={`settings:${record?.id}`} />
+      <TenantCascadeDelete key={`delete:${record?.id}`} />
     </>
   );
 }
 
 function TenantCascadeDelete() {
   const record = useRecordContext<TenantRecord>();
+  const { isFetching } = useEditContext();
   const { permissions, isPending } = usePermissions<AuthPermissions>();
   const translate = useTranslate();
   const t = useMessages(tenantSettingsMessages);
-  const notify = useNotify();
   const redirect = useRedirect();
   const refresh = useRefresh();
   const [deleteTenant, { isPending: isDeleting }] = useDelete();
   const [isOpen, setIsOpen] = useState(false);
   const [confirmation, setConfirmation] = useState("");
+  const [deletionError, setDeletionError] =
+    useState<keyof typeof tenantSettingsMessages>();
 
   if (
     !record ||
@@ -611,20 +800,22 @@ function TenantCascadeDelete() {
     return null;
   }
 
-  const matchesName = confirmation === record.name;
+  const canDelete = confirmation === record.name && !isDeleting && !isFetching;
   const close = () => {
     if (isDeleting) return;
     setIsOpen(false);
     setConfirmation("");
+    setDeletionError(undefined);
   };
   const handleDelete = () => {
-    if (!matchesName || isDeleting) return;
+    if (!canDelete) return;
+    setDeletionError(undefined);
     deleteTenant(
       "tenants",
       {
         id: record.id,
         previousData: record,
-        meta: { cascade: true, confirmation: record.name },
+        meta: { cascade: true, confirmation },
       },
       {
         mutationMode: "pessimistic",
@@ -634,16 +825,19 @@ function TenantCascadeDelete() {
         },
         onError: (error: unknown) => {
           const message = tenantCascadeDeleteErrorMessage(error);
-          notify(t(message), { type: "error" });
-          const code = tenantCascadeDeleteErrorCode(error);
+          setDeletionError(message);
+          const code = tenantMutationErrorCode(error);
+          if (code === "TENANT_CONFIRMATION_REQUIRED") setConfirmation("");
           const status =
             typeof error === "object" && error !== null && "status" in error
               ? error.status
               : undefined;
           if (
             code === "TENANT_CLEANUP_UNAVAILABLE" ||
+            code === "TENANT_FILE_CLEANUP_UNAVAILABLE" ||
+            code === "TENANT_AUTH_CLEANUP_UNAVAILABLE" ||
             code === "TENANT_CONFIRMATION_REQUIRED" ||
-            code === "REQUEST_TIMEOUT" ||
+            message === tenantDeletionResultUnknown ||
             status === 409
           ) {
             refresh();
@@ -694,9 +888,15 @@ function TenantCascadeDelete() {
               autoComplete="off"
               value={confirmation}
               onChange={(event) => setConfirmation(event.target.value)}
-              disabled={isDeleting}
+              disabled={isDeleting || isFetching}
             />
           </div>
+          {deletionError && (
+            <Alert variant="destructive">
+              <CircleAlert aria-hidden="true" />
+              <AlertDescription>{t(deletionError)}</AlertDescription>
+            </Alert>
+          )}
           <DialogFooter>
             <Button
               type="button"
@@ -710,7 +910,7 @@ function TenantCascadeDelete() {
               type="button"
               variant="destructive"
               onClick={handleDelete}
-              disabled={!matchesName || isDeleting}
+              disabled={!canDelete}
             >
               <Trash2 className="size-4" aria-hidden="true" />
               {isDeleting ? t("Deleting…") : t("Delete permanently")}
@@ -722,14 +922,52 @@ function TenantCascadeDelete() {
   );
 }
 
-function TenantEdit() {
+function tenantSettingsPatch(
+  { name, isActive }: Partial<TenantRecord>,
+  previous?: TenantRecord,
+) {
+  const trimmedName = name?.trim();
+  return {
+    ...(trimmedName !== undefined && trimmedName !== previous?.name?.trim()
+      ? { name: trimmedName }
+      : {}),
+    ...(isActive !== undefined && isActive !== previous?.isActive
+      ? { isActive }
+      : {}),
+  };
+}
+
+function TenantEditTitle() {
   const translate = useTranslate();
+  const record = useRecordContext<TenantRecord>();
+  return record?.kind === "platform"
+    ? record.name
+    : translate("savia.tenants.editTenant", { _: "Editar tenant" });
+}
+
+function TenantEdit() {
+  const [submissionError, setSubmissionError] =
+    useState<TenantEditSubmissionError>();
   return (
     <Edit
-      title={translate("savia.tenants.editTenant", { _: "Editar tenant" })}
-      mutationMode="optimistic"
+      title={<TenantEditTitle />}
+      actions={false}
+      mutationMode="pessimistic"
+      mutationOptions={{
+        onMutate: () => setSubmissionError(undefined),
+        onError: (error, { id }) => {
+          const status = error instanceof ApiClientError ? error.status : 0;
+          setSubmissionError({
+            tenantId: String(id),
+            message:
+              status >= 400 && status < 500 && status !== 408
+                ? "Could not save the tenant. Review the information and try again."
+                : "Savia could not confirm the save. Open the tenant in another tab to check the changes before retrying.",
+          });
+        },
+      }}
     >
-      <TenantEditBody />
+      <TenantEditBody submissionError={submissionError} />
     </Edit>
   );
 }

@@ -182,6 +182,18 @@ is treated as an empty page only when pagination explicitly reports no more
 items. First and last name metadata are read-only in Pipedrive screens; edit
 the full name there instead.
 
+HubSpot summaries honor the same text search as the record list. When a
+search is present, summary counts and groups include only matching records.
+Count-only summaries use the provider's total when available. If an
+unfiltered list exceeds the 1,000-record scan limit, Savia requests a total
+from [HubSpot CRM Search](https://developers.hubspot.com/docs/api-reference/legacy/crm/search-the-crm).
+It uses that total when it exceeds the number of records already scanned.
+Grouped summaries require a complete scan of up to 1,000 matching records and
+return an error if provider pagination ends before the reported total is reached.
+
+HubSpot relation pages follow the provider's association cursor and keep
+association order when loading record details in batches.
+
 Optional CRM picklists with more than 200 active choices appear as read-only
 text fields without a choice list, so existing values stay visible while other
 fields remain editable. Required picklists over that limit are rejected when

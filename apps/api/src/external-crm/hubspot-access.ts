@@ -28,4 +28,3 @@ export function canManageSharedCrm(actor: AppActor, tenant: string): boolean {
       ["agency_admin", "tenant_admin", "admin"].includes(membership.role),
   );
 }
-

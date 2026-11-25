@@ -3,7 +3,7 @@ import Dexie from "dexie";
 import { afterEach, expect, it, vi } from "vitest";
 import { createWorkspaceManager } from "./workspaces";
 import type { AuthSession } from "@/auth/auth-session";
-import type { ApiClient } from "@/api/api-client";
+import { ApiClient } from "@/api/api-client";
 afterEach(async () => {
   await Dexie.delete("savia-offline");
   Reflect.deleteProperty(navigator, "locks");
@@ -60,13 +60,14 @@ it("unlocks revoked workspaces only after an authenticated tenant manifest succe
   seed.close();
   let authorized = false;
   let principalId = "other-user";
-  const client = {
-    requestResponse: vi.fn(async () =>
+  const client = new ApiClient({
+    baseUrl: "https://savia.test",
+    tokenSource: { getAccessToken: async () => "test" },
+    fetcher: async () =>
       authorized
         ? Response.json({ collections: [], principalId })
         : Response.json({ error: "Denied" }, { status: 401 }),
-    ),
-  } as unknown as ApiClient;
+  });
   const manager = createWorkspaceManager(session, client, environment);
   const workspace = await manager.open(prefix);
   await expect(workspace.syncNow()).rejects.toThrow();

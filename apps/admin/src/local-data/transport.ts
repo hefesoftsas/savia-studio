@@ -1,4 +1,5 @@
 import { localRecordLinks } from "./link-snapshots";
+import { embeddedApiPathname } from "@/api/embedded-transport";
 import { isOfflineError } from "@/offline/offline-error";
 import { validateRecord } from "@savia/studio-shared/metadata";
 import type { LocalStore } from "./store";
@@ -23,19 +24,7 @@ export function createLocalTransport(
   },
 ): SyncTransport {
   return async (path, init = {}) => {
-    let decoded = path;
-    try {
-      for (let i = 0; i < 4; i++) decoded = decodeURIComponent(decoded);
-    } catch {
-      return response("Ruta no permitida.", 400);
-    }
-    if (
-      !decoded.startsWith("/api/") ||
-      decoded.includes("..") ||
-      decoded.includes("\\") ||
-      /[\r\n]/.test(decoded)
-    )
-      return response("Ruta no permitida.", 400);
+    if (!embeddedApiPathname(path)) return response("Ruta no permitida.", 400);
     const url = new URL(path, "https://local.invalid");
     const segments = url.pathname
       .split("/")

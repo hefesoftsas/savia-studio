@@ -4,7 +4,7 @@ import { AppServicesProvider } from "@/features/assistant/assistant-context";
 import { createAdminQueryClient } from "@/queries/query-policy";
 import { getSessionGeneration, rotateSessionScope } from "@/auth/session-scope";
 import type { AppServices } from "@/app-services";
-import type { ApiClient } from "@/api/api-client";
+import { ApiClientError, type ApiClient } from "@/api/api-client";
 import { describe, expect, it, vi } from "vitest";
 import {
   formatSlugToDisplayName,
@@ -82,7 +82,9 @@ describe("useCurrentTenant", () => {
 
   it("returns dedicated tenant info on preview subdomain", () => {
     const { result } = renderHook(() =>
-      useCurrentTenant({ hostname: "example-organization.savia-preview.hefesoft.com" }),
+      useCurrentTenant({
+        hostname: "example-organization.savia-preview.hefesoft.com",
+      }),
     );
 
     expect(result.current.isDedicated).toBe(true);
@@ -256,19 +258,49 @@ describe("useCurrentTenant", () => {
     expect(result.current.id).toBe(42);
   });
 
-  it("does not resolve a dedicated scope without a valid tenant id", async () => {
-    const { services } = createServices(
-      vi.fn().mockResolvedValue({
-        data: { name: "Example", kind: "commercial", id: null },
-      }),
+  it.each([null, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "42"])(
+    "does not expose an invalid tenant ID (%s)",
+    async (id) => {
+      const { services } = createServices(
+        vi.fn().mockResolvedValue({
+          data: { name: "Example", kind: "commercial", id },
+        }),
+      );
+      const { result } = renderHook(
+        () => useCurrentTenant({ hostname: "example.savia.hefesoft.com" }),
+        { wrapper: servicesWrapper(services) },
+      );
+
+      await waitFor(() => expect(result.current.scopeStatus).toBe("error"));
+      expect(result.current.id).toBeNull();
+      expect(result.current.scopeError).toBeTruthy();
+    },
+  );
+
+  it("blocks a previously resolved workspace after the server reports it missing", async () => {
+    const workspace = { data: { name: "Example", kind: "commercial", id: 42 } };
+    const { get, services } = createServices(
+      vi.fn().mockResolvedValue(workspace),
     );
+    services.queryClient!.setDefaultOptions({ queries: { retry: false } });
     const { result } = renderHook(
       () => useCurrentTenant({ hostname: "example.savia.hefesoft.com" }),
       { wrapper: servicesWrapper(services) },
     );
-
+    await waitFor(() => expect(result.current.id).toBe(42));
+    get.mockRejectedValueOnce(
+      new ApiClientError(404, "not_found", "Workspace missing"),
+    );
+    await act(async () => {
+      await services.queryClient!.invalidateQueries();
+    });
     await waitFor(() => expect(result.current.scopeStatus).toBe("error"));
     expect(result.current.id).toBeNull();
-    expect(result.current.scopeError).toBeTruthy();
+
+    await act(async () => {
+      await result.current.retry?.();
+    });
+    await waitFor(() => expect(result.current.id).toBe(42));
+    expect(result.current.scopeStatus).toBe("resolved");
   });
 });

@@ -1,7 +1,12 @@
 import type { DataProvider } from "ra-core";
-import type { ApiClient } from "./api-client";
+import { type ApiClient, ApiClientError } from "./api-client";
 
 const TENANT_PURGE_TIMEOUT_MS = 120_000;
+const tenantTextOrder = new Intl.Collator("es", { numeric: true });
+
+export function tenantSearchText(value: string) {
+  return value.trim().toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
+}
 
 export type TenantRecord = {
   id: number;
@@ -19,7 +24,7 @@ type InitialUser = {
   firstName: string;
   lastName: string;
   role: "tenant_admin";
-  temporaryPassword?: string;
+  temporaryPassword?: string | null;
   emailVerified?: boolean;
 };
 
@@ -27,6 +32,30 @@ type ExistingMember = {
   principalId: string;
   role: "tenant_admin" | "agency_admin" | "operator" | "viewer";
 };
+
+function tenantDateOrder(left: string, right: string) {
+  const leftTime = Date.parse(left);
+  const rightTime = Date.parse(right);
+  const leftValid = Number.isFinite(leftTime);
+  const rightValid = Number.isFinite(rightTime);
+  return leftValid && rightValid
+    ? leftTime - rightTime
+    : Number(leftValid) - Number(rightValid);
+}
+
+function compareTenants(
+  left: TenantRecord,
+  right: TenantRecord,
+  field: keyof TenantRecord,
+) {
+  if (field === "createdAt" || field === "updatedAt") {
+    return tenantDateOrder(left[field], right[field]);
+  }
+  const a = left[field];
+  const b = right[field];
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return tenantTextOrder.compare(String(a ?? ""), String(b ?? ""));
+}
 
 export function createTenantDataProvider(
   client: ApiClient,
@@ -70,17 +99,27 @@ export function createTenantDataProvider(
         memberMode?: "new" | "existing";
         existingUserId?: string;
         existingRole?: ExistingMember["role"];
-        initialUser: Omit<InitialUser, "role">;
+        initialUser?: Omit<InitialUser, "role">;
       };
+      const transferring = memberMode === "existing";
+      const principalId = String(existingUserId ?? "");
+      if (transferring && !principalId.trim()) {
+        throw new ApiClientError(
+          400,
+          "TENANT_EXISTING_USER_REQUIRED",
+          "Select the existing user to transfer.",
+        );
+      }
+      const { temporaryPassword, ...administrator } = initialUser ?? {};
       const response = await client.post<{ data: TenantRecord }>(
         "/v1/tenants",
-        memberMode === "existing" && existingUserId
+        transferring
           ? {
               name,
               ...(idSlug ? { idSlug } : {}),
               isActive,
               existingMember: {
-                principalId: String(existingUserId),
+                principalId,
                 role: existingRole ?? "tenant_admin",
               },
             }
@@ -88,7 +127,11 @@ export function createTenantDataProvider(
               name,
               ...(idSlug ? { idSlug } : {}),
               isActive,
-              initialUser: { ...initialUser, role: "tenant_admin" },
+              initialUser: {
+                ...administrator,
+                ...(temporaryPassword ? { temporaryPassword } : {}),
+                role: "tenant_admin",
+              },
             },
       );
       return { data: response.data as never };
@@ -106,19 +149,23 @@ export function createTenantDataProvider(
         data: TenantRecord[];
         meta: { total: number };
       }>("/v1/tenants", { signal: params.signal });
+      const search =
+        typeof params.filter?.q === "string"
+          ? tenantSearchText(params.filter.q)
+          : "";
       const records = response.data.filter(
         (record) =>
           (params.filter?.isActive === undefined ||
             record.isActive === params.filter.isActive) &&
           (params.filter?.kind === undefined ||
-            record.kind === params.filter.kind),
+            record.kind === params.filter.kind) &&
+          (!search ||
+            tenantSearchText(record.name).includes(search) ||
+            tenantSearchText(record.idSlug).includes(search)),
       );
       const field = (params.sort?.field ?? "name") as keyof TenantRecord;
-      records.sort(
-        (a, b) =>
-          String(a[field] ?? "").localeCompare(String(b[field] ?? ""), "es") *
-          (params.sort?.order === "DESC" ? -1 : 1),
-      );
+      const direction = params.sort?.order === "DESC" ? -1 : 1;
+      records.sort((a, b) => direction * compareTenants(a, b, field));
       const perPage = params.pagination?.perPage ?? 100;
       const start = ((params.pagination?.page ?? 1) - 1) * perPage;
       return {

@@ -19,7 +19,11 @@ import { invalidateTenantWorkspaces } from "@/api/tenant-workspaces-client";
 import { Label } from "@/components/ui/label";
 import { RouteLoading } from "@/components/admin/route-loading";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { studioTenantSearch, studioItems } from "./studio-navigation";
+import {
+  parseStudioSearch,
+  studioTenantSearch,
+  studioItems,
+} from "./studio-navigation";
 import {
   STUDIO_TENANTS_CHANGED,
   listStudioTenants,
@@ -119,16 +123,12 @@ export function StudioPage({
     };
   }, [canAccess, services]);
 
-  const rawTenantId = params.get("tenantId");
-  const requestedTenantId =
-    rawTenantId !== null && /^\d+$/.test(rawTenantId)
-      ? Number(rawTenantId)
-      : undefined;
+  const { tenantId: requestedTenantId } = parseStudioSearch(params.toString());
+  const recordLink = !pluginStudio && !!params.get("record");
   const selected =
-    selectStudioTenant(tenants, requestedTenantId) ??
-    (requestedTenantId === undefined && tenants.length === 1
-      ? tenants[0]
-      : undefined);
+    recordLink && requestedTenantId === undefined
+      ? undefined
+      : selectStudioTenant(tenants, requestedTenantId);
   useEffect(() => {
     if (!selected || params.get("tenantId") === String(selected.tenantId))
       return;
@@ -283,11 +283,17 @@ export function StudioPage({
           <h2 className="mb-2 text-lg font-semibold text-foreground">
             {requestedTool?.label ?? t("Pantallas")}
           </h2>
-          <p>
-            {t(
-              "Selecciona un tenant para administrar sus pantallas y plugins.",
-            )}
-          </p>
+          {recordLink ? (
+            <p role="alert">
+              {t("El espacio de trabajo del enlace no está disponible.")}
+            </p>
+          ) : (
+            <p>
+              {t(
+                "Selecciona un tenant para administrar sus pantallas y plugins.",
+              )}
+            </p>
+          )}
         </div>
       )}
     </section>

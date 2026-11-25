@@ -104,13 +104,13 @@ BEGIN
   IF v_actor_id IS NULL OR length(btrim(v_actor_id))=0 THEN RETURN NEW; END IF;
   IF TG_OP = 'UPDATE' AND EXISTS (
     SELECT 1 FROM savia_core.studio_schema_data archived
-    JOIN savia_core.studio_objects current_schema
-      ON current_schema.tenant_id=archived.tenant_id
-     AND current_schema.name=archived.object_name
+    JOIN savia_core.studio_objects active_schema
+      ON active_schema.tenant_id=archived.tenant_id
+     AND active_schema.name=archived.object_name
     WHERE archived.tenant_id=NEW.tenant_id
       AND archived.object_name=NEW.object_name
       AND archived.record_id=NEW.id
-      AND archived.version=current_schema.version
+      AND archived.version=active_schema.version
   ) THEN RETURN NEW; END IF;
 
   INSERT INTO savia_core.savia_flows_collection_event_outbox(

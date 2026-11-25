@@ -3,7 +3,7 @@ import { PersonalCalendarService } from "../personal-calendars/service";
 import { createPersonalIntegrationRepository } from "../personal-integrations/repository";
 import type { PersonalIntegrationNangoClient } from "../personal-integrations/contracts";
 import { createBookingCalendarAdapter } from "./calendar";
-import { localInstant } from "./domain";
+import { localDayStart } from "./domain";
 import type { BusyInterval } from "./contracts";
 
 const grantSchema = z
@@ -150,10 +150,10 @@ export class BookingAgenda {
       for (const event of events.data) {
         if (event.busy === false) continue;
         const start = event.allDay
-          ? localInstant(event.startsAt, "00:00", event.timeZone)
+          ? localDayStart(event.startsAt, event.timeZone)
           : Date.parse(event.startsAt);
         const end = event.allDay
-          ? localInstant(event.endsAt, "00:00", event.timeZone)
+          ? localDayStart(event.endsAt, event.timeZone)
           : Date.parse(event.endsAt);
         if (
           start === null ||

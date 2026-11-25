@@ -16,6 +16,7 @@ import {
 } from "@savia/studio-shared/access-evaluator";
 import type { StudioObject, StudioRecord } from "@savia/studio-shared/metadata";
 import { HTTPException } from "hono/http-exception";
+import { parseRecordFilters } from "./record-filters";
 const contexts = new WeakMap<D1Database, AccessPolicy>();
 export const policyFor = (db: D1Database) => contexts.get(db);
 /** Preserve policy metadata when a wrapper delegates to an already guarded database. */
@@ -189,13 +190,8 @@ export function requireQueryAccess(
   ].filter(Boolean) as string[];
   if (params.stage || params.emptyStage) queried.push(pipeline);
   if (params.filters) {
-    let filters;
-    try {
-      filters = JSON.parse(params.filters);
-    } catch {
-      throw new HTTPException(422, { message: "Invalid filters." });
-    }
-    for (const c of filters.conditions ?? []) queried.push(c.field);
+    const filters = parseRecordFilters(params.filters);
+    for (const condition of filters.conditions) queried.push(condition.field);
   }
   if (queried.some((f) => !allowed.has(f))) accessDenied();
   if (params.q && !params.searchField && !params.searchFields) {

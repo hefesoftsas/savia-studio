@@ -6,7 +6,7 @@ export function createProtectedReadCache(): QueryCache {
   return new QueryCache({
     onError: (error, query) => {
       if (isReadAccessDenied(error)) {
-        // Keep the denial visible without retaining protected rows or retrying mutations.
+        // Keep the denial visible without retaining protected rows.
         query.setState({ data: undefined, dataUpdatedAt: 0 });
       }
     },
@@ -19,7 +19,10 @@ export function createAdminQueryClient(): QueryClient {
     defaultOptions: {
       queries: {
         networkMode: "always",
-        retry: 1,
+        retry: (failureCount, error) =>
+          failureCount < 1 &&
+          !isReadAccessDenied(error) &&
+          (error as { status?: number } | undefined)?.status !== 429,
         staleTime: 30_000,
         gcTime: 5 * 60_000,
         refetchOnWindowFocus: false,

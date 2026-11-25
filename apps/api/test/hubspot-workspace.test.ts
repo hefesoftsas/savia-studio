@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { beforeAll, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createHubspotWorkspaceApp,
   capabilities,
@@ -95,13 +95,15 @@ const context: any = {
           });
         if (/\/7\?/.test(path) || path.endsWith("/7"))
           return Response.json({ id: "7", properties: { firstname: "Ada" } });
+        const nextPage = path.includes("after=");
         return Response.json({
           results: [
-            { id: "7", properties: { firstname: "Ada", name: "Acme" } },
+            {
+              id: nextPage ? "8" : "7",
+              properties: { firstname: nextPage ? "Bea" : "Ada", name: "Acme" },
+            },
           ],
-          ...(path.includes("after=")
-            ? {}
-            : { paging: { next: { after: "7" } } }),
+          ...(nextPage ? {} : { paging: { next: { after: "7" } } }),
         });
       },
     },
@@ -454,6 +456,10 @@ it("reads remote pages and rejects invalid fields before writes", async () => {
   );
   expect(response.status).toBe(200);
   expect(calls.at(-1).path).toContain("after=7");
+  expect(await response.json()).toMatchObject({
+    data: [{ id: "8", firstname: "Bea" }],
+    total: 2,
+  });
   const count = calls.length;
   expect(
     (
@@ -475,6 +481,52 @@ it("reads remote pages and rejects invalid fields before writes", async () => {
     (await request("/api/records/hubspot_contacts/7", "DELETE")).status,
   ).toBe(200);
 });
+it("stops owner lookup on a repeated cursor and installs the screen without owner labels", async () => {
+  const tenant = "tenant:hubspot-repeated-owners";
+  const previous = conn;
+  conn = {
+    ...previous,
+    scopes: [...previous.scopes, "crm.objects.owners.read"],
+  };
+  let ownersRequests = 0;
+  const proxy = vi.fn(async ({ path }: { path: string }) => {
+    if (path.startsWith("/crm/v3/properties/"))
+      return Response.json({
+        results: [{ name: "hubspot_owner_id", type: "string" }],
+      });
+    if (path.startsWith("/crm/v3/owners?")) {
+      ownersRequests++;
+      if (ownersRequests > 2) return new Response(null, { status: 403 });
+      return Response.json({
+        results: [],
+        paging: { next: { after: "repeated" } },
+      });
+    }
+    return Response.json({ results: [] });
+  });
+  try {
+    const response = await createHubspotWorkspaceApp({
+      ...context,
+      tenant,
+      crm: { nango: { proxy } },
+    }).request("/api/crm-workspace/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resources: ["contacts"] }),
+    });
+    expect(response.status).toBe(200);
+    expect(ownersRequests).toBe(2);
+    const stored = await env.DB.prepare(
+      "SELECT config FROM studio_objects WHERE tenant_id=? AND name='hubspot_contacts'",
+    )
+      .bind(tenant)
+      .first<string>("config");
+    expect(JSON.parse(stored!).fields.hubspot_owner_id.type).toBe("Textbox");
+  } finally {
+    conn = previous;
+  }
+});
+
 it("returns an exact total when the requested HubSpot list page is final", async () => {
   const proxy = vi.fn(async ({ path }: { path: string }) => {
     const after = new URL(`https://hubspot.test${path}`).searchParams.get(
@@ -500,6 +552,393 @@ it("returns an exact total when the requested HubSpot list page is final", async
     pageInfo: { hasNextPage: false, hasPreviousPage: true },
   });
 });
+describe("HubSpot record pagination", () => {
+  const pageContext = { ...context, tenant: "tenant:hubspot-page-integrity" };
+  beforeAll(async () => {
+    const response = await createHubspotWorkspaceApp(pageContext).request(
+      "/api/crm-workspace/install",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resources: ["contacts"] }),
+      },
+    );
+    expect(response.status, await response.text()).toBe(200);
+  });
+
+  it.each([
+    { label: "missing records", body: JSON.stringify({ status: "unknown" }) },
+    { label: "an invalid record", body: JSON.stringify({ results: [null] }) },
+    {
+      label: "an inconsistent total",
+      body: JSON.stringify({ results: [{ id: "1" }], total: 0 }),
+    },
+    { label: "invalid JSON", body: "<html>Gateway unavailable</html>" },
+  ])(
+    "rejects a successful HubSpot response with $label instead of returning a count",
+    async ({ body }) => {
+      const app = createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy: vi.fn(async () => new Response(body)) } },
+      });
+      for (const path of [
+        "/api/records/hubspot_contacts",
+        "/api/records/hubspot_contacts/summary",
+      ]) {
+        const response = await app.request(path);
+        expect(response.status).toBe(502);
+      }
+    },
+  );
+
+  it("stops fetching contacts when HubSpot repeats a pagination cursor", async () => {
+    const proxy = vi.fn(async () =>
+      Response.json({
+        results: [{ id: "1" }],
+        paging: { next: { after: "same-cursor" } },
+      }),
+    );
+    const response = await createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).request("/api/records/hubspot_contacts?page=5");
+    expect(response.status).toBe(502);
+    expect(proxy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "/api/records/hubspot_contacts",
+    "/api/records/hubspot_contacts/summary",
+    "/api/export/hubspot_contacts",
+  ])("reports HubSpot's rate limit for %s", async (path) => {
+    const { createCollectionGateway } =
+      await import("../src/studio/collection-gateway");
+    const proxy = vi.fn(async () =>
+      Response.json(
+        { message: "Provider rate limit" },
+        {
+          status: 429,
+          headers: { "Retry-After": "30", "X-Provider-Internal": "test" },
+        },
+      ),
+    );
+    const response = await createCollectionGateway({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).fetch(new Request(`https://savia.test${path}`));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("30");
+    expect(response.headers.has("X-Provider-Internal")).toBe(false);
+    expect(await response.json()).toMatchObject({
+      error: "HubSpot alcanzó el límite de solicitudes. Inténtalo más tarde.",
+    });
+    expect(proxy).toHaveBeenCalledOnce();
+  });
+
+  it("exports the selected HubSpot columns across all pages", async () => {
+    const { createCollectionGateway } =
+      await import("../src/studio/collection-gateway");
+    const proxy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          results: [{ id: "1", properties: { firstname: "Ana" } }],
+          paging: { next: { after: "page-two" } },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          results: [{ id: "2", properties: { firstname: "=SUM(1,2)" } }],
+        }),
+      );
+    const query = new URLSearchParams({
+      columns: JSON.stringify(["firstname"]),
+      headers: JSON.stringify(["Nombre"]),
+      q: "an",
+      trash: "false",
+    });
+    const response = await createCollectionGateway({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).fetch(
+      new Request(`https://savia.test/api/export/hubspot_contacts?${query}`),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toMatch(/^text\/csv/);
+    expect(await response.text()).toBe(
+      '"Nombre"\r\n"Ana"\r\n"\'=SUM(1,2)"\r\n',
+    );
+    expect(proxy).toHaveBeenCalledTimes(2);
+    expect(proxy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        method: "POST",
+        body: expect.objectContaining({
+          query: "an",
+          after: "page-two",
+          properties: ["firstname"],
+        }),
+      }),
+    );
+  });
+
+  it("persists the CRM column in saved HubSpot views and table preferences", async () => {
+    const { createCollectionGateway } =
+      await import("../src/studio/collection-gateway");
+    const gateway = createCollectionGateway(pageContext);
+    const url = "https://savia.test/api/views/hubspot_contacts";
+    const config = {
+      columns: ["__crm_integration", "firstname"],
+      columnOrder: ["__crm_integration", "firstname"],
+    };
+    for (const [target, method, body, status] of [
+      [
+        url,
+        "POST",
+        {
+          name: "CRM view",
+          config: { ...config, sort: { field: "updated_at", order: "DESC" } },
+        },
+        201,
+      ],
+      [url + "/default", "PUT", { config }, 200],
+    ] as const) {
+      const response = await gateway.fetch(
+        new Request(target, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
+      expect(response.status, await response.text()).toBe(status);
+    }
+    const response = await gateway.fetch(new Request(url));
+    expect(await response.json()).toMatchObject({
+      data: [{ name: "CRM view", config }],
+      default: { config },
+    });
+  });
+
+  it.each([
+    "/api/records/hubspot_contacts?page=2",
+    "/api/records/hubspot_contacts/summary",
+    "/api/records/hubspot_contacts/summary?group=firstname",
+    "/api/export/hubspot_contacts",
+  ])("rejects an overlapping contact scan at %s", async (path) => {
+    const proxy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          results: [{ id: "1", properties: { firstname: "Ana" } }],
+          paging: { next: { after: "page-two" } },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          results: [{ id: 1, properties: { firstname: "Ana" } }],
+        }),
+      );
+    const response = await createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).request(path);
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: "HubSpot devolvió registros repetidos durante la paginación.",
+    });
+    expect(proxy).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an export above the HubSpot CSV limit before sending a file", async () => {
+    const proxy = vi.fn(async () =>
+      Response.json({ results: [{ id: "1" }], total: 1001 }),
+    );
+    const response = await createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).request("/api/export/hubspot_contacts");
+    expect(response.status).toBe(422);
+    expect(response.headers.has("content-disposition")).toBe(false);
+    expect(proxy).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["/api/records/hubspot_contacts?page=2", "first"],
+    ["/api/records/hubspot_contacts?page=2", "second"],
+    ["/api/records/hubspot_contacts/summary", "second"],
+  ])(
+    "rejects a total below the scanned records at %s (%s page)",
+    async (path, totalPage) => {
+      const proxy = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json({
+            results: [{ id: "1" }],
+            paging: { next: { after: "page-two" } },
+            ...(totalPage === "first" ? { total: 1 } : {}),
+          }),
+        )
+        .mockResolvedValueOnce(
+          Response.json({
+            results: [{ id: "2" }],
+            ...(totalPage === "second" ? { total: 1 } : {}),
+          }),
+        );
+      const response = await createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy } },
+      }).request(path);
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({
+        error: "El total de HubSpot es menor que los registros leídos.",
+      });
+      expect(proxy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("retains the HubSpot search total when the requested page is beyond the cursor", async () => {
+    const proxy = vi.fn(async () =>
+      Response.json({ results: [{ id: "1" }], total: 10_001 }),
+    );
+    const response = await createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).request("/api/records/hubspot_contacts?q=contact&page=2");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ data: [], total: 10_001 });
+  });
+
+  it("preserves the total but stops navigation at the supported page limit", async () => {
+    let current = 0;
+    const proxy = vi.fn(async () => {
+      current++;
+      return Response.json({
+        results: [{ id: String(current) }],
+        total: 150,
+        paging: { next: { after: String(current) } },
+      });
+    });
+    const app = createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    });
+    const url = "/api/records/hubspot_contacts?q=contact&perPage=1";
+    const final = await app.request(`${url}&page=100`);
+    expect(final.status).toBe(200);
+    expect(await final.json()).toMatchObject({
+      total: 150,
+      pageInfo: { hasNextPage: false, hasPreviousPage: true },
+      meta: { maxPage: 100, pageLimitReached: true },
+    });
+    expect((await app.request(`${url}&page=101`)).status).toBe(422);
+    expect(proxy).toHaveBeenCalledTimes(100);
+  });
+
+  it("uses HubSpot's search total without scanning all matching records", async () => {
+    const proxy = vi.fn(async () =>
+      Response.json({
+        total: 1_500,
+        results: [{ id: "1" }],
+        paging: { next: { after: "next" } },
+      }),
+    );
+    const response = await createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).request("/api/records/hubspot_contacts/summary?q=Ana");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ data: [], total: 1_500 });
+    expect(proxy).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      "complete",
+      () => Response.json({ total: 1_243, results: [{ id: "1" }] }),
+      200,
+    ],
+    ["stale", () => Response.json({ total: 800, results: [{ id: "1" }] }), 422],
+    ["unsupported", () => new Response(null, { status: 404 }), 422],
+  ] as const)(
+    "handles a %s unfiltered count after reaching the list scan limit",
+    async (_scenario, search, status) => {
+      let page = 0;
+      const proxy = vi.fn(
+        async ({ path }: { path: string; body?: unknown }) => {
+          if (path.endsWith("/search")) return search();
+          const start = page++ * 100;
+          return Response.json({
+            results: Array.from({ length: 100 }, (_, index) => ({
+              id: String(start + index + 1),
+            })),
+            paging: { next: { after: String(start + 100) } },
+          });
+        },
+      );
+      const response = await createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy } },
+      }).request("/api/records/hubspot_contacts/summary");
+
+      expect(response.status).toBe(status);
+      expect(page).toBe(10);
+      expect(proxy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          path: "/crm/v3/objects/contacts/search",
+          method: "POST",
+          body: { limit: 1, properties: ["hs_object_id"] },
+        }),
+      );
+      if (status === 200)
+        expect(await response.json()).toEqual({ data: [], total: 1_243 });
+    },
+  );
+
+  it.each([
+    [3, 502],
+    [1_500, 422],
+  ])(
+    "rejects a partial grouped summary when HubSpot reports %s matches",
+    async (total, status) => {
+      const proxy = vi.fn(async () =>
+        Response.json({
+          total,
+          results: [{ id: "1", properties: { firstname: "Ana" } }],
+        }),
+      );
+      const response = await createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy } },
+      }).request("/api/records/hubspot_contacts/summary?group=firstname&q=Ana");
+
+      expect(response.status).toBe(status);
+      expect(proxy).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([{ id: "124" }, { properties: {} }, null])(
+    "rejects an inconsistent HubSpot detail response",
+    async (body) => {
+      const app = createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy: vi.fn(async () => Response.json(body)) } },
+      });
+      for (const surface of ["records", "record-detail"]) {
+        const response = await app.request(
+          `/api/${surface}/hubspot_contacts/123`,
+        );
+        expect(response.status).toBe(502);
+        expect(await response.json()).toEqual({
+          error: "HubSpot devolvió un registro distinto o inválido.",
+        });
+      }
+    },
+  );
+});
+
 it("groups a fully paginated HubSpot summary and supports total-only scans", async () => {
   const proxy = vi.fn(async ({ path }: { path: string }) => {
     const after = new URL(`https://hubspot.test${path}`).searchParams.get(
@@ -534,6 +973,55 @@ it("groups a fully paginated HubSpot summary and supports total-only scans", asy
   expect(totalOnly.status).toBe(200);
   expect(await totalOnly.json()).toEqual({ data: [], total: 3 });
 });
+it("groups only HubSpot records that match the search across pages", async () => {
+  const summaryContext = {
+    ...context,
+    tenant: "tenant:hubspot-summary-search",
+  };
+  const installed = await createHubspotWorkspaceApp(summaryContext).request(
+    "/api/crm-workspace/install",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resources: ["contacts"] }),
+    },
+  );
+  expect(installed.status).toBe(200);
+  const proxy = vi.fn(
+    async ({ path, body }: { path: string; body?: unknown }) => {
+      if (!path.endsWith("/search"))
+        return Response.json({
+          results: [{ id: "9", properties: { firstname: "Unrelated" } }],
+        });
+      const { after } = body as { after?: string };
+      return Response.json({
+        total: 2,
+        results: [{ id: after ? "2" : "1", properties: { firstname: "Ana" } }],
+        ...(after ? {} : { paging: { next: { after: "search-cursor" } } }),
+      });
+    },
+  );
+  const response = await createHubspotWorkspaceApp({
+    ...summaryContext,
+    crm: { nango: { proxy } },
+  }).request("/api/records/hubspot_contacts/summary?group=firstname&q=Ana");
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    data: [{ value: "Ana", count: 2 }],
+    total: 2,
+  });
+  expect(proxy.mock.calls.map(([request]) => request.body)).toEqual([
+    { query: "Ana", properties: ["firstname"], limit: 100 },
+    {
+      query: "Ana",
+      properties: ["firstname"],
+      limit: 100,
+      after: "search-cursor",
+    },
+  ]);
+});
+
 it("rejects invalid HubSpot summary fields", async () => {
   const response = await request(
     "/api/records/hubspot_contacts/summary?group=not_a_field",
@@ -596,6 +1084,77 @@ it("resolves native links and performs safe provider association mutations", asy
   );
   expect(calls.at(-1).body).toEqual({});
 });
+it("reads a zero association cursor and preserves association order in the next page", async () => {
+  const relationContext = {
+    ...context,
+    tenant: "tenant:hubspot-relation-pages",
+  };
+  const installed = await createHubspotWorkspaceApp(relationContext).request(
+    "/api/crm-workspace/install",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ resources: ["contacts", "companies"] }),
+    },
+  );
+  expect(installed.status).toBe(200);
+  let batchRecords = [
+    { id: "4", properties: { name: "Fourth" } },
+    { id: "3", properties: { name: "Third" } },
+  ];
+  const proxy = vi.fn(async ({ path }: { path: string; body?: unknown }) => {
+    if (path.endsWith("/labels"))
+      return Response.json({
+        results: [{ label: null, category: "HUBSPOT_DEFINED", typeId: 1 }],
+      });
+    if (path.includes("/associations/")) {
+      const after = new URL(`https://hubspot.test${path}`).searchParams.get(
+        "after",
+      );
+      return Response.json(
+        after === "0"
+          ? { results: [{ id: "3" }, { id: "4" }] }
+          : {
+              results: [{ id: "1" }, { id: "2" }],
+              paging: { next: { after: 0 } },
+            },
+      );
+    }
+    if (path.endsWith("/batch/read"))
+      return Response.json({ results: batchRecords });
+    return Response.json({ id: "7" });
+  });
+  const app = createHubspotWorkspaceApp({
+    ...relationContext,
+    crm: { nango: { proxy } },
+  });
+  const url =
+    "/api/record-links/hubspot_contacts/7?relationId=hubspot:hubspot_contacts:hubspot_companies&page=2&perPage=2";
+  const response = await app.request(url);
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    data: [
+      {
+        records: [
+          { id: "3", label: "Third" },
+          { id: "4", label: "Fourth" },
+        ],
+        total: 4,
+        hasNextPage: false,
+      },
+    ],
+  });
+  expect(proxy).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: "/crm/v3/objects/companies/batch/read",
+      body: expect.objectContaining({ inputs: [{ id: "3" }, { id: "4" }] }),
+    }),
+  );
+  batchRecords = [{ id: "5", properties: { name: "Unrelated" } }];
+  expect((await app.request(url)).status).toBe(502);
+});
+
 it("keeps bound field contracts immutable through generic metadata routes", async () => {
   const app = createCollectionSourceApp(
     env.DB,

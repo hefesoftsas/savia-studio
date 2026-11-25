@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useAuthProvider, useNotify, useTranslate } from "ra-core";
+import { matchPath, useLocation } from "react-router-dom";
 import { PwaSplash } from "@/pwa/pwa-splash";
 import { Notification } from "@/components/admin/notification";
 import { getAdminAuthorizeUrl } from "@/components/admin/loading-recovery";
@@ -17,37 +18,47 @@ export const LoginPage = (_props: { redirectTo?: string }) => {
   const authProvider = useAuthProvider();
   const notify = useNotify();
   const translate = useTranslate();
+  const { state } = useLocation();
+  const bookingQuery =
+    typeof state?.nextPathname === "string" &&
+    matchPath("/bookings", state.nextPathname)
+      ? typeof state.nextSearch === "string"
+        ? state.nextSearch
+        : ""
+      : undefined;
   const loginStarted = useRef(false);
 
   useEffect(() => {
     if (!authProvider || loginStarted.current) return;
     loginStarted.current = true;
-    void authProvider.login({}).catch((error) => {
-      notify(
-        typeof error === "string"
-          ? error
-          : typeof error === "undefined" || !error.message
-            ? "ra.auth.sign_in_error"
-            : error.message,
-        {
-          type: "error",
-          messageArgs: {
-            _:
-              typeof error === "string"
-                ? error
-                : error && error.message
-                  ? error.message
-                  : undefined,
+    void authProvider
+      .login(bookingQuery === undefined ? {} : { bookingQuery })
+      .catch((error) => {
+        notify(
+          typeof error === "string"
+            ? error
+            : typeof error === "undefined" || !error.message
+              ? "ra.auth.sign_in_error"
+              : error.message,
+          {
+            type: "error",
+            messageArgs: {
+              _:
+                typeof error === "string"
+                  ? error
+                  : error && error.message
+                    ? error.message
+                    : undefined,
+            },
           },
-        },
-      );
-    });
-  }, [authProvider, notify]);
+        );
+      });
+  }, [authProvider, bookingQuery, notify]);
 
   return (
     <>
       <PwaSplash
-        recoveryHref={getAdminAuthorizeUrl()}
+        recoveryHref={getAdminAuthorizeUrl(bookingQuery)}
         message={translate("savia.auth.signingIn", {
           _: "Iniciando sesión con Savia…",
         })}

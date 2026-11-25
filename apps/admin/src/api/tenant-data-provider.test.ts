@@ -27,6 +27,27 @@ function setup() {
 }
 
 describe("tenant data provider", () => {
+  it("searches the filtered tenant catalog before paginating", async () => {
+    const { client, provider } = setup();
+    const match = {
+      ...tenant,
+      id: 102,
+      name: "Clínica Norte",
+      idSlug: "clinica-norte",
+    };
+    client.get.mockResolvedValue({
+      data: [tenant, { ...match, id: 103, isActive: false }, match],
+      meta: { total: 3 },
+    });
+    await expect(
+      provider.getList("tenants", {
+        pagination: { page: 1, perPage: 1 },
+        sort: { field: "name", order: "ASC" },
+        filter: { isActive: true, kind: "commercial", q: "  CLÍNICA-NORTE  " },
+      }),
+    ).resolves.toEqual({ data: [match], total: 1 });
+  });
+
   it("paginates and sorts active generic tenants without requiring an agency profile", async () => {
     const { client, provider } = setup();
     client.get.mockResolvedValue({
@@ -74,6 +95,45 @@ describe("tenant data provider", () => {
       }),
     ).resolves.toEqual({ data: [tenant], total: 1 });
   });
+
+  it.each([
+    { field: "name", order: "ASC", expectedId: 2 },
+    { field: "id", order: "DESC", expectedId: 10 },
+    { field: "updatedAt", order: "DESC", expectedId: 2 },
+  ] as const)(
+    "sorts $field in $order order before selecting the first page",
+    async ({ field, order, expectedId }) => {
+      const { client, provider } = setup();
+      client.get.mockResolvedValue({
+        data: [
+          {
+            ...tenant,
+            id: 10,
+            name: "Demo 10",
+            updatedAt: "2026-09-09T09:00:00Z",
+          },
+          {
+            ...tenant,
+            id: 2,
+            name: "Demo 2",
+            updatedAt: "2026-09-09T08:00:00-05:00",
+          },
+        ],
+        meta: { total: 2 },
+      });
+
+      await expect(
+        provider.getList("tenants", {
+          pagination: { page: 1, perPage: 1 },
+          sort: { field, order },
+          filter: {},
+        }),
+      ).resolves.toEqual({
+        data: [expect.objectContaining({ id: expectedId })],
+        total: 2,
+      });
+    },
+  );
 
   it("creates tenants with their mandatory first administrator and leaves slug generation to the server", async () => {
     const { client, provider } = setup();
@@ -131,6 +191,59 @@ describe("tenant data provider", () => {
       existingMember: { principalId: "principal-one", role: "operator" },
     });
   });
+
+  it.each([undefined, "", "  "])(
+    "rejects a transfer without a selected user (%j) before calling the API",
+    async (existingUserId) => {
+      const { client, provider } = setup();
+      client.post.mockResolvedValue({ data: tenant });
+      await expect(
+        provider.create("tenants", {
+          data: {
+            name: tenant.name,
+            memberMode: "existing",
+            existingUserId,
+            initialUser: {
+              email: "previous@comunidad.test",
+              firstName: "Previous",
+              lastName: "Entry",
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: "TENANT_EXISTING_USER_REQUIRED" });
+      expect(client.post).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [null, {}],
+    ["", {}],
+    [" Temporary-Test-123! ", { temporaryPassword: " Temporary-Test-123! " }],
+  ])(
+    "builds the tenant request with a temporary password of %j",
+    async (temporaryPassword, expectedPassword) => {
+      const { client, provider } = setup();
+      client.post.mockResolvedValue({ data: tenant });
+      const administrator = {
+        email: "admin@comunidad.test",
+        firstName: "Ana",
+        lastName: "Administradora",
+        emailVerified: true,
+      };
+      await provider.create("tenants", {
+        data: {
+          name: tenant.name,
+          isActive: true,
+          initialUser: { ...administrator, temporaryPassword },
+        },
+      });
+      expect(client.post.mock.calls[0][1].initialUser).toStrictEqual({
+        ...administrator,
+        ...expectedPassword,
+        role: "tenant_admin",
+      });
+    },
+  );
 
   it("updates tenant state through PATCH and forwards server conflicts", async () => {
     const { client, provider } = setup();

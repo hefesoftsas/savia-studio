@@ -6,6 +6,7 @@ import { useQuery, QueryClient } from "@tanstack/react-query";
 import type { ApiClient } from "@/api/api-client";
 import { createAdminQueryClient } from "@/queries/query-policy";
 import { readKey } from "@/queries/query-keys";
+import { isReadAccessDenied } from "@/queries/read-state";
 import { useSessionGeneration } from "@/auth/session-scope";
 import { useOptionalAppServices } from "@/features/assistant/assistant-context";
 import { currentTenantQueryOptions } from "./current-tenant-query";
@@ -103,11 +104,15 @@ export function useCurrentTenant(options?: {
         },
     queryClient,
   );
-  const tenantData = tenantQuery.data?.data;
+  const scopeRejected =
+    isReadAccessDenied(tenantQuery.error) ||
+    (tenantQuery.error as { status?: number } | null)?.status === 404;
+  const tenantData = scopeRejected ? undefined : tenantQuery.data?.data;
+  const tenantId = tenantData?.id;
   const hasValidTenantId =
-    typeof tenantData?.id === "number" &&
-    Number.isSafeInteger(tenantData.id) &&
-    tenantData.id > 0;
+    typeof tenantId === "number" &&
+    Number.isSafeInteger(tenantId) &&
+    tenantId > 0;
   const scopeStatus = !isDedicated
     ? "platform"
     : !enabled
@@ -126,7 +131,7 @@ export function useCurrentTenant(options?: {
     slug,
     name,
     kind,
-    id: tenantData?.id ?? null,
+    id: scopeStatus === "resolved" && hasValidTenantId ? tenantId : null,
     monogram,
     isPlatformAdmin,
     isLoading: enabled && tenantQuery.isPending,

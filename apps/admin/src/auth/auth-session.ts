@@ -22,10 +22,20 @@ export type AuthPermissions = {
 export type CallbackResult = {
   returnOrigin?: string;
   returnRoute?: "bookings";
+  returnBookingQuery?: string;
 };
 
+export class OAuthCallbackError extends Error {
+  constructor(
+    message: string,
+    readonly retryHref: string,
+  ) {
+    super(message);
+  }
+}
+
 export interface AuthSession {
-  login(): Promise<void>;
+  login(bookingQuery?: string): Promise<void>;
   logout(): Promise<string>;
   getAuthorizeUrl(): string;
   handleCallback(): Promise<CallbackResult | void>;
