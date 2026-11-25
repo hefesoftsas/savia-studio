@@ -6,6 +6,7 @@ settings:
 
 patchedDependencies:
   '@cloudflare/vitest-pool-workers@0.19.1': ea5768c98a8e9eda359a343173932cd462f22e4c7e4f7dc3d6106c92cdc1e389
+  monaco-editor@0.52.2: 4ec442045504c5f8707b22e107cef25caab9debe4ba7ba978ca2ea24aaa0a1c1
 
 importers:
 
@@ -262,10 +263,10 @@ importers:
         version: 1.39.0(react@19.2.8)
       monaco-editor:
         specifier: 0.52.2
-        version: 0.52.2
+        version: 0.52.2(patch_hash=4ec442045504c5f8707b22e107cef25caab9debe4ba7ba978ca2ea24aaa0a1c1)
       monacopilot:
         specifier: ^1.2.12
-        version: 1.2.12(monaco-editor@0.52.2)
+        version: 1.2.12(monaco-editor@0.52.2(patch_hash=4ec442045504c5f8707b22e107cef25caab9debe4ba7ba978ca2ea24aaa0a1c1))
       next-themes:
         specifier: ^0.4.6
         version: 0.4.6(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -22680,12 +22681,12 @@ snapshots:
   mkdirp-classic@0.5.3:
     optional: true
 
-  monaco-editor@0.52.2: {}
+  monaco-editor@0.52.2(patch_hash=4ec442045504c5f8707b22e107cef25caab9debe4ba7ba978ca2ea24aaa0a1c1): {}
 
-  monacopilot@1.2.12(monaco-editor@0.52.2):
+  monacopilot@1.2.12(monaco-editor@0.52.2(patch_hash=4ec442045504c5f8707b22e107cef25caab9debe4ba7ba978ca2ea24aaa0a1c1)):
     dependencies:
       '@monacopilot/core': 1.2.12
-      monaco-editor: 0.52.2
+      monaco-editor: 0.52.2(patch_hash=4ec442045504c5f8707b22e107cef25caab9debe4ba7ba978ca2ea24aaa0a1c1)
 
   mongodb-connection-string-url@7.0.2:
     dependencies:

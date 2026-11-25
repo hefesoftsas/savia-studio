@@ -34,6 +34,10 @@ import { registerOfficeFiles } from "./office-files";
 import { Hono } from "hono";
 import { registerLocalSync } from "./local-sync";
 import type { AccessPolicy } from "@savia/studio-shared/access-control";
+import {
+  CRM_INTEGRATION_COLUMN_KEY,
+  hasCrmIntegrationColumn,
+} from "@savia/studio-shared/record-table-columns";
 import { registerAccessMiddleware } from "./access-middleware";
 import {
   accessDatabase,
@@ -995,6 +999,7 @@ export function createStudioApp(
     name: z.string().min(1).max(80),
     config: z.object({
       q: z.string().max(200).default(""),
+      searchField: z.string().max(48).optional(),
       stage: z.string().max(200).default(""),
       filters: filterSchema.optional(),
       columns: tablePreferencesSchema.shape.columns,
@@ -1008,7 +1013,7 @@ export function createStudioApp(
       perPage: z.number().int().min(1).max(200).optional(),
     }),
   });
-  const validatesTableFields = (
+  const hasUnknownTableColumn = (
     config: z.infer<typeof tablePreferencesSchema>,
     object: StudioObject,
   ) =>
@@ -1016,7 +1021,12 @@ export function createStudioApp(
       ...(config.columns ?? []),
       ...(config.columnOrder ?? []),
       ...Object.keys(config.columnAliases ?? {}),
-    ].some((key) => !object.config.fields[key]);
+    ].some(
+      (key) =>
+        !Object.hasOwn(object.config.fields, key) &&
+        (key !== CRM_INTEGRATION_COLUMN_KEY ||
+          !hasCrmIntegrationColumn(object)),
+    );
   app.get("/api/views/:object", async (c) => {
     const { results } = await c.env.DB.prepare(
       "SELECT * FROM studio_views WHERE tenant_id=? AND object_name=? ORDER BY name",
@@ -1047,7 +1057,21 @@ export function createStudioApp(
         "Ese nombre está reservado para la configuración de tabla.",
         422,
       );
-    if (validatesTableFields(input.config, object))
+    const { searchField, group, filters, sort } = input.config;
+    const referencedFields = [
+      ...(searchField ? [searchField] : []),
+      ...(group ? [group] : []),
+      ...(filters?.conditions.map((condition) => condition.field) ?? []),
+      ...(sort && !["id", "created_at", "updated_at"].includes(sort.field)
+        ? [sort.field]
+        : []),
+    ];
+    if (
+      hasUnknownTableColumn(input.config, object) ||
+      referencedFields.some(
+        (field) => !Object.hasOwn(object.config.fields, field),
+      )
+    )
       return fail("La vista incluye un campo inexistente.", 422);
     const id = crypto.randomUUID();
     await c.env.DB.prepare(
@@ -1072,7 +1096,7 @@ export function createStudioApp(
         c.get("tenant"),
         c.req.param("object"),
       );
-    if (validatesTableFields(input.config, object))
+    if (hasUnknownTableColumn(input.config, object))
       return fail("La vista incluye un campo inexistente.", 422);
     const existing = await c.env.DB.prepare(
       "SELECT id FROM studio_views WHERE tenant_id=? AND object_name=? AND name=? LIMIT 1",

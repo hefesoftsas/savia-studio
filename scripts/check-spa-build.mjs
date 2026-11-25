@@ -1,6 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { measureSpaBuild } from "./measure-spa-build.mjs";
 
-const report = await measureSpaBuild(process.argv[2] ?? "apps/admin/dist");
+const outputDirectory =
+  process.argv[2] ??
+  (process.env.SAVIA_ADMIN_OUT_DIR ||
+    fileURLToPath(new URL("../apps/admin/dist", import.meta.url)));
+const report = await measureSpaBuild(outputDirectory);
 // Downloadable installers are independently packaged artifacts, not SPA code.
 const installerBytes = report.installers.bytes;
 const checks = [

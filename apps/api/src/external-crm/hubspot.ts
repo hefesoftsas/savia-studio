@@ -200,7 +200,12 @@ async function responseJson(
       "The CRM connection requires reconnection",
       response.status,
     );
-  if (!response.ok) throw new CrmUpstreamError("NANGO_REQUEST_FAILED", undefined, response.status);
+  if (!response.ok)
+    throw new CrmUpstreamError(
+      "NANGO_REQUEST_FAILED",
+      undefined,
+      response.status,
+    );
   try {
     return await response.json();
   } catch {

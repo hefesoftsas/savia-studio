@@ -83,6 +83,8 @@ export function flowsPlugin(): Plugin {
   let mode: "build" | "serve";
   return {
     name: "savia-flows-assets",
+    apply: (_config, { command }) =>
+      command !== "build" || process.env.SAVIA_CI_FLOWS_ENABLED !== "false",
     configResolved(config) {
       mode = config.command;
     },

@@ -116,3 +116,46 @@ test("rejects a checksum mismatch without changing staged files", async (t) => {
     "keep me",
   );
 });
+
+test("keeps the previous download when publishing the replacement checksum fails", async (t) => {
+  const setup = await fixture(t);
+  const previous = "savia-plugin-authoring-0.9.0.vsix";
+  const previousBytes = Buffer.from("previous package");
+  const previousChecksum = createHash("sha256")
+    .update(previousBytes)
+    .digest("hex");
+  const previousChecksumFile = `${previousChecksum} ${previous}\n`;
+  await fs.writeFile(path.join(setup.downloadsDir, previous), previousBytes);
+  await fs.writeFile(
+    path.join(setup.downloadsDir, `${previous}.sha256`),
+    previousChecksumFile,
+  );
+  await fs.mkdir(path.join(setup.downloadsDir, `${setup.filename}.sha256`));
+
+  await assert.rejects(prepareVscodeDownload(setup));
+
+  assert.deepEqual(
+    await fs.readFile(path.join(setup.downloadsDir, previous)),
+    previousBytes,
+  );
+  assert.equal(
+    await fs.readFile(
+      path.join(setup.downloadsDir, `${previous}.sha256`),
+      "utf8",
+    ),
+    previousChecksumFile,
+  );
+  await assert.rejects(fs.stat(path.join(setup.downloadsDir, setup.filename)), {
+    code: "ENOENT",
+  });
+
+  const sameVersion = path.join(setup.downloadsDir, setup.filename);
+  await fs.writeFile(sameVersion, previousBytes);
+  await assert.rejects(prepareVscodeDownload(setup));
+  assert.deepEqual(await fs.readFile(sameVersion), previousBytes);
+  assert.ok(
+    (await fs.readdir(setup.downloadsDir)).every(
+      (entry) => !entry.startsWith(".savia-vsix-"),
+    ),
+  );
+});

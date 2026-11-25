@@ -7,6 +7,29 @@ Booking is a native, optional tenant capability. It starts disabled and unpublis
 ## Set up and publish
 
 When you open **Bookings** from the Savia platform, choose an organization to open **Bookings** in its workspace. If Savia asks you to sign in to that workspace, it opens **Bookings** after sign-in. The picker lists active commercial organizations you can access. If the list is empty, ask an administrator for access.
+The sign-in return also works for links with a trailing slash or a
+case-insensitive match of the Bookings route.
+Signing in from the platform portal or local Admin also resumes Bookings on
+the configured callback origin, including any requested tab and date.
+Changing the reservations date or leaving its tab cancels the pending list
+request so its response cannot replace the current view.
+
+If a Bookings link specifies a tab or date, both the organization picker and
+sign-in preserve those selections. Switching tabs updates the URL, so the
+browser's Back and Forward buttons restore the previous view.
+Changing the display language keeps unsaved booking settings in the open form.
+Saving unrelated booking settings keeps unsaved availability edits when the
+professional's saved schedule is unchanged. Availability controls pause while
+a save is in progress.
+Changing workspaces resets the booking form and its saving state. A response
+from the previous workspace applies only to the request that sent it.
+If your session expires in Bookings, signing in again opens the same view.
+On a dedicated hostname, Bookings waits for a valid workspace. If the server
+reports that the workspace is missing or inaccessible, **Retry** resolves it
+again from the current tab and date.
+If the identity provider rejects the sign-in code or cannot finish the exchange
+for a valid Bookings transaction, **Sign in again** starts a new transaction
+for the same workspace, tab, and date.
 
 Open **Bookings** in the tenant navigation. Administrators use a five-step setup wizard: **Details → Team → Services → Hours → Review and publish**. Details include the public title, description and IANA time zone; expand **Booking rules** to configure advance notice, booking horizon, cancellation cutoff and reminders. Add professionals from the tenant's users, assign them to services, then configure their weekly schedules. Moving between steps preserves unsaved edits. A service specifies its duration and trailing buffer. Durations, buffers and availability boundaries use five-minute increments; offered start times use fifteen-minute increments.
 
@@ -22,6 +45,25 @@ New links default to a 30-day expiry and 25 admitted booking submissions per UTC
 
 Each link has independent revocation and deletion. Delete permanently removes the public link from the panel and invalidates its canonical and short URLs, including legacy team links; it does not delete reservations or their private management links. Personal links expose only enabled services assigned to their fixed professional; optional service-scoped links expose only that service. The server enforces this scope for the catalog, challenge, availability and reservation, including caller-submitted identifiers. Disabled professionals/services, removed membership, inactive tenants, expiry and unpublishing stop new bookings. Existing tenant-wide URLs remain team links and can be revoked or deleted through the same panel; they are never silently converted into personal links.
 
+Changing the display language on a public booking link keeps the selected time and contact details. A retry with the same booking details retains the original request key and confirmation language, including after edits that only change email capitalization or spaces around the contact details. Each public link keeps its own form and confirmation state.
+
+When the form reloads its CAPTCHA after a language change or a return from the calendar, complete the new verification before submitting. If verification fails to load, **Retry verification** reloads the CAPTCHA and keeps the selected time and contact details.
+
+Returning from the review step refreshes availability for the selected month. If availability cannot be loaded, retry to check the previously selected time. The form only lets you continue once it confirms that the time is still available.
+
+The selected date and its available times use the booking display time zone, which you can change in the calendar.
+
+Changing the display language on a management link keeps the selected time and review step when rescheduling. An in-progress change stays scoped to the appointment opened by that management link.
+
+A reschedule confirmation uses the time zone chosen in the calendar. Refreshing the appointment hides that confirmation if the appointment has since moved or been cancelled.
+Refreshing also closes an open reschedule review if the appointment changed time or can no longer be rescheduled. A refresh that only updates the conference link keeps the review open.
+
+The management page closes the reschedule form and disables cancellation when the appointment's change deadline passes, including while the review step is open.
+
+If saving or rescheduling an appointment returns an HTTP conflict, the form rechecks the appointment or refreshes available times as needed, even when the error response has no JSON details.
+If the connection drops or the server returns a 5xx response while rescheduling, the management page checks whether the new time was saved. If the time is unchanged and the appointment can still be rescheduled, the customer can confirm the same selection again using the latest appointment version. If the appointment now has a different time, the page shows that time and closes the previous review.
+If a cancellation request fails, the management page checks the appointment's current status. It displays a completed cancellation and uses the latest version if the customer chooses to retry an active appointment. If the appointment moved, the page shows the new time and closes any open reschedule review before the customer can retry.
+
 Expiry and revocation do not delete reservations or invalidate their distinct private management links. Deleting a public link has the same preservation behavior. Management and cancellation policies below continue to apply.
 
 Public booking admission also limits each hashed client IP to 20 submissions and each tenant to 1,000 submissions per UTC day. Failed admitted attempts consume the budget; retrying identical details with the same request key reuses admission and does not consume it twice. Changing the payload under that key conflicts. Persistent minute limits and CAPTCHA remain in force; browsing calendar days does not consume submission budgets. Public body size is limited to 32 KiB. A bounded range contains at most 31 dates and fetches each calendar's busy intervals once, rather than making a provider request for each day. Unknown calendar availability stops booking with a retryable error.
@@ -30,12 +72,33 @@ Public booking admission also limits each hashed client IP to 20 submissions and
 
 Administrators see the tenant's reservations; other tenant members see only reservations assigned to themselves. Concurrent native bookings claim the professional's occupied intervals atomically, including the trailing buffer. Conflicting requests return a recoverable conflict and create no partial reservation. Request keys prevent duplicate reservations when a customer retries a submission.
 
+When the selected date range contains more than 500 reservations, use
+**Load more reservations** to continue through the same range.
+Reservation dates and the upcoming range use the saved booking settings.
+Changes to the time zone or booking horizon take effect after saving.
+Saving Availability updates the selected professional's saved schedule. An
+unsaved Booking settings draft remains available in its own tab.
+Changing calendar or My Day access preserves that draft and its version.
+It also keeps edits in the availability editor when the saved schedule version
+has not changed.
+If pages overlap, the list keeps each reservation once and preserves the
+newest version already loaded.
+If cancellation or video link generation fails, the error appears beside the
+reservation and the list stays open.
+While a reservation update is pending, its other actions stay disabled.
+Actions on different reservations can continue independently.
+A refresh that was already in flight does not restore a reservation's older
+state after a successful cancellation or video link request.
+If a cancellation succeeds and the response is lost, retrying from the same
+reservation revision returns the saved cancellation without adding new jobs.
+
 Confirmed appointments also appear in the assigned professional's **My Day**
 agenda, in day, week and month views, even without Google Calendar or Outlook.
 My Day shows only the signed-in user's assignments across their current commercial
 workspace memberships; administrators use **Bookings → Reservations** for team
 history. Appointment details link to authenticated workspace reservations where
-tenant hostnames are supported, opening the appointment date directly.
+tenant hostnames are supported, opening the appointment date in the workspace's
+configured booking time zone. The date filter uses that same time zone.
 **Show upcoming reservations** clears that date. Details never expose the customer's private
 management token. Rescheduling and cancellation are reflected when My Day
 refreshes, including **Synchronize**, focus/connectivity recovery and visible
@@ -52,6 +115,9 @@ Unpublishing stops new public bookings. Existing management links continue to su
 ## Optional calendars through Nango
 
 To avoid conflicts with the rest of your My Day agenda, use **Bookings → Availability → My Day availability → Use My Day to block busy times**. Each professional grants access to their own current Google and Outlook connections and imported or subscribed calendars. Only occupied time intervals influence public availability; meeting names, attendees, links and calendar credentials remain private. Hidden calendars remain conflict sources: hiding a calendar is a display preference, not a release of its occupied time. Events explicitly marked free and cancelled events do not block slots. All-day events use the source time zone and exclusive end date; recurring events retain their exceptions.
+
+When a clock change skips midnight, an all-day event starts at the first
+available time on its local date.
 
 Authorization is tenant-scoped and snapshots source identities. Use **Update calendar access** after adding a calendar or reconnecting an account, or **Stop using My Day** to revoke this additional access. Administrators cannot authorize another professional's agenda. The separate calendar choice below still controls where appointment events are created.
 

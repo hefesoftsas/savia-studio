@@ -7,6 +7,8 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { initializeAuthSchema } from "../../../auth/src/index";
+import { initializeEmailRegistrationSchema } from "../../../auth/src/email-registration";
+import { initializeFederatedEmailVerificationSchema } from "../../../auth/src/microsoft-email-verification";
 import { openPostgresDatabase } from "./database";
 import { migratePostgres, withPostgresDeploymentLock } from "./migrations";
 import { mapSqliteValue, quote, columnDigest } from "./import-mappings";
@@ -182,15 +184,17 @@ export async function importSqlite(options: {
           maxConnections: 1,
         });
         try {
-          await initializeAuthSchema(
-            {
-              AUTH_DB: authDb,
-              BETTER_AUTH_URL: "http://localhost:8080",
-              BETTER_AUTH_SECRET:
-                "offline-schema-initialization-only-secret-00000000",
-            },
-            { database: authDb.pool },
-          );
+          const authEnvironment = {
+            AUTH_DB: authDb,
+            BETTER_AUTH_URL: "http://localhost:8080",
+            BETTER_AUTH_SECRET:
+              "offline-schema-initialization-only-secret-00000000",
+          };
+          await initializeAuthSchema(authEnvironment, {
+            database: authDb.pool,
+          });
+          await initializeEmailRegistrationSchema(authEnvironment);
+          await initializeFederatedEmailVerificationSchema(authEnvironment);
         } finally {
           await authDb.close();
         }
@@ -239,8 +243,29 @@ export async function importSqlite(options: {
               sourceTables.some(
                 (t) => !target.rows.some((r) => r.table_name === t),
               )
-            )
-              throw new Error(`Unsupported source tables in ${store.schema}.`);
+            ) {
+              const targetTables = target.rows.map((row) => row.table_name);
+              const missing = sourceTables.filter(
+                (table) => !targetTables.includes(table),
+              );
+              const extra = targetTables.filter(
+                (table) => !sourceTables.includes(table),
+              );
+              const populatedExtra: string[] = [];
+              if (store.schema === "savia_auth")
+                for (const table of extra) {
+                  const result = await client.query<{ populated: boolean }>(
+                    `SELECT EXISTS (SELECT 1 FROM ${quote(store.schema)}.${quote(table)}) AS populated`,
+                  );
+                  if (result.rows[0]?.populated) populatedExtra.push(table);
+                }
+              const unsupportedExtra =
+                store.schema === "savia_auth" ? populatedExtra : extra;
+              if (missing.length || unsupportedExtra.length)
+                throw new Error(
+                  `Unsupported source tables in ${store.schema} (missing: ${missing.join(", ") || "none"}; extra: ${unsupportedExtra.join(", ") || "none"}).`,
+                );
+            }
             for (const table of sourceTables)
               await client.query(
                 `ALTER TABLE ${quote(store.schema)}.${quote(table)} DISABLE TRIGGER USER`,

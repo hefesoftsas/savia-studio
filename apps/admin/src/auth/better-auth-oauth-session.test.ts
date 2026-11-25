@@ -196,8 +196,10 @@ describe("BetterAuthOAuthSession", () => {
           token_type: "Bearer",
           expires_in: 300,
           scope: "openid savia.api.read savia.api.write",
-          returnOrigin: "https://example-organization.savia-preview.hefesoft.com",
+          returnOrigin:
+            "https://example-organization.savia-preview.hefesoft.com",
           returnRoute: "bookings",
+          returnBookingQuery: "tab=reservations&date=2026-11-25&ignored=1",
         }),
         { headers: { "content-type": "application/json" } },
       ),
@@ -217,22 +219,76 @@ describe("BetterAuthOAuthSession", () => {
     expect(result).toEqual({
       returnOrigin: "https://example-organization.savia-preview.hefesoft.com",
       returnRoute: "bookings",
+      returnBookingQuery: "tab=reservations&date=2026-11-25",
     });
   });
 
-  it("requests a bookings return when signing into a tenant bookings link", async () => {
+  it.each(["bookings", "bookings/", "BOOKINGS"])(
+    "requests a bookings return when signing into a tenant %s link",
+    async (route) => {
+      const redirect = vi.fn();
+      const origin = "https://clinic.savia-preview.hefesoft.com";
+      const session = new BetterAuthOAuthSession({
+        apiUrl: "https://savia-preview.hefesoft.com",
+        navigation: { currentUrl: () => `${origin}/#/${route}`, redirect },
+      });
+
+      await session.login();
+
+      const authorize = new URL(redirect.mock.calls[0][0]);
+      expect(authorize.searchParams.get("return_to")).toBe(origin);
+      expect(authorize.searchParams.get("resume")).toBe("bookings");
+    },
+  );
+
+  it.each(["availability", "reservations", "sharing"])(
+    "preserves the %s tab and date on a tenant deep link",
+    async (tab) => {
+      const redirect = vi.fn();
+      const origin = "https://clinic.savia-preview.hefesoft.com";
+      const session = new BetterAuthOAuthSession({
+        apiUrl: "https://savia-preview.hefesoft.com",
+        navigation: {
+          currentUrl: () =>
+            `${origin}/#/bookings?tab=${tab}&date=2026-11-25&unused=1`,
+          redirect,
+        },
+      });
+
+      await session.login();
+      const authorize = new URL(redirect.mock.calls[0][0]);
+      expect(authorize.searchParams.get("return_to")).toBe(origin);
+      expect(authorize.searchParams.get("resume")).toBe("bookings");
+      expect(authorize.searchParams.get("booking_query")).toBe(
+        `tab=${tab}&date=2026-11-25`,
+      );
+    },
+  );
+
+  it.each([
+    [
+      "https://savia-preview.hefesoft.com",
+      "https://savia-preview.hefesoft.com",
+    ],
+    ["http://127.0.0.1:5173", "http://127.0.0.1:8787"],
+  ])("resumes bookings after signing in from %s", async (origin, apiUrl) => {
     const redirect = vi.fn();
-    const origin = "https://clinic.savia-preview.hefesoft.com";
     const session = new BetterAuthOAuthSession({
-      apiUrl: "https://savia-preview.hefesoft.com",
-      navigation: { currentUrl: () => `${origin}/#/bookings`, redirect },
+      apiUrl,
+      navigation: {
+        currentUrl: () =>
+          `${origin}/#/bookings?tab=reservations&date=2026-11-25`,
+        redirect,
+      },
     });
 
     await session.login();
-
     const authorize = new URL(redirect.mock.calls[0][0]);
-    expect(authorize.searchParams.get("return_to")).toBe(origin);
+    expect(authorize.searchParams.get("return_to")).toBeNull();
     expect(authorize.searchParams.get("resume")).toBe("bookings");
+    expect(authorize.searchParams.get("booking_query")).toBe(
+      "tab=reservations&date=2026-11-25",
+    );
   });
 
   it("reports the safe OAuth error returned by the callback bridge", async () => {
@@ -261,6 +317,43 @@ describe("BetterAuthOAuthSession", () => {
       "Better Auth rejected the authorization code (invalid_request)",
     );
   });
+
+  it.each([undefined, "https://clinic.savia-preview.hefesoft.com"])(
+    "starts a fresh authorization to Bookings after a rejected exchange with return origin %s",
+    async (returnOrigin) => {
+      const apiUrl = "https://savia-preview.hefesoft.com";
+      const session = new BetterAuthOAuthSession({
+        apiUrl,
+        navigation: {
+          currentUrl: () =>
+            `${apiUrl}/auth/callback?code=old-code&state=old-state`,
+          redirect: vi.fn(),
+        },
+        fetcher: vi.fn().mockResolvedValueOnce(
+          Response.json(
+            {
+              error: { message: "The authorization code was rejected" },
+              returnOrigin,
+              returnRoute: "bookings",
+              returnBookingQuery: "tab=reservations&date=2026-11-25&ignored=1",
+            },
+            { status: 401 },
+          ),
+        ),
+      });
+
+      const retry = new URL("/api/auth/admin/authorize", apiUrl);
+      retry.search = new URLSearchParams({
+        ...(returnOrigin ? { return_to: returnOrigin } : {}),
+        resume: "bookings",
+        booking_query: "tab=reservations&date=2026-11-25",
+      }).toString();
+      await expect(session.handleCallback()).rejects.toMatchObject({
+        message: "The authorization code was rejected",
+        retryHref: retry.href,
+      });
+    },
+  );
 
   it("renews an access token before it expires", async () => {
     vi.useFakeTimers();
@@ -711,6 +804,47 @@ describe("BetterAuthOAuthSession", () => {
     expect(redirectUrl).toBe("http://127.0.0.1:8787/api/auth/admin/authorize");
   });
 
+  it.each(["refresh", "callback"] as const)(
+    "ignores a delayed OAuth %s response after logout",
+    async (flow) => {
+      let finish!: (response: Response) => void;
+      const delayed = new Promise<Response>((resolve) => {
+        finish = resolve;
+      });
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockReturnValueOnce(delayed)
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      const session = new BetterAuthOAuthSession({
+        apiUrl: "https://savia.test",
+        navigation: {
+          currentUrl: () =>
+            flow === "callback"
+              ? "https://savia.test/auth/callback?code=code-1&state=state-1"
+              : "https://savia.test/",
+          redirect: vi.fn(),
+        },
+        fetcher,
+      });
+      const pending = session.getAccessToken().catch(() => null);
+
+      await session.logout();
+      finish(
+        Response.json({
+          access_token: "late-token",
+          token_type: "Bearer",
+          expires_in: 1800,
+          scope: "openid savia.api.read",
+        }),
+      );
+
+      await expect(pending).resolves.toBeNull();
+      expect(await session.getAccessToken()).toBeNull();
+      expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it("keeps the stale token when a refresh hits a network failure", async () => {
     const refresh = (token: string, expiresIn: number) =>
       new Response(
@@ -862,6 +996,44 @@ it("keeps server unavailability distinguishable from rejected credentials during
   await expect(session.checkSession()).rejects.toMatchObject({ status: 503 });
 });
 
+it("allows another refresh after the edge temporarily rate-limits the session", async () => {
+  const fetcher = vi
+    .fn()
+    .mockResolvedValueOnce(
+      Response.json({ error: { message: "Try again later" } }, { status: 429 }),
+    )
+    .mockResolvedValueOnce(
+      Response.json({
+        access_token: "recovered-token",
+        token_type: "Bearer",
+        expires_in: 1800,
+        scope: "openid savia.api.read",
+      }),
+    );
+  const session = new BetterAuthOAuthSession({
+    apiUrl: "https://savia.test",
+    fetcher,
+  });
+
+  await expect(session.getAccessToken()).rejects.toMatchObject({ status: 429 });
+  await expect(session.getAccessToken()).resolves.toBe("recovered-token");
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it("stops refreshing when the API confirms the session is unauthorized", async () => {
+  const fetcher = vi.fn(async () =>
+    Response.json({ error: { message: "No session" } }, { status: 401 }),
+  );
+  const session = new BetterAuthOAuthSession({
+    apiUrl: "https://savia.test",
+    fetcher,
+  });
+
+  await expect(session.getAccessToken()).rejects.toThrow("No session");
+  await expect(session.getAccessToken()).resolves.toBeNull();
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
 describe("normalizeAvatarUrl", () => {
   it("rewrites loopback host to target apiUrl origin", () => {
     expect(
@@ -982,6 +1154,142 @@ it("does not return an identity request that settles after logout", async () => 
   );
   await rejected;
 });
+
+it("returns signed-out permissions if logout interrupts an identity lookup", async () => {
+  let finish!: (response: Response) => void;
+  const delayedIdentity = new Promise<Response>((resolve) => {
+    finish = resolve;
+  });
+  const identityRequest = vi.fn(() => delayedIdentity);
+  const session = new BetterAuthOAuthSession({
+    apiUrl: "https://savia.test",
+    fetcher: async (input) => {
+      if (String(input).endsWith("/refresh"))
+        return Response.json({
+          access_token: "token",
+          expires_in: 300,
+          scope: "savia.api.read savia.api.write",
+        });
+      return identityRequest();
+    },
+  });
+  const pending = session.getPermissions();
+  await vi.waitFor(() => expect(identityRequest).toHaveBeenCalledOnce());
+  await session.clearSession();
+  finish(
+    Response.json({
+      data: {
+        id: "old-principal",
+        attributes: {
+          displayName: "Old user",
+          globalRoles: ["platform_admin"],
+        },
+      },
+    }),
+  );
+
+  await expect(pending).resolves.toEqual({
+    canReadDocuments: false,
+    canExecuteCommands: false,
+    canManageIdentity: false,
+    memberships: [],
+  });
+});
+
+it("keeps the current avatar when an invalidated avatar request finishes late", async () => {
+  let finishOldAvatar!: (response: Response) => void;
+  const previousAvatar = new Promise<Response>((resolve) => {
+    finishOldAvatar = resolve;
+  });
+  const avatars = vi
+    .fn()
+    .mockReturnValueOnce(previousAvatar)
+    .mockImplementation(async () =>
+      Response.json({ user: { image: "https://savia.test/new-avatar.png" } }),
+    );
+  const session = new BetterAuthOAuthSession({
+    apiUrl: "https://savia.test",
+    fetcher: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/refresh"))
+        return Response.json({
+          access_token: "token",
+          expires_in: 300,
+          scope: "savia.api.read",
+        });
+      if (url.endsWith("/identity/me"))
+        return Response.json({
+          data: { id: "principal-a", attributes: { displayName: "User" } },
+        });
+      return avatars();
+    },
+  });
+  const first = session.getIdentity();
+  await vi.waitFor(() => expect(avatars).toHaveBeenCalledOnce());
+
+  window.dispatchEvent(new Event("savia:identity-changed"));
+  await expect(session.getIdentity()).resolves.toMatchObject({
+    avatar: "https://savia.test/new-avatar.png",
+  });
+  finishOldAvatar(
+    Response.json({ user: { image: "https://savia.test/old-avatar.png" } }),
+  );
+  await first;
+
+  await expect(session.getIdentity()).resolves.toMatchObject({
+    avatar: "https://savia.test/new-avatar.png",
+  });
+  expect(avatars).toHaveBeenCalledTimes(2);
+});
+
+it.each(["successful", "failed"] as const)(
+  "keeps the current identity after a stale %s identity response",
+  async (outcome) => {
+    let finishPrevious!: (response: Response) => void;
+    const previous = new Promise<Response>((resolve) => {
+      finishPrevious = resolve;
+    });
+    const identityResponse = (id: string) =>
+      Response.json({ data: { id, attributes: { displayName: id } } });
+    const identities = vi
+      .fn()
+      .mockReturnValueOnce(previous)
+      .mockImplementation(async () => identityResponse("current-principal"));
+    const session = new BetterAuthOAuthSession({
+      apiUrl: "https://savia.test",
+      fetcher: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/refresh"))
+          return Response.json({
+            access_token: "token",
+            expires_in: 300,
+            scope: "savia.api.read",
+          });
+        if (url.endsWith("/identity/me")) return identities();
+        return Response.json({ user: {} });
+      },
+    });
+    const pending = session.getIdentity().catch((error: unknown) => error);
+    await vi.waitFor(() => expect(identities).toHaveBeenCalledOnce());
+    window.dispatchEvent(new Event("savia:identity-changed"));
+    await expect(session.getIdentity()).resolves.toMatchObject({
+      id: "current-principal",
+    });
+    const generation = getSessionGeneration();
+    finishPrevious(
+      outcome === "successful"
+        ? identityResponse("old-principal")
+        : new Response(null, { status: 503 }),
+    );
+
+    await expect(pending).resolves.toBeInstanceOf(Error);
+    await expect(session.getIdentity()).resolves.toMatchObject({
+      id: "current-principal",
+    });
+    expect(getSessionGeneration()).toBe(generation);
+    expect(identities).toHaveBeenCalledTimes(2);
+  },
+);
 
 it("does not reuse the previous principal permissions when token renewal fails", async () => {
   let principal = "principal-a";

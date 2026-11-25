@@ -317,7 +317,8 @@ async function submitExpiredOAuthLogin(
   const loginForm = {
     dataset: { oauthForm: formKind },
     hidden: false,
-    querySelector: () => ({ disabled: false }),
+    querySelector: (selector: string) =>
+      selector === 'input[name="code"]' ? { focus() {} } : { disabled: false },
     addEventListener: (
       event: string,
       listener: (input: { preventDefault(): void }) => Promise<void>,
@@ -651,6 +652,85 @@ describe("Savia Better Auth worker", () => {
     expect(html).toContain(
       'data-oauth-restart-url="http://127.0.0.1:5173/#/login"',
     );
+  });
+
+  it("verifies the existing authenticator when enrollment was already completed", async () => {
+    const script = await (await authRequest("/api/auth/oauth-ui.js")).text();
+    const handlers = new Map<string, () => Promise<void>>();
+    const forms = ["enable-totp", "verify-enrollment"].map((kind) => ({
+      dataset: { oauthForm: kind },
+      hidden: false,
+      querySelector: () => ({ disabled: false }),
+      addEventListener(
+        _event: string,
+        submit: (event: { preventDefault(): void }) => Promise<void>,
+      ) {
+        handlers.set(kind, () => submit({ preventDefault() {} }));
+      },
+    }));
+    const setup = { hidden: false };
+    const enrollment = {
+      hidden: true,
+      querySelector: (selector: string) =>
+        selector === "[data-oauth-enrollment-setup]" ? setup : null,
+    };
+    const status = { textContent: "" };
+    const elements = new Map<string, unknown>([
+      ["#oauth-status", status],
+      ["[data-oauth-enrollment]", enrollment],
+    ]);
+    const destination = "http://127.0.0.1:8787/docs?code=authorized";
+    const assign = vi.fn();
+    const fetchAuth = vi.fn(async (path: string) => {
+      if (path.endsWith("/enable"))
+        return Response.json({ code: "TOTP_ALREADY_ENABLED" }, { status: 400 });
+      if (path.endsWith("/verify-totp"))
+        return Response.json({ url: destination });
+      throw new Error(`Unexpected endpoint: ${path}`);
+    });
+    new Function(
+      "window",
+      "document",
+      "fetch",
+      "FormData",
+      "setTimeout",
+      script,
+    )(
+      {
+        location: {
+          assign,
+          search: "?sig=active&ba_param=client_id&client_id=admin",
+        },
+      },
+      {
+        querySelector: (selector: string) => elements.get(selector) ?? null,
+        querySelectorAll: (selector: string) =>
+          selector === "[data-oauth-form]" ? forms : [],
+      },
+      fetchAuth,
+      class {
+        get(name: string) {
+          return name === "code" ? "placeholder-code" : "password";
+        }
+      },
+      () => undefined,
+    );
+
+    await handlers.get("enable-totp")?.();
+    expect(forms[0].hidden).toBe(true);
+    expect(enrollment.hidden).toBe(false);
+    expect(setup.hidden).toBe(true);
+    expect(status.textContent).toContain(
+      "Tu autenticador ya está configurado.",
+    );
+    expect(assign).not.toHaveBeenCalled();
+
+    await handlers.get("verify-enrollment")?.();
+    expect(fetchAuth.mock.calls.map(([path]) => path)).toEqual([
+      "/api/auth/two-factor/enable",
+      "/api/auth/two-factor/verify-totp",
+    ]);
+    expect(assign).toHaveBeenCalledWith(destination);
   });
 
   it("restarts configured admin access after a signed authorization expires", async () => {
@@ -1399,4 +1479,51 @@ it("keeps password recovery generic when email delivery is unavailable", async (
 
   expect(known.status).toBe(200);
   expect(await known.json()).toEqual(await unknown.json());
+});
+
+it("reports delivery failure to the private password setup bridge", async () => {
+  const bridgeKey = "test-password-setup-bridge";
+  const email = `setup-${crypto.randomUUID()}@savia.test`;
+  const sendTransactionalEmail = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("Delivery unavailable"))
+    .mockResolvedValueOnce(undefined);
+  const handler = createAuthHandler(
+    { ...env, SAVIA_INTERNAL_BRIDGE_KEY: bridgeKey },
+    { sendTransactionalEmail },
+  );
+  const created = await handler.fetch(
+    new Request(`${origin}/_internal/users`, {
+      method: "POST",
+      headers: {
+        "x-savia-bridge-key": bridgeKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        email,
+        name: "Password Setup",
+        password: "Password-Setup-Fixture-123!",
+        emailVerified: true,
+      }),
+    }),
+  );
+  expect(created.status).toBe(201);
+  const { user } = (await created.json()) as { user: { id: string } };
+  const setupPassword = () =>
+    handler.fetch(
+      new Request(`${origin}/_internal/users/${user.id}/password-reset`, {
+        method: "POST",
+        headers: { "x-savia-bridge-key": bridgeKey },
+      }),
+    );
+
+  const failure = await setupPassword();
+  expect(sendTransactionalEmail).toHaveBeenCalledWith(
+    expect.objectContaining({ to: email }),
+  );
+  expect(failure.status).toBe(503);
+  expect(await failure.json()).toEqual({
+    error: { code: "PASSWORD_RESET_EMAIL_UNAVAILABLE" },
+  });
+  expect((await setupPassword()).status).toBe(204);
 });

@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { useTranslate } from "ra-core";
 import { useQueryClient } from "@tanstack/react-query";
-import { useSessionGeneration } from "@/auth/session-scope";
+import {
+  getSessionGeneration,
+  useSessionGeneration,
+} from "@/auth/session-scope";
 import {
   Archive,
   Bell,
@@ -81,13 +84,24 @@ export function NotificationInbox({
     setBusy(id);
     setError("");
     try {
-      await action();
-      await refresh();
+      await action().finally(() => {
+        if (sessionGeneration === getSessionGeneration()) return refresh();
+      });
     } catch {
-      setError(t("actionError"));
+      if (sessionGeneration === getSessionGeneration())
+        setError(t("actionError"));
     } finally {
       setBusy(null);
     }
+  };
+
+  const markAllRead = async () => {
+    let cursor: string | undefined;
+    do {
+      if (sessionGeneration !== getSessionGeneration()) return;
+      const page = await client.readAll(cursor);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
   };
 
   const items: NoticeItem[] = inbox.data?.items ?? [];
@@ -118,7 +132,7 @@ export function NotificationInbox({
           size="sm"
           className="max-sm:h-11 max-sm:min-w-11 max-sm:has-[>svg]:px-0"
           disabled={busy !== null}
-          onClick={() => void run("read-all", () => client.readAll())}
+          onClick={() => void run("read-all", markAllRead)}
         >
           {busy === "read-all" ? (
             <LoaderCircle className="animate-spin" aria-hidden="true" />

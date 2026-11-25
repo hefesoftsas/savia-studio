@@ -8,7 +8,9 @@ export function authenticationErrorResponse(
   const status =
     error.code === "IDENTITY_EMAIL_CONFLICT"
       ? 409
-      : error.code === "AUTHENTICATION_UNAVAILABLE"
+      : error.code === "AUTHENTICATION_UNAVAILABLE" ||
+          error.code === "VERIFICATION_EMAIL_UNAVAILABLE" ||
+          error.code === "PASSWORD_RESET_EMAIL_UNAVAILABLE"
         ? 503
         : error.code === "AUTHORIZATION_FORBIDDEN" ||
             error.code === "INSUFFICIENT_SCOPE" ||

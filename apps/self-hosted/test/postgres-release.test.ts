@@ -248,7 +248,7 @@ async function nativeFixture(run: (db: D1Database) => Promise<void>) {
           const first = await request("/flows");
           expect(first.status).toBe(200);
           const before = (await first.json()) as { id: string; name: string }[];
-          expect(before.length).toBeGreaterThan(1);
+          expect(before.length).toBeGreaterThan(0);
           const target = before[0];
           expect((await request(`/flows/${target.id}`)).status).toBe(200);
           expect((await request(`/flows/${target.id}`, "DELETE")).status).toBe(

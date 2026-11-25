@@ -10,6 +10,7 @@ import {
   type NoticeView,
 } from "@savia/studio-shared/notifications";
 import { fail } from "../context";
+import { dialectFor } from "@savia/db/dialect";
 import {
   canonicalPayload,
   decodeCursor,
@@ -158,22 +159,17 @@ export class NotificationRepository {
 
   async markRead(
     principal: string,
-    scope: NoticeScope,
+    scopes: NoticeScope[],
     id: string,
     read: boolean,
   ): Promise<void> {
-    const row = await this.db
-      .prepare(
-        `SELECT id FROM notification_deliveries
-         WHERE id=? AND recipient_id=? AND scope_kind=? AND scope_id=?`,
-      )
-      .bind(id, principal, scope.kind, scope.id)
-      .first<string>("id");
-    if (!row) return fail("Notification not found.", 404);
-    await this.db
-      .prepare("UPDATE notification_deliveries SET read_at=? WHERE id=?")
-      .bind(read ? Date.now() : null, id)
-      .run();
+    await this.updateDeliveryTimestamp(
+      principal,
+      scopes,
+      id,
+      "read_at",
+      read ? Date.now() : null,
+    );
   }
 
   async count(
@@ -224,12 +220,14 @@ export class NotificationRepository {
 
   async markAllRead(
     principal: string,
-    scope: NoticeScope,
+    scopes: NoticeScope[],
     cutoff?: string,
   ): Promise<{ updated: number; nextCursor: string | null }> {
-    let bound: [number, string] | null = cutoff ? decodeCursor(cutoff) : null;
+    const bound = cutoff ? decodeCursor(cutoff) : null;
     if (cutoff && !bound) return fail("Invalid inbox cursor.", 400);
-    const params: (string | number | null)[] = [principal, scope.kind, scope.id];
+    if (!scopes.length) return { updated: 0, nextCursor: null };
+    const scopeWhere = scopes.map(() => "(d.scope_kind=? AND d.scope_id=?)").join(" OR ");
+    const params: (string | number)[] = [principal, ...scopes.flatMap((scope) => [scope.kind, scope.id])];
     let andCutoff = "";
     if (bound) {
       andCutoff = "AND (d.created_at<? OR (d.created_at=? AND d.id<?))";
@@ -239,23 +237,25 @@ export class NotificationRepository {
       await this.db
         .prepare(
           `SELECT d.id,d.created_at FROM notification_deliveries d
-           WHERE d.recipient_id=? AND d.scope_kind=? AND d.scope_id=? AND d.read_at IS NULL ${andCutoff}
+           WHERE d.recipient_id=? AND (${scopeWhere}) AND d.read_at IS NULL ${andCutoff}
            ORDER BY d.created_at DESC,d.id DESC LIMIT 101`,
         )
         .bind(...params)
         .all<{ id: string; created_at: number }>()
     ).results;
     const page = ids.slice(0, 100);
-    const stamp = Date.now();
-    for (const row of page) {
-      await this.db
-        .prepare("UPDATE notification_deliveries SET read_at=? WHERE id=?")
-        .bind(stamp, row.id)
-        .run();
-    }
+    if (page.length === 0) return { updated: 0, nextCursor: null };
+    const pageIds = dialectFor(this.db).name === "postgres"
+      ? "jsonb_array_elements_text(?::jsonb) AS page_ids(value)"
+      : "json_each(?)";
+    const result = await this.db
+      .prepare(`UPDATE notification_deliveries SET read_at=?
+                WHERE read_at IS NULL AND id IN (SELECT value FROM ${pageIds})`)
+      .bind(Date.now(), JSON.stringify(page.map(({ id }) => id)))
+      .run();
     const last = page[page.length - 1];
     return {
-      updated: page.length,
+      updated: result.meta.changes ?? 0,
       nextCursor:
         ids.length > 100 && last ? encodeCursor(last.created_at, last.id) : null,
     };
@@ -292,19 +292,44 @@ export class NotificationRepository {
     ).results.map((row) => row.collection);
   }
 
-  async archive(principal: string, scope: NoticeScope, id: string): Promise<void> {
-    const row = await this.db
+  async archive(
+    principal: string,
+    scopes: NoticeScope[],
+    id: string,
+  ): Promise<void> {
+    await this.updateDeliveryTimestamp(
+      principal,
+      scopes,
+      id,
+      "archived_at",
+      Date.now(),
+    );
+  }
+
+  private async updateDeliveryTimestamp(
+    principal: string,
+    scopes: NoticeScope[],
+    id: string,
+    column: "read_at" | "archived_at",
+    stamp: number | null,
+  ): Promise<void> {
+    if (scopes.length === 0) return fail("Notification not found.", 404);
+    const scopeWhere = scopes
+      .map(() => "(scope_kind=? AND scope_id=?)")
+      .join(" OR ");
+    const result = await this.db
       .prepare(
-        `SELECT id FROM notification_deliveries
-         WHERE id=? AND recipient_id=? AND scope_kind=? AND scope_id=?`,
+        `UPDATE notification_deliveries SET ${column}=?
+         WHERE id=? AND recipient_id=? AND (${scopeWhere})`,
       )
-      .bind(id, principal, scope.kind, scope.id)
-      .first<string>("id");
-    if (!row) return fail("Notification not found.", 404);
-    await this.db
-      .prepare("UPDATE notification_deliveries SET archived_at=? WHERE id=?")
-      .bind(Date.now(), id)
+      .bind(
+        stamp,
+        id,
+        principal,
+        ...scopes.flatMap((scope) => [scope.kind, scope.id]),
+      )
       .run();
+    if (!result.meta.changes) return fail("Notification not found.", 404);
   }
 
   private async readTaskStatuses(ids: string[]): Promise<Map<string, string>> {

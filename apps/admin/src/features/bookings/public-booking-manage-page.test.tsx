@@ -1,5 +1,6 @@
 import { AppLocaleProvider } from "@/i18n/app-locale-provider";
-import { StoreContextProvider, memoryStore } from "ra-core";
+import { StoreContextProvider, memoryStore, useSetLocale } from "ra-core";
+import type { ReactNode } from "react";
 import {
   act,
   cleanup,
@@ -77,15 +78,114 @@ function availabilityData(startsAt = "2026-10-06T15:00:00Z") {
   };
 }
 
-function renderManagePage(token = manageToken) {
+function renderManagePage(token = manageToken, children?: ReactNode) {
   return render(
     <StoreContextProvider value={memoryStore({ locale: "en" })}>
       <AppLocaleProvider>
+        {children}
         <PublicBookingManagePage token={token} />
       </AppLocaleProvider>
     </StoreContextProvider>,
   );
 }
+
+it("preserves the selected reschedule time when the language changes", async () => {
+  function SwitchLanguage() {
+    const setLocale = useSetLocale();
+    return <button onClick={() => setLocale("es")}>Spanish</button>;
+  }
+  const fetcher = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), "https://savia.test").pathname;
+      if (path.endsWith("/availability"))
+        return Response.json({ data: availabilityData() });
+      if (path.endsWith("/reschedule")) {
+        const { startsAt, version } = JSON.parse(String(init?.body));
+        expect(startsAt).toBe("2026-10-06T15:00:00Z");
+        expect(version).toBe(7);
+        return Response.json({
+          data: confirmedReservation({
+            startsAt,
+            endsAt: "2026-10-06T15:30:00Z",
+            version: 8,
+          }),
+        });
+      }
+      return Response.json({ data: manageData() });
+    },
+  );
+  vi.stubGlobal("fetch", fetcher);
+  renderManagePage(manageToken, <SwitchLanguage />);
+  fireEvent.click(await screen.findByRole("button", { name: "Reschedule" }));
+  fireEvent.click(await screen.findByRole("button", { name: "10:00 AM" }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { name: "Review your change" });
+  fireEvent.click(screen.getByRole("button", { name: "Spanish" }));
+
+  expect(
+    await screen.findByRole("heading", { name: "Revisa el cambio" }),
+  ).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Confirmar el cambio" }));
+  expect(await screen.findByText("Tu cita se actualizó.")).toBeVisible();
+  expect(
+    fetcher.mock.calls.filter(([path]) => path === managePath),
+  ).toHaveLength(1);
+  expect(
+    fetcher.mock.calls.some(([path]) => String(path).endsWith("/reschedule")),
+  ).toBe(true);
+});
+
+it("keeps an in-flight cancellation scoped to the original management link", async () => {
+  const nextToken = "other-management-token-1234567890";
+  let finish!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    finish = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), "https://savia.test").pathname;
+      if (path.endsWith("/cancel")) return pending;
+      return Response.json({
+        data: manageData(
+          path.endsWith(nextToken)
+            ? confirmedReservation({
+                id: "reservation-2",
+                customerName: "Another guest",
+                customerEmail: "another@example.test",
+              })
+            : confirmedReservation(),
+        ),
+      });
+    }),
+  );
+  const { rerender } = renderManagePage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Cancel reservation" }),
+  );
+
+  rerender(
+    <StoreContextProvider value={memoryStore({ locale: "en" })}>
+      <AppLocaleProvider>
+        <PublicBookingManagePage token={nextToken} />
+      </AppLocaleProvider>
+    </StoreContextProvider>,
+  );
+  expect(
+    await screen.findByText("Another guest · another@example.test"),
+  ).toBeVisible();
+  await act(async () =>
+    finish(
+      Response.json({
+        data: confirmedReservation({ status: "cancelled", version: 8 }),
+      }),
+    ),
+  );
+  expect(
+    screen.getByText("Another guest · another@example.test"),
+  ).toBeVisible();
+  expect(screen.getByText("Confirmed")).toBeVisible();
+});
 
 it("hides the previous reservation when its public management link is revoked", async () => {
   vi.stubGlobal(
@@ -305,6 +405,11 @@ it.each([
     message: "That time is no longer available. Choose another available time.",
   },
   {
+    name: "a conflict with no JSON body",
+    code: null,
+    message: "That time is no longer available. Choose another available time.",
+  },
+  {
     name: "a meeting conflict",
     code: "BOOKING_TIME_CONFLICT",
     message:
@@ -337,10 +442,12 @@ it.each([
         if (url.pathname === `${managePath}/reschedule`) {
           reschedulePosts += 1;
           if (reschedulePosts === 1)
-            return Response.json(
-              { error: { code, message: "Revision changed" } },
-              { status: 409 },
-            );
+            return code
+              ? Response.json(
+                  { error: { code, message: "Revision changed" } },
+                  { status: 409 },
+                )
+              : new Response("Conflict", { status: 409 });
           return Response.json({
             data: confirmedReservation({
               startsAt: "2026-10-06T15:00:00Z",
@@ -392,58 +499,185 @@ it.each([
   },
 );
 
-it("shows an already completed reschedule after a lost-response conflict without posting twice", async () => {
-  const requests: string[] = [];
-  let manageReads = 0;
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input), "https://savia.test");
-      requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
-      if (url.pathname === managePath) {
-        manageReads += 1;
-        const reservation =
-          manageReads === 1
-            ? confirmedReservation()
-            : confirmedReservation({
-                startsAt: "2026-10-06T15:00:00Z",
-                endsAt: "2026-10-06T15:30:00Z",
-                version: 8,
-              });
-        return Response.json({ data: manageData(reservation) });
+it.each([
+  { status: 409, committed: true },
+  { status: 503, committed: true },
+  { status: undefined, committed: true },
+  { status: undefined, committed: false },
+  { status: 503, committed: false, moved: true },
+  { status: 409, committed: false, moved: true },
+])(
+  "rechecks rescheduling (status: $status, committed: $committed, moved: $moved)",
+  async ({ status, committed, moved }) => {
+    const postedVersions: number[] = [];
+    let manageReads = 0;
+    const newTime = {
+      startsAt: "2026-10-06T15:00:00Z",
+      endsAt: "2026-10-06T15:30:00Z",
+    };
+    const otherTime = {
+      startsAt: "2026-10-07T16:00:00Z",
+      endsAt: "2026-10-07T16:30:00Z",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "https://savia.test");
+        if (url.pathname === managePath) {
+          manageReads += 1;
+          const reservation =
+            manageReads === 1
+              ? confirmedReservation()
+              : confirmedReservation({
+                  ...(committed ? newTime : moved ? otherTime : {}),
+                  version: 8,
+                });
+          return Response.json({ data: manageData(reservation) });
+        }
+        if (url.pathname === `${managePath}/availability`)
+          return Response.json({ data: availabilityData() });
+        if (url.pathname === `${managePath}/reschedule`) {
+          postedVersions.push(JSON.parse(String(init?.body)).version);
+          if (postedVersions.length > 1) {
+            return Response.json({
+              data: confirmedReservation({ ...newTime, version: 9 }),
+            });
+          }
+          if (status === undefined) throw new TypeError("Connection closed");
+          return Response.json(
+            { error: { message: "Reschedule response failed" } },
+            { status },
+          );
+        }
+        throw new Error(`Unexpected management path ${url.pathname}`);
+      }),
+    );
+    renderManagePage();
+
+    await screen.findByText("Confirmed");
+    fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+    await screen.findByRole("button", { name: "10:00 AM" });
+    fireEvent.click(screen.getByRole("button", { name: /Tuesday, October 6/ }));
+    fireEvent.click(screen.getByRole("button", { name: "10:00 AM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm reschedule" }),
+    );
+
+    if (moved) {
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "This appointment was rescheduled. Review the updated time before making another change.",
+      );
+      expect(screen.getByText(/Oct 7, 2026, 11:00 AM/)).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: "Confirm reschedule" }),
+      ).toBeNull();
+      expect(screen.getByRole("button", { name: "Reschedule" })).toBeEnabled();
+      expect(postedVersions).toEqual([7]);
+      return;
+    }
+    if (!committed) {
+      await screen.findByText(
+        "This booking could not be rescheduled. Refresh the times and retry.",
+      );
+      expect(
+        screen.getByRole("heading", { name: "Review your change" }),
+      ).toBeInTheDocument();
+      expect(postedVersions).toEqual([7]);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Confirm reschedule" }),
+      );
+    }
+
+    expect(
+      await screen.findByRole("heading", { name: "Updated appointment" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Your appointment has been updated."),
+    ).toBeInTheDocument();
+    expect(postedVersions).toEqual(committed ? [7] : [7, 8]);
+  },
+);
+
+it.each(["cancelled", "unchanged", "moved"])(
+  "rechecks an uncertain cancellation before allowing a retry (%s)",
+  async (outcome) => {
+    let reads = 0;
+    const postedVersions: number[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input), "https://savia.test").pathname;
+        if (path === `${managePath}/availability`)
+          return Response.json({ data: availabilityData() });
+        if (path === `${managePath}/cancel`) {
+          postedVersions.push(JSON.parse(String(init?.body)).version);
+          if (postedVersions.length === 1)
+            throw new TypeError("Connection closed");
+          return Response.json({
+            data: confirmedReservation({ status: "cancelled", version: 9 }),
+          });
+        }
+        reads += 1;
+        return Response.json({
+          data: manageData(
+            reads === 1
+              ? confirmedReservation()
+              : confirmedReservation({
+                  version: 8,
+                  status: outcome === "cancelled" ? "cancelled" : "confirmed",
+                  ...(outcome === "moved"
+                    ? {
+                        startsAt: "2026-10-07T16:00:00Z",
+                        endsAt: "2026-10-07T16:30:00Z",
+                      }
+                    : {}),
+                }),
+          ),
+        });
+      }),
+    );
+    renderManagePage();
+    if (outcome === "moved") {
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Reschedule" }),
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "10:00 AM" }));
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+      expect(
+        screen.getByRole("button", { name: "Confirm reschedule" }),
+      ).toBeEnabled();
+    }
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Cancel reservation" }),
+    );
+
+    if (outcome === "cancelled") {
+      expect(await screen.findByText("Cancelled")).toBeVisible();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(postedVersions).toEqual([7]);
+    } else {
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        outcome === "moved"
+          ? "This appointment was rescheduled. Review the updated time before making another change."
+          : "This booking could not be cancelled",
+      );
+      if (outcome === "moved") {
+        expect(screen.getByText(/Oct 7, 2026, 11:00 AM/)).toBeVisible();
+        expect(
+          screen.queryByRole("button", { name: "Confirm reschedule" }),
+        ).toBeNull();
       }
-      if (url.pathname === `${managePath}/availability`)
-        return Response.json({ data: availabilityData() });
-      if (url.pathname === `${managePath}/reschedule`)
-        return Response.json(
-          { error: { message: "Already changed" } },
-          { status: 409 },
-        );
-      throw new Error(`Unexpected management path ${url.pathname}`);
-    }),
-  );
-  renderManagePage();
-
-  await screen.findByText("Confirmed");
-  fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
-  await screen.findByRole("button", { name: "10:00 AM" });
-  fireEvent.click(screen.getByRole("button", { name: /Tuesday, October 6/ }));
-  fireEvent.click(screen.getByRole("button", { name: "10:00 AM" }));
-  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-  fireEvent.click(
-    await screen.findByRole("button", { name: "Confirm reschedule" }),
-  );
-
-  expect(
-    await screen.findByRole("heading", { name: "Updated appointment" }),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText("Your appointment has been updated."),
-  ).toBeInTheDocument();
-  expect(
-    requests.filter((request) => request === `POST ${managePath}/reschedule`),
-  ).toHaveLength(1);
-});
+      expect(postedVersions).toEqual([7]);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Cancel reservation" }),
+      );
+      expect(await screen.findByText("Cancelled")).toBeVisible();
+      expect(postedVersions).toEqual([7, 8]);
+    }
+    expect(reads).toBe(2);
+  },
+);
 
 it("leaves the appointment unchanged when a reviewed change is backed out", async () => {
   const requests: string[] = [];
@@ -708,3 +942,187 @@ it("discards a stale refresh response after cancellation advances the reservatio
   ).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Join Google Meet" })).toBeNull();
 });
+
+it.each(["conference ready", "rescheduled elsewhere", "cancelled elsewhere"])(
+  "shows a reschedule confirmation only while it is current after refresh: %s",
+  async (outcome) => {
+    const updatedBooking = confirmedReservation({
+      startsAt: "2026-10-06T15:00:00Z",
+      endsAt: "2026-10-06T15:30:00Z",
+      version: 8,
+      conference: { provider: "google_meet", joinUrl: null, status: "pending" },
+    });
+    const refreshedBooking = {
+      ...updatedBooking,
+      version: 9,
+      ...(outcome === "rescheduled elsewhere"
+        ? {
+            startsAt: "2026-10-07T16:00:00Z",
+            endsAt: "2026-10-07T16:30:00Z",
+          }
+        : {}),
+      status: outcome === "cancelled elsewhere" ? "cancelled" : "confirmed",
+      conference: {
+        provider: "google_meet",
+        joinUrl: "https://meet.google.com/abc-defg-hij",
+        status: "ready",
+      },
+    };
+    let reads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = new URL(String(input), "https://savia.test").pathname;
+        if (path === managePath) {
+          reads += 1;
+          return Response.json({
+            data: manageData(
+              reads === 1 ? confirmedReservation() : refreshedBooking,
+            ),
+          });
+        }
+        if (path === `${managePath}/availability`)
+          return Response.json({ data: availabilityData() });
+        if (path === `${managePath}/reschedule`)
+          return Response.json({ data: updatedBooking });
+        throw new Error(`Unexpected management path ${path}`);
+      }),
+    );
+    renderManagePage();
+    fireEvent.click(await screen.findByRole("button", { name: "Reschedule" }));
+    fireEvent.change(screen.getByLabelText("Time zone"), {
+      target: { value: "America/New_York" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "11:00 AM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reschedule" }));
+
+    const confirmation = await screen.findByRole("heading", {
+      name: "Updated appointment",
+    });
+    expect(screen.getByText(/11:00 AM EDT/)).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh appointment" }),
+    );
+
+    if (outcome === "cancelled elsewhere") {
+      await screen.findByText("Cancelled");
+    } else {
+      await screen.findByRole("link", { name: "Join Google Meet" });
+    }
+    if (outcome === "conference ready") {
+      expect(confirmation).toBeInTheDocument();
+      expect(screen.getByText(/11:00 AM EDT/)).toBeInTheDocument();
+    } else {
+      expect(confirmation).not.toBeInTheDocument();
+      expect(screen.queryByText(/11:00 AM EDT/)).not.toBeInTheDocument();
+    }
+  },
+);
+
+it("closes the review and disables cancellation as soon as the booking deadline passes", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(new Date("2026-10-05T11:59:50Z"));
+  const fetchBooking = vi.fn(async (input: RequestInfo | URL) => {
+    const path = new URL(String(input), "https://savia.test").pathname;
+    if (path === managePath) return Response.json({ data: manageData() });
+    if (path === `${managePath}/availability`)
+      return Response.json({ data: availabilityData() });
+    throw new Error(`Unexpected management path ${path}`);
+  });
+  vi.stubGlobal("fetch", fetchBooking);
+  await act(async () => {
+    renderManagePage();
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+  });
+  fireEvent.click(screen.getByRole("button", { name: "10:00 AM" }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  expect(
+    screen.getByRole("button", { name: "Confirm reschedule" }),
+  ).toBeEnabled();
+
+  act(() => vi.advanceTimersByTime(10_000));
+  expect(
+    screen.getByRole("button", { name: "Confirm reschedule" }),
+  ).toBeEnabled();
+  act(() => vi.advanceTimersByTime(1));
+
+  expect(
+    screen.queryByRole("button", { name: "Confirm reschedule" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Cancel reservation" }),
+  ).toBeDisabled();
+  expect(
+    screen.getByText("The cancellation and rescheduling window has closed."),
+  ).toBeInTheDocument();
+  expect(fetchBooking).toHaveBeenCalledTimes(2);
+});
+
+it.each(["conference ready", "appointment moved", "rescheduling disabled"])(
+  "rechecks an open reschedule review when refreshing the appointment: %s",
+  async (outcome) => {
+    const original = confirmedReservation({
+      conference: { provider: "google_meet", joinUrl: null, status: "pending" },
+    });
+    const refreshed = confirmedReservation({
+      version: 8,
+      ...(outcome === "appointment moved"
+        ? {
+            startsAt: "2026-10-07T16:00:00Z",
+            endsAt: "2026-10-07T16:30:00Z",
+          }
+        : {}),
+      conference: {
+        provider: "google_meet",
+        joinUrl: "https://meet.google.com/abc-defg-hij",
+        status: "ready",
+      },
+    });
+    let reads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = new URL(String(input), "https://savia.test").pathname;
+        if (path === managePath) {
+          reads += 1;
+          return Response.json({
+            data:
+              reads === 1
+                ? manageData(original)
+                : manageData(refreshed, {
+                    canReschedule: outcome !== "rescheduling disabled",
+                  }),
+          });
+        }
+        if (path === `${managePath}/availability`)
+          return Response.json({ data: availabilityData() });
+        throw new Error(`Unexpected management path ${path}`);
+      }),
+    );
+    renderManagePage();
+    fireEvent.click(await screen.findByRole("button", { name: "Reschedule" }));
+    fireEvent.click(await screen.findByRole("button", { name: "10:00 AM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    const confirm = screen.getByRole("button", { name: "Confirm reschedule" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh appointment" }),
+    );
+    await screen.findByRole("link", { name: "Join Google Meet" });
+
+    if (outcome === "conference ready") {
+      expect(confirm).toBeEnabled();
+    } else {
+      expect(confirm).not.toBeInTheDocument();
+    }
+    if (outcome === "appointment moved") {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "This appointment was rescheduled. Review the updated time before making another change.",
+      );
+      expect(screen.getByText(/Oct 7, 2026, 11:00 AM/)).toBeVisible();
+      expect(screen.getByRole("button", { name: "Reschedule" })).toBeEnabled();
+    }
+  },
+);

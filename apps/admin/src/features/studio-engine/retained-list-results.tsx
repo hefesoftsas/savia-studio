@@ -1,9 +1,10 @@
-import { useMessages } from "@/i18n/core";
+import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
 import { recordsMessages } from "@/i18n/locales/records";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useReducer, type ReactNode } from "react";
 import { ListContextProvider, useListContext, type RaRecord } from "ra-core";
 import { Button } from "@/components/ui/button";
+import { formatRetryTime } from "@/api/retry-after";
 
 /** Retain one successful page within its authorization/collection scope. */
 export function RetainedListResults({
@@ -14,6 +15,7 @@ export function RetainedListResults({
   children: ReactNode;
 }) {
   const t = useMessages(recordsMessages);
+  const locale = useAppLocale();
 
   const context = useListContext();
   const saved = useRef<
@@ -58,6 +60,7 @@ export function RetainedListResults({
   const currentRevoked =
     context.data !== undefined && revoked.current.has(context.data);
   const status = (context.error as { status?: number } | undefined)?.status;
+  const retryTime = formatRetryTime(context.error, intlLocale(locale));
   const denied = status === 401 || status === 403;
   useEffect(() => {
     if (denied) {
@@ -111,7 +114,17 @@ export function RetainedListResults({
           role="alert"
           className="flex items-center gap-2 py-2 text-sm text-destructive"
         >
-          <span>{context.error.message}</span>
+          <span>
+            {context.error.message}
+            {retryTime && (
+              <>
+                {" "}
+                {t("Puedes reintentar a partir de %{p0}.", {
+                  p0: retryTime,
+                })}
+              </>
+            )}
+          </span>
           <Button
             variant="outline"
             size="sm"

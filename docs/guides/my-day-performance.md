@@ -24,6 +24,25 @@ most five links ordered by their most recent update or creation time. It does
 not cache document details in browser storage, and it refreshes when the
 identity, active tenant, Office settings, or connected integrations change.
 
+If HubSpot rejects a grouped widget summary as unsupported for the requested
+data, My Day still shows the collection count when a separate total is
+available. The widget indicates that the status breakdown is unavailable.
+It also preserves a valid total when a response contains an invalid status
+count or omits a requested amount.
+When HubSpot returns the same record twice during a scan, Savia reports a
+provider error instead of counting it twice.
+It also rejects a provider total below the number of records already scanned.
+Changing a widget's collection, grouping, or due-date field hides the
+previous result until the new data is ready. This applies to summary, items,
+chart, and actions widgets.
+On a temporary data refresh failure, these widgets keep the latest result
+for that selection and offer a retry. An authorization failure removes the
+previous result.
+Background collection metadata refreshes also keep the current widget visible
+during a temporary failure. A denied or missing collection removes its results.
+Collection widgets hide the previous session's data as soon as the session
+is cleared and skip new reads while explicit logout finishes.
+
 The agenda now reads selected day/week/month ranges. OAuth caches are keyed by
 the requested range; shared-source display caches also include the display
 timezone and keep at most sixteen ranges per client. Switching ranges cannot

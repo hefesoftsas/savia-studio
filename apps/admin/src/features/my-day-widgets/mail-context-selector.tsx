@@ -16,6 +16,15 @@ import { widgetMessages } from "./widget-messages";
 
 const selectClass =
   "h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
+const contextPageSize = 25;
+
+type ContextRecordsPage = {
+  data: WidgetRecord[];
+  total?: number;
+  pageInfo?: { hasNextPage?: boolean };
+  meta?: { pageLimitReached?: boolean };
+};
+
 export const mailSelectClass = selectClass;
 function useRead<T>(client: ApiClient, path: string | null) {
   const [state, setState] = useState<{
@@ -67,24 +76,38 @@ export function MailContextSelector({
     apiClient,
     workspace ? `${workspace}/api/objects` : null,
   );
-  const records = useRead<{ data: WidgetRecord[]; total?: number }>(
-    apiClient,
-    workspace && collection
-      ? `${workspace}/api/records/${encodeURIComponent(collection)}?${new URLSearchParams({ page: String(page), perPage: "25", sort: "updated_at", order: "DESC" })}`
-      : null,
-  );
-  const record = useRead<{ data: WidgetRecord }>(
-    apiClient,
-    workspace && collection && recordId
-      ? `${workspace}/api/records/${encodeURIComponent(collection)}/${encodeURIComponent(recordId)}`
-      : null,
-  );
   const collections = metadata.data
     ? normalizeCollections(workspace, metadata.data)
     : [];
   const schema = metadata.data
     ? normalizeSchema(workspace, metadata.data, collection)
     : undefined;
+  const recordsPath = schema
+    ? `${workspace}/api/records/${encodeURIComponent(collection)}`
+    : null;
+  const params = new URLSearchParams({
+    page: String(page),
+    perPage: String(contextPageSize),
+  });
+  if (schema?.sortSupported !== false) {
+    params.set("sort", "updated_at");
+    params.set("order", "DESC");
+  }
+  const records = useRead<ContextRecordsPage>(
+    apiClient,
+    recordsPath ? `${recordsPath}?${params}` : null,
+  );
+  const record = useRead<{ data: WidgetRecord }>(
+    apiClient,
+    recordsPath && recordId
+      ? `${recordsPath}/${encodeURIComponent(recordId)}`
+      : null,
+  );
+  const hasNextPage =
+    records.data?.pageInfo?.hasNextPage ??
+    (records.data?.total === undefined
+      ? records.data?.data.length === contextPageSize
+      : page * contextPageSize < records.data.total);
   const readable =
     schema?.fields.filter(
       (field) =>
@@ -213,12 +236,7 @@ export function MailContextSelector({
             type="button"
             variant="ghost"
             size="sm"
-            disabled={
-              !records.data ||
-              (records.data.total === undefined
-                ? records.data.data.length < 25
-                : page * 25 >= records.data.total)
-            }
+            disabled={!hasNextPage}
             aria-label={t("Next page")}
             onClick={() => {
               setPage((value) => value + 1);
@@ -230,6 +248,11 @@ export function MailContextSelector({
           </Button>
         </div>
       ) : null}
+      {records.data?.meta?.pageLimitReached === true && (
+        <p className="text-xs text-muted-foreground">
+          {t("More records are available in the source system.")}
+        </p>
+      )}
       {recordId && !record.data && !record.error ? (
         <p role="status" className="text-sm text-muted-foreground">
           {t("Loading record…")}

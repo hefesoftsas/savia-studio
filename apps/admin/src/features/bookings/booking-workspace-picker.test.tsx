@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { memoryStore, StoreContextProvider } from "ra-core";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ApiClient } from "@/api/api-client";
 import { BookingWorkspacePicker } from "./booking-workspace-picker";
@@ -15,14 +16,20 @@ const organization = {
   kind: "commercial",
 };
 
-function renderPicker(get: ApiClient["get"], hostname = "savia.hefesoft.com") {
+function renderPicker(
+  get: ApiClient["get"],
+  hostname = "savia.hefesoft.com",
+  path = "/bookings",
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   render(
     <StoreContextProvider value={memoryStore({ locale: "es" })}>
       <QueryClientProvider client={queryClient}>
-        <BookingWorkspacePicker apiClient={{ get }} hostname={hostname} />
+        <MemoryRouter initialEntries={[path]}>
+          <BookingWorkspacePicker apiClient={{ get }} hostname={hostname} />
+        </MemoryRouter>
       </QueryClientProvider>
     </StoreContextProvider>,
   );
@@ -55,6 +62,22 @@ it.each(["savia.hefesoft.com", "savia-preview.hefesoft.com"])(
     });
   },
 );
+
+it("preserves the requested tab and date when choosing a workspace", async () => {
+  const hostname = "savia-preview.hefesoft.com";
+  renderPicker(
+    vi.fn().mockResolvedValue({ data: [organization] }),
+    hostname,
+    "/bookings?tab=reservations&date=2026-11-25&unrecognized=discard",
+  );
+
+  expect(
+    await screen.findByRole("link", { name: /Clínica del Norte/ }),
+  ).toHaveAttribute(
+    "href",
+    `https://clinica-norte-2.${hostname}/#/bookings?tab=reservations&date=2026-11-25`,
+  );
+});
 
 it("lets users retry a failed organization lookup", async () => {
   const get = vi

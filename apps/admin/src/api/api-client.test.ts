@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient, ApiClientError } from "./api-client";
+import { REQUEST_TIMEOUT_MS, RequestTimeoutError } from "./request-timeout";
 
 describe("ApiClient", () => {
   it("adds a bearer token to Savia requests", async () => {
@@ -79,6 +80,174 @@ describe("ApiClient", () => {
     });
   });
 
+  it("reads JSON:API documents with a case-insensitive media type", async () => {
+    const data = { data: { type: "contacts", id: "contact-1" } };
+    const client = new ApiClient({
+      baseUrl: "https://savia.test",
+      tokenSource: { getAccessToken: async () => "test" },
+      fetcher: async () =>
+        Response.json(data, {
+          headers: {
+            "content-type": "Application/Vnd.Api+Json; charset=utf-8",
+          },
+        }),
+    });
+    await expect(client.get("/v1/contacts")).resolves.toEqual(data);
+  });
+
+  it("accepts no-content responses that still declare a JSON media type", async () => {
+    const client = new ApiClient({
+      baseUrl: "https://savia.test",
+      tokenSource: { getAccessToken: async () => "test" },
+      fetcher: async () =>
+        new Response(null, {
+          status: 204,
+          headers: { "content-type": "application/vnd.api+json" },
+        }),
+    });
+    await expect(
+      client.delete("/v1/contacts/contact-1"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("surfaces the problem detail while keeping the actual HTTP status", async () => {
+    const problem = {
+      title: "Conflict",
+      detail: "Reload the record before saving again.",
+      status: 400,
+    };
+    const client = new ApiClient({
+      baseUrl: "https://savia.test",
+      tokenSource: { getAccessToken: async () => "test" },
+      fetcher: async () =>
+        Response.json(problem, {
+          status: 409,
+          headers: { "content-type": "application/problem+json" },
+        }),
+    });
+    await expect(client.get("/v1/contacts")).rejects.toMatchObject({
+      status: 409,
+      code: "HTTP_409",
+      message: problem.detail,
+      details: problem,
+    });
+  });
+
+  it.each(["", '{"error":'] as const)(
+    "preserves the HTTP status when an error response claims JSON but returns %j",
+    async (body) => {
+      const client = new ApiClient({
+        baseUrl: "http://127.0.0.1:8787",
+        tokenSource: { getAccessToken: async () => null },
+        fetcher: vi.fn().mockResolvedValue(
+          new Response(body, {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      });
+
+      await expect(client.get("/v1/tenants")).rejects.toMatchObject({
+        status: 503,
+        code: "HTTP_503",
+        message: "Request failed",
+        details: null,
+      });
+    },
+  );
+
+  it.each([200, 403, 429])(
+    "keeps the meaning of HTTP %s when its JSON body stalls",
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        const now = Date.now();
+        const fetcher = vi.fn(
+          async (_url: RequestInfo | URL, init?: RequestInit) =>
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.enqueue(new TextEncoder().encode('{"error":'));
+                  init?.signal?.addEventListener(
+                    "abort",
+                    () => {
+                      controller.error(init.signal?.reason);
+                    },
+                    { once: true },
+                  );
+                },
+              }),
+              {
+                status,
+                headers: {
+                  "Content-Type": "application/json",
+                  "Retry-After": "30",
+                },
+              },
+            ),
+        );
+        const client = new ApiClient({
+          baseUrl: "https://savia.test",
+          tokenSource: { getAccessToken: async () => "test" },
+          fetcher,
+        });
+        const rejected = vi.fn();
+        void client.request("/v1/domains", {}, 100).catch(rejected);
+        await vi.advanceTimersByTimeAsync(100);
+        expect(rejected).toHaveBeenCalledWith(
+          expect.objectContaining(
+            status === 200
+              ? { status: 0, code: "REQUEST_TIMEOUT" }
+              : {
+                  status,
+                  code: `HTTP_${status}`,
+                  retryAt: status === 429 ? now + 30_000 : undefined,
+                },
+          ),
+        );
+        expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([200, 403, 429])(
+    "keeps the meaning of HTTP %s when the response stream disconnects",
+    async (status) => {
+      const disconnect = new TypeError("Connection closed mid-response");
+      const client = new ApiClient({
+        baseUrl: "https://savia.test",
+        tokenSource: { getAccessToken: async () => "test" },
+        fetcher: async () =>
+          new Response(
+            new ReadableStream({
+              pull(controller) {
+                controller.error(disconnect);
+              },
+            }),
+            {
+              status,
+              headers: {
+                "Content-Type": "application/json",
+                "Retry-After": "30",
+              },
+            },
+          ),
+      });
+      const result = client.get("/v1/domains");
+      if (status === 200) {
+        await expect(result).rejects.toBe(disconnect);
+      } else {
+        await expect(result).rejects.toMatchObject({
+          status,
+          code: `HTTP_${status}`,
+          retryAt: status === 429 ? expect.any(Number) : undefined,
+        });
+      }
+    },
+  );
+
   it("calls the browser fetch function with its global receiver", async () => {
     const browserFetch = vi.fn(function (this: typeof globalThis) {
       if (this !== globalThis) throw new Error("fetch lost its receiver");
@@ -96,6 +265,36 @@ describe("ApiClient", () => {
 
     await expect(client.get("/v1/domains")).resolves.toEqual({ data: [] });
     vi.unstubAllGlobals();
+  });
+
+  it("rejects an HTML application shell returned as a successful API response", async () => {
+    const client = new ApiClient({
+      baseUrl: "http://127.0.0.1:8787",
+      tokenSource: { getAccessToken: async () => null },
+      fetcher: async () =>
+        new Response("<!doctype html><title>Savia Studio</title>", {
+          headers: { "content-type": "text/html; charset=utf-8" },
+        }),
+    });
+
+    await expect(client.get("/v1/tenants")).rejects.toMatchObject({
+      status: 200,
+      code: "UNEXPECTED_HTML_RESPONSE",
+    });
+    const response = await client.requestResponse("/v1/page-preview");
+    await expect(response.text()).resolves.toContain(
+      "<title>Savia Studio</title>",
+    );
+  });
+
+  it("accepts a successful API deletion without a response body", async () => {
+    const client = new ApiClient({
+      baseUrl: "http://127.0.0.1:8787",
+      tokenSource: { getAccessToken: async () => null },
+      fetcher: async () => new Response(null, { status: 204 }),
+    });
+
+    await expect(client.delete("/v1/tenants/101")).resolves.toBeUndefined();
   });
 
   it("sends authenticated JSON PUT requests", async () => {
@@ -120,6 +319,44 @@ describe("ApiClient", () => {
     expect(request.method).toBe("PUT");
     expect(request.body).toBe(JSON.stringify({ model: "openai/gpt-5" }));
   });
+
+  it.each(["post", "patch", "put"] as const)(
+    "preserves caller-provided HeadersInit values on JSON %s requests",
+    async (method) => {
+      const fetcher = vi.fn<typeof fetch>(async () =>
+        Response.json({ saved: true }),
+      );
+      const client = new ApiClient({
+        baseUrl: "http://127.0.0.1:8787",
+        tokenSource: { getAccessToken: async () => "access-token" },
+        fetcher,
+      });
+      const entries: [string, string][] = [
+        ["If-Match", '"version-2"'],
+        ["content-type", "application/merge-patch+json"],
+      ];
+      const inputs: HeadersInit[] = [
+        new Headers(entries),
+        entries,
+        Object.fromEntries(entries),
+      ];
+      for (const headers of inputs) {
+        const request = client[method](
+          "/v1/tenants/101",
+          { isActive: false },
+          { headers },
+        );
+        await expect(request).resolves.toEqual({ saved: true });
+        const outgoing = new Headers(fetcher.mock.lastCall?.[1]?.headers);
+        expect(outgoing.get("If-Match")).toBe('"version-2"');
+        expect(outgoing.get("Content-Type")).toBe(
+          "application/merge-patch+json",
+        );
+        expect(outgoing.get("Authorization")).toBe("Bearer access-token");
+        expect(new Headers(headers).has("Authorization")).toBe(false);
+      }
+    },
+  );
 
   it("sends authenticated multipart uploads without overriding the boundary content type", async () => {
     const fetcher = vi
@@ -207,6 +444,50 @@ describe("ApiClient", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["JSON", "raw response"])(
+    "times out %s requests that are still waiting for an access token",
+    async (kind) => {
+      vi.useFakeTimers();
+      try {
+        let releaseToken!: (token: string) => void;
+        const token = new Promise<string>((resolve) => {
+          releaseToken = resolve;
+        });
+        const fetcher = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+        const client = new ApiClient({
+          baseUrl: "https://savia.test",
+          tokenSource: { getAccessToken: () => token },
+          fetcher,
+        });
+        const rejected = vi.fn();
+        const completed = vi.fn();
+        const request =
+          kind === "JSON"
+            ? client.get("/v1/domains")
+            : client.requestResponse("/v1/domains");
+        void request.then(completed, rejected);
+        await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
+
+        expect(rejected).toHaveBeenCalledOnce();
+        if (kind === "JSON") {
+          expect(rejected).toHaveBeenCalledWith(
+            expect.objectContaining({ code: "REQUEST_TIMEOUT" }),
+          );
+        } else {
+          expect(rejected).toHaveBeenCalledWith(
+            expect.any(RequestTimeoutError),
+          );
+        }
+        releaseToken("late-token");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(completed).not.toHaveBeenCalled();
+        expect(fetcher).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it.each([
     "/v1/domains",

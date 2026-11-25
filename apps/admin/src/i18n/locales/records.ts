@@ -134,6 +134,11 @@ export const recordsMessages = {
     "Search by field",
     "Buscar por campo",
   ],
+  "Campo no disponible (%{p0})": [
+    "Campo no disponible (%{p0})",
+    "Field unavailable (%{p0})",
+    "Campo indisponível (%{p0})",
+  ],
   "Buscar por nombre, id u operationId…": [
     "Buscar por nombre, id u operationId…",
     "Search by name, ID or operationId…",
@@ -659,6 +664,11 @@ export const recordsMessages = {
     "Registros relacionados",
   ],
   Reintentar: ["Reintentar", "Retry", "Tentar novamente"],
+  "Puedes reintentar a partir de %{p0}.": [
+    "Puedes reintentar a partir de %{p0}.",
+    "You can retry from %{p0}.",
+    "Você pode tentar novamente a partir de %{p0}.",
+  ],
   "Reintentar detalle": [
     "Reintentar detalle",
     "Retry details",
@@ -1664,6 +1674,11 @@ export const recordsMessages = {
     "%{p0} registros nesta página",
   ],
   "%{p0} registros": ["%{p0} registros", "%{p0} records", "%{p0} registros"],
+  "Quedan más registros en el sistema de origen.": [
+    "Quedan más registros en el sistema de origen.",
+    "More records are available in the source system.",
+    "Há mais registros disponíveis no sistema de origem.",
+  ],
   "Etapa de %{p0}": ["Etapa de %{p0}", "Stage of %{p0}", "Etapa de %{p0}"],
   "Campos modificados: %{p0}": [
     "Campos modificados: %{p0}",

@@ -1,6 +1,7 @@
 import { RouteLoading } from "@/components/admin/route-loading";
 import type { AppServices } from "@/app-services";
 import { ApiClientError } from "@/api/api-client";
+import type { paths } from "@/api/generated/openapi";
 import { Button } from "@/components/ui/button";
 import { ResponsiveActionButton } from "@/components/ui/responsive-action-button";
 import { Plus, RefreshCw, Save, Trash2, Unplug, XCircle } from "lucide-react";
@@ -8,9 +9,22 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useAppLocale, useMessages } from "@/i18n/core";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import {
+  bookingTabs,
+  readBookingRouteQuery,
+  type BookingTab,
+} from "@savia/tenant-host/bookings-route";
 import { bookingMessages } from "./booking-messages";
+import { bookingDayRange } from "./booking-date";
 
 import type { Period, Exception, Settings } from "./booking-types";
 import { BookingSetupWizard, WeeklyHoursEditor } from "./booking-setup-wizard";
@@ -53,7 +67,13 @@ type Reservation = {
   availableConferenceProviders?: Array<"auto" | "zoom">;
   conference?: BookingConferenceState;
 };
-type Tab = "settings" | "availability" | "reservations" | "sharing";
+type ReservationsResponse =
+  paths["/v1/tenants/{tenantId}/booking/reservations"]["get"]["responses"][200]["content"]["application/json"];
+type ReservationAction = "cancel" | "conference";
+type ReservationActionFeedback = {
+  pending?: ReservationAction;
+  error?: string;
+};
 
 const defaultWeekly = (): Period[] => [];
 function isConflict(error: unknown) {
@@ -79,47 +99,56 @@ function displayTime(iso: string, zone: string, locale: string) {
   }
 }
 
-export function BookingPage({
-  services,
-  tenantId,
-}: {
+type BookingPageProps = {
   services: Pick<AppServices, "apiClient">;
   tenantId: number;
-}) {
+};
+
+export function BookingPage(props: BookingPageProps) {
+  return <BookingWorkspace key={props.tenantId} {...props} />;
+}
+
+function BookingWorkspace({ services, tenantId }: BookingPageProps) {
   const t = useMessages(bookingMessages);
   const locale = useAppLocale();
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
-  const [loadedTenant, setLoadedTenant] = useState<number>();
   const [loading, setLoading] = useState(true);
+  const [bootstrapFailed, setBootstrapFailed] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
-  const requestedTab: Tab =
-    searchParams.get("tab") === "reservations" ? "reservations" : "settings";
-  const [tab, setTab] = useState<Tab>(requestedTab);
-  const dateParam = searchParams.get("date");
-  const appointmentDate =
-    dateParam &&
-    /^\d{4}-\d{2}-\d{2}$/.test(dateParam) &&
-    Number.isFinite(Date.parse(dateParam)) &&
-    new Date(dateParam).toISOString().slice(0, 10) === dateParam
-      ? dateParam
-      : null;
+  const { tab = "settings", date: appointmentDate } =
+    readBookingRouteQuery(searchParams);
   const [settings, setSettings] = useState<Settings>();
   const [weekly, setWeekly] = useState<Period[]>([]);
   const [exceptions, setExceptions] = useState<Exception[]>([]);
   const [exceptionDate, setExceptionDate] = useState("");
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [reservationsLoading, setReservationsLoading] = useState(false);
+  const [reservationsLoadFailed, setReservationsLoadFailed] = useState(false);
+  const [reservationActions, setReservationActions] = useState<
+    Record<string, ReservationActionFeedback>
+  >({});
+  const pendingReservationActions = useRef(new Set<string>());
   const [reservationsAttempt, setReservationsAttempt] = useState(0);
-  const [cancellingId, setCancellingId] = useState("");
-  const [generatingConferenceId, setGeneratingConferenceId] = useState("");
+  const [nextReservationPage, setNextReservationPage] = useState<{
+    url: string;
+    cursor: string;
+  }>();
+  const [loadingMoreReservations, setLoadingMoreReservations] = useState(false);
+  const [moreReservationsFailed, setMoreReservationsFailed] = useState(false);
+  const moreReservationsRequest = useRef<AbortController | null>(null);
+  const updatesDuringReservationRead = useRef<Map<string, Reservation> | null>(
+    null,
+  );
   const [conferenceSelections, setConferenceSelections] = useState<
     Record<string, "auto" | "zoom">
   >({});
-  const ready = !!bootstrap && loadedTenant === tenantId;
+  const ready = !!bootstrap;
+  const tZone = bootstrap?.settings.timeZone ?? "UTC";
+  const horizonDays = bootstrap?.settings.horizonDays ?? 30;
   const currentProfessional = useMemo(
     () =>
       bootstrap?.settings.professionals.find(
@@ -149,24 +178,22 @@ export function BookingPage({
   useEffect(() => {
     let active = true;
     setLoading(true);
+    setBootstrapFailed(false);
     setError("");
     setNotice("");
     setBootstrap(undefined);
     setSettings(undefined);
     setReservations([]);
     setConferenceSelections({});
-    setLoadedTenant(undefined);
-    setTab(requestedTab);
     void services.apiClient
       .get<{ data: Bootstrap }>(`/v1/tenants/${tenantId}/booking`)
       .then(({ data }) => {
         if (!active) return;
         setBootstrap(data);
         setSettings(data.settings);
-        setLoadedTenant(tenantId);
       })
       .catch(() => {
-        if (active) setError(t("Booking settings could not be loaded."));
+        if (active) setBootstrapFailed(true);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -174,49 +201,148 @@ export function BookingPage({
     return () => {
       active = false;
     };
-  }, [tenantId, services.apiClient, attempt, t, requestedTab]);
+  }, [tenantId, services.apiClient, attempt]);
+
+  const readReservationPage = useCallback(
+    async (
+      url: string,
+      onPage: (page: ReservationsResponse) => void,
+      signal: AbortSignal,
+    ) => {
+      const updates = new Map<string, Reservation>();
+      updatesDuringReservationRead.current = updates;
+      try {
+        const page = await services.apiClient.get<ReservationsResponse>(url, {
+          signal,
+        });
+        if (signal.aborted) return;
+        onPage({
+          ...page,
+          data: page.data.map((reservation) => {
+            const updated = updates.get(reservation.id);
+            // The conference status can change within the same reservation version.
+            return updated && updated.version >= reservation.version
+              ? updated
+              : reservation;
+          }),
+        });
+      } finally {
+        if (updatesDuringReservationRead.current === updates)
+          updatesDuringReservationRead.current = null;
+      }
+    },
+    [services.apiClient],
+  );
 
   useEffect(() => {
     if (tab !== "reservations" || !ready) return;
-    let active = true;
+    const controller = new AbortController();
+    const { signal } = controller;
     setReservationsLoading(true);
+    setReservationsLoadFailed(false);
+    setReservationActions((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([, feedback]) => feedback.pending),
+      ),
+    );
+    setNextReservationPage(undefined);
+    setLoadingMoreReservations(false);
+    setMoreReservationsFailed(false);
     setError("");
-    const from = appointmentDate
-      ? new Date(`${appointmentDate}T00:00:00`)
-      : new Date();
-    const to = new Date(from);
-    if (appointmentDate) to.setDate(to.getDate() + 1);
-    else
-      to.setTime(
-        from.getTime() +
-          Math.min(90, Math.max(1, settings?.horizonDays ?? 30)) * 86400000,
-      );
-    void services.apiClient
-      .get<{ data: Reservation[] }>(
-        `/v1/tenants/${tenantId}/booking/reservations?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`,
-      )
-      .then(({ data }) => {
-        if (active) setReservations(data);
-      })
+    const now = new Date();
+    const { from, to } = appointmentDate
+      ? bookingDayRange(appointmentDate, tZone)
+      : {
+          from: now,
+          to: new Date(
+            now.getTime() + Math.min(90, Math.max(1, horizonDays)) * 86400000,
+          ),
+        };
+    if (from >= to) {
+      setReservations([]);
+      setReservationsLoading(false);
+      return;
+    }
+    const url = `/v1/tenants/${tenantId}/booking/reservations?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`;
+    void readReservationPage(
+      url,
+      ({ data, nextCursor }) => {
+        setReservations(data);
+        setNextReservationPage(
+          nextCursor ? { url, cursor: nextCursor } : undefined,
+        );
+      },
+      signal,
+    )
       .catch(() => {
-        if (active) setError(t("Reservations could not be loaded."));
+        if (!signal.aborted) setReservationsLoadFailed(true);
       })
       .finally(() => {
-        if (active) setReservationsLoading(false);
+        if (!signal.aborted) setReservationsLoading(false);
       });
     return () => {
-      active = false;
+      controller.abort();
+      moreReservationsRequest.current?.abort();
+      moreReservationsRequest.current = null;
     };
   }, [
     tab,
     ready,
     tenantId,
-    services.apiClient,
+    readReservationPage,
     reservationsAttempt,
-    settings?.horizonDays,
+    horizonDays,
     appointmentDate,
-    t,
+    tZone,
   ]);
+
+  async function loadMoreReservations() {
+    if (!nextReservationPage || moreReservationsRequest.current) return;
+    const { url, cursor } = nextReservationPage;
+    const controller = new AbortController();
+    moreReservationsRequest.current = controller;
+    setLoadingMoreReservations(true);
+    setMoreReservationsFailed(false);
+    try {
+      await readReservationPage(
+        `${url}&cursor=${encodeURIComponent(cursor)}`,
+        ({ data, nextCursor }) => {
+          setReservations((current) => {
+            const byId = new Map(current.map((item) => [item.id, item]));
+            for (const item of data) {
+              const previous = byId.get(item.id);
+              if (!previous || item.version > previous.version)
+                byId.set(item.id, item);
+            }
+            return [...byId.values()];
+          });
+          setNextReservationPage(
+            nextCursor ? { url, cursor: nextCursor } : undefined,
+          );
+        },
+        controller.signal,
+      );
+    } catch {
+      if (!controller.signal.aborted) setMoreReservationsFailed(true);
+    } finally {
+      if (!controller.signal.aborted) {
+        moreReservationsRequest.current = null;
+        setLoadingMoreReservations(false);
+      }
+    }
+  }
+
+  function openTab(next: BookingTab) {
+    setError("");
+    setNotice("");
+    if (next === tab) return;
+    setSearchParams((current) => {
+      const updated = new URLSearchParams(current);
+      if (next === "settings") updated.delete("tab");
+      else updated.set("tab", next);
+      return updated;
+    });
+  }
 
   async function saveSettings(settings: Settings) {
     if (
@@ -279,11 +405,9 @@ export function BookingPage({
 
   async function saveAvailability(event: FormEvent) {
     event.preventDefault();
-    if (!bootstrap || !settings) return;
-    const target = bootstrap.canManage
-      ? settings.professionals.find((item) => item.id === selectedProfessional)
-      : currentProfessional;
-    if (!target) return;
+    if (saving || !bootstrap || !scheduleProfessional) return;
+    const saved = bootstrap.settings;
+    const target = scheduleProfessional;
     setSaving(true);
     setError("");
     setNotice("");
@@ -292,8 +416,8 @@ export function BookingPage({
         ? await services.apiClient.put<{ data: Bootstrap }>(
             `/v1/tenants/${tenantId}/booking`,
             {
-              ...settings,
-              professionals: settings.professionals.map((professional) =>
+              ...saved,
+              professionals: saved.professionals.map((professional) =>
                 professional.id === target.id
                   ? { ...professional, weekly, exceptions }
                   : professional,
@@ -302,10 +426,33 @@ export function BookingPage({
           )
         : await services.apiClient.put<{ data: Bootstrap }>(
             `/v1/tenants/${tenantId}/booking/availability`,
-            { weekly, exceptions, version: settings.version },
+            { weekly, exceptions, version: saved.version },
           );
-      setBootstrap(result.data);
-      setSettings(result.data.settings);
+      const next = result.data;
+      const savedSchedule = next.settings.professionals.find(
+        (professional) => professional.id === target.id,
+      );
+      setBootstrap(next);
+      setSettings((draft) => {
+        if (!draft || draft === saved) return next.settings;
+        if (draft.version !== saved.version) return draft;
+        return {
+          ...draft,
+          version: next.settings.version,
+          professionals: draft.professionals.map((professional) =>
+            professional.id === target.id && savedSchedule
+              ? {
+                  ...professional,
+                  weekly:
+                    professional.weekly === target.weekly
+                      ? savedSchedule.weekly
+                      : professional.weekly,
+                  exceptions: savedSchedule.exceptions,
+                }
+              : professional,
+          ),
+        };
+      });
       setNotice(t("Availability saved."));
     } catch (exception) {
       setError(
@@ -335,12 +482,31 @@ export function BookingPage({
     );
   }, [bootstrap, selectedProfessional]);
   const scheduleProfessional = bootstrap?.canManage
-    ? settings?.professionals.find((item) => item.id === selectedProfessional)
+    ? bootstrap.settings.professionals.find(
+        (item) => item.id === selectedProfessional,
+      )
     : currentProfessional;
+  const previousSchedule = useRef<typeof scheduleProfessional>(undefined);
 
   useEffect(() => {
-    setWeekly(scheduleProfessional?.weekly ?? defaultWeekly());
-    setExceptions(scheduleProfessional?.exceptions ?? []);
+    const previous = previousSchedule.current;
+    previousSchedule.current = scheduleProfessional;
+    const sameProfessional =
+      previous?.id === scheduleProfessional?.id &&
+      previous?.principalId === scheduleProfessional?.principalId;
+    // Other settings writes can return a new copy of an unchanged schedule.
+    if (
+      !sameProfessional ||
+      JSON.stringify(previous?.weekly) !==
+        JSON.stringify(scheduleProfessional?.weekly)
+    )
+      setWeekly(scheduleProfessional?.weekly ?? defaultWeekly());
+    if (
+      !sameProfessional ||
+      JSON.stringify(previous?.exceptions) !==
+        JSON.stringify(scheduleProfessional?.exceptions)
+    )
+      setExceptions(scheduleProfessional?.exceptions ?? []);
   }, [scheduleProfessional]);
 
   function editExceptionPeriod(
@@ -379,6 +545,24 @@ export function BookingPage({
     );
   }
 
+  function applyConnectionResult(previous: Bootstrap, next: Bootstrap) {
+    const sameEditor =
+      previous.canManage === next.canManage &&
+      previous.principalId === next.principalId;
+    // An unchanged version still has the same saved professional schedules.
+    // Keep their references so a connection response does not reset the editor.
+    const savedSettings =
+      sameEditor && previous.settings.version === next.settings.version
+        ? { ...next.settings, professionals: previous.settings.professionals }
+        : next.settings;
+    setBootstrap({ ...next, settings: savedSettings });
+    setSettings((draft) =>
+      draft && draft !== previous.settings && sameEditor
+        ? draft
+        : savedSettings,
+    );
+  }
+
   async function changeCalendar(
     provider: null | "google_calendar" | "outlook",
     conferenceProvider?: "auto" | "zoom",
@@ -392,8 +576,7 @@ export function BookingPage({
         `/v1/tenants/${tenantId}/booking/calendar`,
         { provider, ...(conferenceProvider ? { conferenceProvider } : {}) },
       );
-      setBootstrap(result.data);
-      setSettings(result.data.settings);
+      applyConnectionResult(bootstrap, result.data);
       setNotice(t("Availability saved."));
     } catch {
       setError(t("Availability could not be saved. Reload and retry."));
@@ -412,8 +595,7 @@ export function BookingPage({
         `/v1/tenants/${tenantId}/booking/agenda`,
         { enabled },
       );
-      setBootstrap(result.data);
-      setSettings(result.data.settings);
+      applyConnectionResult(bootstrap, result.data);
       setNotice(
         t(
           enabled
@@ -433,6 +615,7 @@ export function BookingPage({
   }
 
   async function cancelReservation(reservation: Reservation) {
+    if (pendingReservationActions.current.has(reservation.id)) return;
     const provider = reservation.calendarProvider
       ? calendarProviderName(reservation.calendarProvider)
       : null;
@@ -447,25 +630,7 @@ export function BookingPage({
       )
     )
       return;
-    setCancellingId(reservation.id);
-    setError("");
-    setNotice("");
-    try {
-      const result = await services.apiClient.post<{ data: Reservation }>(
-        `/v1/tenants/${tenantId}/booking/reservations/${encodeURIComponent(reservation.id)}/cancel`,
-        { version: reservation.version },
-      );
-      setReservations((current) =>
-        current.map((item) =>
-          item.id === reservation.id ? result.data : item,
-        ),
-      );
-      setNotice(t("Reservation cancelled."));
-    } catch {
-      setError(t("Reservation could not be cancelled. Refresh and retry."));
-    } finally {
-      setCancellingId("");
-    }
+    await runReservationAction(reservation, "cancel");
   }
 
   function calendarProviderName(provider: "google_calendar" | "outlook") {
@@ -532,36 +697,55 @@ export function BookingPage({
     );
   }
 
-  async function generateConference(reservation: Reservation) {
-    setGeneratingConferenceId(reservation.id);
-    setError("");
+  async function runReservationAction(
+    reservation: Reservation,
+    action: ReservationAction,
+  ) {
+    const { id, version } = reservation;
+    if (pendingReservationActions.current.has(id)) return;
+    pendingReservationActions.current.add(id);
+    setReservationActions((current) => ({
+      ...current,
+      [id]: { pending: action },
+    }));
     setNotice("");
     try {
+      const provider =
+        action === "conference"
+          ? selectedConferenceProvider(reservation)
+          : undefined;
       const result = await services.apiClient.post<{ data: Reservation }>(
-        `/v1/tenants/${tenantId}/booking/reservations/${encodeURIComponent(reservation.id)}/conference`,
-        {
-          version: reservation.version,
-          ...(selectedConferenceProvider(reservation)
-            ? { provider: selectedConferenceProvider(reservation) }
-            : {}),
-        },
+        `/v1/tenants/${tenantId}/booking/reservations/${encodeURIComponent(id)}/${action}`,
+        { version, ...(provider ? { provider } : {}) },
       );
+      updatesDuringReservationRead.current?.set(id, result.data);
       setReservations((current) =>
         current.map((item) =>
-          item.id === reservation.id ? result.data : item,
+          item.id === id && item.version <= result.data.version
+            ? result.data
+            : item,
         ),
       );
       setNotice(
-        t("Video meeting link is being prepared. Refresh to check again."),
+        action === "cancel"
+          ? t("Reservation cancelled.")
+          : t("Video meeting link is being prepared. Refresh to check again."),
       );
+      setReservationActions((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
     } catch {
-      setError(
-        t(
-          "Video meeting link request failed. Check the calendar connection and retry.",
-        ),
-      );
+      const error =
+        action === "cancel"
+          ? t("Reservation could not be cancelled. Refresh and retry.")
+          : t(
+              "Video meeting link request failed. Check the calendar connection and retry.",
+            );
+      setReservationActions((current) => ({ ...current, [id]: { error } }));
     } finally {
-      setGeneratingConferenceId("");
+      pendingReservationActions.current.delete(id);
     }
   }
 
@@ -571,14 +755,14 @@ export function BookingPage({
         className="mx-auto grid max-w-5xl gap-5 px-4 py-8 md:px-6"
         aria-busy={loading}
       >
-        {error ? (
+        {bootstrapFailed ? (
           <p role="alert" className="text-sm text-destructive">
-            {error}
+            {t("Booking settings could not be loaded.")}
           </p>
         ) : (
           <RouteLoading label={t("Loading booking settings…")} />
         )}
-        {error && (
+        {bootstrapFailed && (
           <ResponsiveActionButton
             icon={RefreshCw}
             type="button"
@@ -591,7 +775,6 @@ export function BookingPage({
       </main>
     );
 
-  const tZone = settings?.timeZone ?? "UTC";
   const publicReady =
     bootstrap.settings.enabled && bootstrap.settings.published;
   return (
@@ -621,32 +804,26 @@ export function BookingPage({
         aria-label={t("Booking settings")}
         className="grid grid-cols-2 gap-1 border-b pb-2 sm:flex sm:flex-wrap sm:gap-2"
       >
-        {(["settings", "availability", "reservations", "sharing"] as const).map(
-          (value) => (
-            <Button
-              key={value}
-              type="button"
-              className="min-h-11 h-auto min-w-0 whitespace-normal px-2 py-3 sm:px-4"
-              variant={tab === value ? "secondary" : "ghost"}
-              aria-current={tab === value ? "page" : undefined}
-              onClick={() => {
-                setTab(value);
-                setError("");
-                setNotice("");
-              }}
-            >
-              {t(
-                value === "settings"
-                  ? "Booking settings"
-                  : value === "availability"
-                    ? "Availability"
-                    : value === "reservations"
-                      ? "Reservations"
-                      : "Booking links",
-              )}
-            </Button>
-          ),
-        )}
+        {bookingTabs.map((value) => (
+          <Button
+            key={value}
+            type="button"
+            className="min-h-11 h-auto min-w-0 whitespace-normal px-2 py-3 sm:px-4"
+            variant={tab === value ? "secondary" : "ghost"}
+            aria-current={tab === value ? "page" : undefined}
+            onClick={() => openTab(value)}
+          >
+            {t(
+              value === "settings"
+                ? "Booking settings"
+                : value === "availability"
+                  ? "Availability"
+                  : value === "reservations"
+                    ? "Reservations"
+                    : "Booking links",
+            )}
+          </Button>
+        ))}
       </nav>
 
       {notice && (
@@ -688,7 +865,7 @@ export function BookingPage({
               { timeZone: tZone },
             )}
           </p>
-          <Button type="button" onClick={() => setTab("availability")}>
+          <Button type="button" onClick={() => openTab("availability")}>
             {t("Availability")}
           </Button>
         </section>
@@ -729,11 +906,12 @@ export function BookingPage({
               <select
                 className="h-9 min-w-0 max-w-full rounded-md border bg-background px-3 max-sm:h-11"
                 value={selectedProfessional}
+                disabled={saving}
                 onChange={(event) =>
                   setSelectedProfessional(event.target.value)
                 }
               >
-                {settings?.professionals.map((professional) => (
+                {bootstrap.settings.professionals.map((professional) => (
                   <option key={professional.id} value={professional.id}>
                     {bootstrap.candidates.find(
                       (candidate) =>
@@ -751,7 +929,7 @@ export function BookingPage({
                 onChange={setWeekly}
                 disabled={saving}
               />
-              <fieldset className="grid gap-3">
+              <fieldset disabled={saving} className="grid gap-3">
                 <legend className="text-base font-semibold">
                   {t("Exceptions")}
                 </legend>
@@ -1095,7 +1273,8 @@ export function BookingPage({
                 {t("Reservations for %{date}", {
                   date: new Intl.DateTimeFormat(locale, {
                     dateStyle: "long",
-                  }).format(new Date(`${appointmentDate}T00:00:00`)),
+                    timeZone: "UTC",
+                  }).format(new Date(`${appointmentDate}T00:00:00Z`)),
                 })}
               </p>
               <Button
@@ -1120,9 +1299,9 @@ export function BookingPage({
               <div className="h-10 animate-pulse rounded bg-muted" />
               <div className="h-16 animate-pulse rounded bg-muted" />
             </div>
-          ) : error ? (
+          ) : reservationsLoadFailed ? (
             <p role="alert" className="text-sm text-destructive">
-              {error}
+              {t("Reservations could not be loaded.")}
             </p>
           ) : reservations.length === 0 ? (
             <p className="rounded-lg border p-6 text-sm text-muted-foreground">
@@ -1222,9 +1401,10 @@ export function BookingPage({
                                       selectedConferenceProvider(reservation) ??
                                       "auto"
                                     }
-                                    disabled={
-                                      generatingConferenceId === reservation.id
-                                    }
+                                    disabled={Boolean(
+                                      reservationActions[reservation.id]
+                                        ?.pending,
+                                    )}
                                     onChange={(event) =>
                                       setConferenceSelections((current) => ({
                                         ...current,
@@ -1251,13 +1431,19 @@ export function BookingPage({
                                 variant="outline"
                                 disabled={
                                   !reservation.canGenerateConference ||
-                                  generatingConferenceId === reservation.id
+                                  Boolean(
+                                    reservationActions[reservation.id]?.pending,
+                                  )
                                 }
                                 onClick={() =>
-                                  void generateConference(reservation)
+                                  void runReservationAction(
+                                    reservation,
+                                    "conference",
+                                  )
                                 }
                               >
-                                {generatingConferenceId === reservation.id
+                                {reservationActions[reservation.id]?.pending ===
+                                "conference"
                                   ? t("Generating video link…")
                                   : t("Generate video link")}
                               </Button>
@@ -1276,13 +1462,24 @@ export function BookingPage({
                             type="button"
                             size="sm"
                             variant="outline"
-                            disabled={cancellingId === reservation.id}
+                            disabled={Boolean(
+                              reservationActions[reservation.id]?.pending,
+                            )}
                             onClick={() => void cancelReservation(reservation)}
                           >
-                            {cancellingId === reservation.id
-                              ? t("Loading booking settings…")
+                            {reservationActions[reservation.id]?.pending ===
+                            "cancel"
+                              ? t("Cancelling reservation…")
                               : t("Cancel reservation")}
                           </ResponsiveActionButton>
+                        )}
+                        {reservationActions[reservation.id]?.error && (
+                          <p
+                            role="alert"
+                            className="mt-2 max-w-56 text-xs text-destructive"
+                          >
+                            {reservationActions[reservation.id]?.error}
+                          </p>
                         )}
                       </td>
                     </tr>
@@ -1291,6 +1488,29 @@ export function BookingPage({
               </table>
             </div>
           )}
+          {nextReservationPage &&
+            !reservationsLoading &&
+            !reservationsLoadFailed && (
+              <div className="grid justify-items-start gap-2">
+                {moreReservationsFailed && (
+                  <p role="alert" className="text-sm text-destructive">
+                    {t("More reservations could not be loaded.")}
+                  </p>
+                )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={loadingMoreReservations}
+                  onClick={() => void loadMoreReservations()}
+                >
+                  {t(
+                    loadingMoreReservations
+                      ? "Loading reservations…"
+                      : "Load more reservations",
+                  )}
+                </Button>
+              </div>
+            )}
         </section>
       )}
     </main>

@@ -3,6 +3,11 @@ import { z } from "zod";
 import type { SaviaApiClient } from "../savia-api";
 
 const nonEmptyString = z.string().trim().min(1);
+const storeActionInput = z.object({
+  pluginId: nonEmptyString.describe("Store plugin id (custom.*)"),
+  actionId: nonEmptyString.describe("Action id from the catalog"),
+  input: z.record(z.string(), z.unknown()).describe("Action input payload"),
+});
 
 /**
  * Plugins del store visibles al asistente. Solo acciones de lectura
@@ -34,13 +39,8 @@ export function registerStoreAssistantTools(
       annotations: readOnly,
       description:
         "Execute a read-only store plugin action listed by savia_store_catalog. Simulation and HTTP GET actions only; anything else is rejected.",
-      input: z.object({
-        pluginId: nonEmptyString.describe("Store plugin id (custom.*)"),
-        actionId: nonEmptyString.describe("Action id from the catalog"),
-        input: z
-          .record(z.string(), z.unknown())
-          .describe("Action input payload"),
-      }),
+      input: storeActionInput,
+      inputSchema: z.toJSONSchema(storeActionInput, { target: "draft-7" }),
     },
     async ({ pluginId, actionId, input }) => {
       const client = clientForRequest();

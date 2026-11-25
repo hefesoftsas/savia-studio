@@ -12,6 +12,8 @@ import { settingsMessages } from "@/i18n/locales/settings";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   Ban,
+  CircleAlert,
+  ChevronsUpDown,
   KeyRound,
   LogOut,
   Plus,
@@ -23,6 +25,8 @@ import {
   UsersRound,
 } from "lucide-react";
 import {
+  maxLength,
+  minLength,
   required,
   useCanAccess,
   useChoicesContext,
@@ -38,6 +42,7 @@ import {
   useRedirect,
   useRefresh,
   useResourceContext,
+  useSaveContext,
   useShowContext,
   useTranslate,
 } from "ra-core";
@@ -45,7 +50,9 @@ import MicrosoftExcel from "@thesvg/react/microsoft-excel";
 import { useQueryClient } from "@tanstack/react-query";
 import { useFormContext, useWatch } from "react-hook-form";
 import {
+  AutocompleteInput,
   BooleanInput,
+  CancelButton,
   Count,
   Create,
   CreateButton,
@@ -53,9 +60,11 @@ import {
   Edit,
   EditButton,
   ExportButton,
+  FormToolbar,
   List,
   ListPagination,
   ReferenceInput,
+  SaveButton,
   SelectInput,
   Show,
   ShowButton,
@@ -65,10 +74,17 @@ import {
 import { Confirm } from "@/components/admin/confirm";
 import { isOfflineError } from "@/offline/offline-error";
 import { applyRealtimeListEvent } from "@/realtime/realtime-list";
-import { useRealtimeTopics } from "@/realtime/use-realtime";
-import type { TenantRecord } from "@/api/tenant-data-provider";
+import {
+  useRealtimeTopics,
+  type RealtimeChangeEvent,
+} from "@/realtime/use-realtime";
+import {
+  tenantSearchText,
+  type TenantRecord,
+} from "@/api/tenant-data-provider";
 import type {
   IdentityUserDataProvider,
+  UserFormData,
   UserRecord,
 } from "@/api/identity-user-data-provider";
 import type { AgencyAccessRole } from "@/api/identity-client";
@@ -76,12 +92,26 @@ import type { AuthPermissions } from "@/auth/auth-session";
 import { TenantUserCapacity } from "./tenant-user-capacity";
 import { TenantSignInSettingsLink } from "@/features/tenant-sso/tenant-sign-in-links";
 import {
+  platformAdminUserUpdateData,
   tenantAdminTenantId,
   tenantAdminUserUpdateData,
   userCreateScope,
 } from "./tenant-user-scope";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  Command,
+  CommandEmpty,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { IconButtonWithTooltip } from "@/components/admin/icon-button-with-tooltip";
 import {
   Select,
@@ -93,6 +123,12 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const requiredField = required("ra.validation.required");
+const temporaryPasswordValidators = [minLength(12), maxLength(128)];
+const requiredNameField = Object.assign(
+  (value: string | null | undefined, values: unknown) =>
+    requiredField(value?.trim(), values),
+  { isRequired: true },
+);
 
 const tenantRoleChoices: { id: AgencyAccessRole; name: string }[] = [
   { id: "tenant_admin", name: "Administrador de tenant" },
@@ -403,11 +439,31 @@ function TenantUserScope() {
   );
 }
 
+function useUserRealtimeScope() {
+  const { permissions, isPending } = usePermissions<AuthPermissions>();
+  const platformCanEdit = Boolean(permissions?.canManageIdentity);
+  const tenantId = platformCanEdit
+    ? undefined
+    : tenantAdminTenantId(permissions?.memberships);
+  return {
+    platformCanEdit,
+    subscription: {
+      topics: platformCanEdit ? ["users"] : ["access-control"],
+      tenantId,
+      enabled: !isPending && (platformCanEdit || tenantId !== undefined),
+      accepts: (event: RealtimeChangeEvent) =>
+        platformCanEdit || event.collection === "memberships",
+    },
+  };
+}
+
 function UserListActions() {
   const translate = useTranslate();
   const queryClient = useQueryClient();
+  const { platformCanEdit, subscription } = useUserRealtimeScope();
+  const { accepts, ...scope } = subscription;
   useRealtimeTopics({
-    topics: ["users"],
+    ...scope,
     onConnected: (reason) => {
       if (reason === "subscription-change") return;
       void queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -416,7 +472,12 @@ function UserListActions() {
       });
     },
     onEvent: (event) => {
-      applyRealtimeListEvent(queryClient, "users", event);
+      if (!accepts(event)) return;
+      if (platformCanEdit) {
+        applyRealtimeListEvent(queryClient, "users", event);
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["users"] });
+      }
       void queryClient.invalidateQueries({
         queryKey: ["tenant-user-capacity"],
       });
@@ -556,6 +617,12 @@ function UserTable({ storeKey }: { storeKey: string }) {
 
 export function UserCreate() {
   const translate = useTranslate();
+  const t = useMessages(settingsMessages);
+  const notify = useNotify();
+  const queryClient = useQueryClient();
+  const [passwordError, setPasswordError] = useState<{ message: string }>();
+  const [submissionError, setSubmissionError] =
+    useState<keyof typeof settingsMessages>();
   const { permissions, isPending } = usePermissions<AuthPermissions>();
   const scope = userCreateScope(permissions);
   const { platformCanEdit, tenantId } = scope;
@@ -565,7 +632,49 @@ export function UserCreate() {
     return <p role="alert">{translate("savia.users.tenantAdminRequired")}</p>;
 
   return (
-    <Create title={translate("savia.users.newUser", { _: "Nuevo usuario" })}>
+    <Create
+      title={translate("savia.users.newUser", { _: "Nuevo usuario" })}
+      mutationOptions={{
+        onMutate: () => {
+          setPasswordError(undefined);
+          setSubmissionError(undefined);
+        },
+        onError: (error) => {
+          const { code } = asApiErrorLike(error);
+          if (code === "USER_TEMPORARY_PASSWORD_INVALID") {
+            setPasswordError({
+              message: t(
+                "La contraseña temporal debe tener entre 12 y 128 caracteres.",
+              ),
+            });
+            return;
+          }
+          if (code === "TENANT_ACTIVE_USER_LIMIT_REACHED") {
+            setSubmissionError(userUpdateErrorMessage(error));
+            void queryClient.invalidateQueries({
+              queryKey: ["tenant-user-capacity"],
+            });
+            return;
+          }
+          if (
+            code === "COMMERCIAL_TENANT_REQUIRED" ||
+            code === "TENANT_NOT_FOUND"
+          ) {
+            setSubmissionError(userUpdateErrorMessage(error));
+            void queryClient.invalidateQueries({ queryKey: ["tenants"] });
+            return;
+          }
+          notify(
+            typeof error === "string"
+              ? error
+              : error instanceof Error
+                ? error.message
+                : translate("ra.notification.http_error"),
+            { type: "error" },
+          );
+        },
+      }}
+    >
       <SimpleForm
         className="max-w-5xl gap-8"
         defaultValues={scope.defaultValues}
@@ -574,11 +683,18 @@ export function UserCreate() {
         <UserInitialAccessFields
           tenantAdminTenantId={tenantId}
           platformCanEdit={platformCanEdit}
+          passwordError={passwordError}
         />
         <UserCreateCapacity
           tenantAdminTenantId={tenantId}
           platformCanEdit={platformCanEdit}
         />
+        {submissionError && (
+          <Alert variant="destructive">
+            <CircleAlert aria-hidden="true" />
+            <AlertDescription>{t(submissionError)}</AlertDescription>
+          </Alert>
+        )}
       </SimpleForm>
     </Create>
   );
@@ -591,7 +707,10 @@ function UserCreateCapacity({
   tenantAdminTenantId?: number;
   platformCanEdit: boolean;
 }) {
-  const formTenantId = useWatch({ name: "tenantId" });
+  const [formTenantId, platformAdmin] = useWatch({
+    name: ["tenantId", "platformAdmin"],
+  });
+  if (platformCanEdit && platformAdmin) return null;
   const parsedTenantId = Number(formTenantId);
   return (
     <TenantUserCapacity
@@ -607,22 +726,49 @@ function UserCreateCapacity({
   );
 }
 
+const userEditResetOptions = { keepDirtyValues: true };
+
+type UserSubmissionError = {
+  userId: string;
+  message: keyof typeof settingsMessages;
+};
+
+function userUpdateErrorMessage(error: unknown): keyof typeof settingsMessages {
+  const { code } = asApiErrorLike(error);
+  if (code === "TENANT_ACTIVE_USER_LIMIT_REACHED")
+    return "El tenant seleccionado alcanzó su límite de usuarios activos.";
+  if (
+    code === "COMMERCIAL_MEMBERSHIP_REQUIRED" ||
+    code === "COMMERCIAL_TENANT_REQUIRED" ||
+    code === "TENANT_NOT_FOUND"
+  )
+    return "Selecciona un tenant comercial activo y un rol.";
+  if (code === "REQUEST_TIMEOUT" || isOfflineError(error))
+    return "No se pudo confirmar el guardado. Verifica el acceso actual del usuario antes de reintentar.";
+  return "No fue posible guardar los cambios del usuario.";
+}
+
 export function UserEdit() {
   const translate = useTranslate();
-  const { permissions } = usePermissions<AuthPermissions>();
-  const platformCanEdit = Boolean(permissions?.canManageIdentity);
+  const { platformCanEdit, subscription } = useUserRealtimeScope();
+  const [submissionError, setSubmissionError] = useState<UserSubmissionError>();
   return (
     <Edit
       title={<UserEditTitle />}
       actions={<UserEditActions />}
-      mutationMode="optimistic"
-      transform={platformCanEdit ? undefined : tenantAdminUserUpdateData}
+      mutationMode="pessimistic"
+      mutationOptions={{
+        onMutate: () => setSubmissionError(undefined),
+        onError: (error, { id }) =>
+          setSubmissionError({
+            userId: String(id),
+            message: userUpdateErrorMessage(error),
+          }),
+      }}
     >
-      <SimpleForm
-        className="max-w-5xl gap-6"
-        resetOptions={{ keepDirtyValues: true }}
-      >
-        <ResourceEditSync resource="users" />
+      <UserEditForm platformCanEdit={platformCanEdit}>
+        <ResourceEditSync resource="users" subscription={subscription} />
+        <UserSubmissionAlert error={submissionError} />
         <Tabs defaultValue="identity" className="w-full gap-6">
           <div className="max-w-full overflow-x-auto">
             <TabsList
@@ -676,8 +822,71 @@ export function UserEdit() {
             </>
           )}
         </Tabs>
-      </SimpleForm>
+      </UserEditForm>
     </Edit>
+  );
+}
+
+function UserEditForm({
+  platformCanEdit,
+  children,
+}: {
+  platformCanEdit: boolean;
+  children: ReactNode;
+}) {
+  const record = useRecordContext<UserRecord>();
+  const { save } = useSaveContext();
+  const buildUpdate = platformCanEdit
+    ? platformAdminUserUpdateData
+    : tenantAdminUserUpdateData;
+  const getChanges = (values: UserFormData) =>
+    buildUpdate(values, { previousData: record });
+  return (
+    <SimpleForm
+      className="max-w-5xl gap-6"
+      resetOptions={userEditResetOptions}
+      toolbar={<UserEditToolbar getChanges={getChanges} />}
+      onSubmit={async (values: UserFormData) => {
+        const changes = getChanges(values);
+        if (Object.keys(changes).length > 0) return save?.(changes);
+      }}
+    >
+      {children}
+    </SimpleForm>
+  );
+}
+
+function UserEditToolbar({
+  getChanges,
+}: {
+  getChanges: (values: UserFormData) => UserFormData;
+}) {
+  const values = useWatch<UserFormData>();
+  return (
+    <FormToolbar>
+      <div className="flex flex-row justify-end gap-2">
+        <CancelButton />
+        <SaveButton disabled={Object.keys(getChanges(values)).length === 0} />
+      </div>
+    </FormToolbar>
+  );
+}
+
+function UserSubmissionAlert({
+  error,
+  className,
+}: {
+  error?: UserSubmissionError;
+  className?: string;
+}) {
+  const record = useRecordContext<UserRecord>();
+  const t = useMessages(settingsMessages);
+  if (!error || record?.id !== error.userId) return null;
+  return (
+    <Alert variant="destructive" className={className}>
+      <CircleAlert aria-hidden="true" />
+      <AlertDescription>{t(error.message)}</AlertDescription>
+    </Alert>
   );
 }
 
@@ -713,9 +922,10 @@ function UserEditActions() {
 }
 
 export function UserShow() {
+  const { subscription } = useUserRealtimeScope();
   return (
     <Show title={<UserShowTitle />} actions={<UserShowActions />}>
-      <ResourceReadSync resource="users" />
+      <ResourceReadSync resource="users" subscription={subscription} />
       <UserShowContent />
     </Show>
   );
@@ -852,6 +1062,7 @@ function UserShowContent() {
 
 function UserIdentityFields({ edit = false }: { edit?: boolean }) {
   const translate = useTranslate();
+  const record = useRecordContext<UserRecord>();
   return (
     <UserSection
       title={translate("savia.users.sections.identity", { _: "Identidad" })}
@@ -868,12 +1079,12 @@ function UserIdentityFields({ edit = false }: { edit?: boolean }) {
       <TextInput
         source="firstName"
         label={translate("savia.users.fields.firstName", { _: "Nombres" })}
-        validate={requiredField}
+        validate={!edit || record?.firstName ? requiredNameField : undefined}
       />
       <TextInput
         source="lastName"
         label={translate("savia.users.fields.lastName", { _: "Apellidos" })}
-        validate={requiredField}
+        validate={!edit || record?.lastName ? requiredNameField : undefined}
       />
       <TextInput
         source="email"
@@ -891,11 +1102,23 @@ function UserIdentityFields({ edit = false }: { edit?: boolean }) {
 function UserInitialAccessFields({
   tenantAdminTenantId: ownTenantId,
   platformCanEdit,
+  passwordError,
 }: {
   tenantAdminTenantId?: number;
   platformCanEdit: boolean;
+  passwordError?: { message: string };
 }) {
   const translate = useTranslate();
+  const platformAdmin = useWatch({ name: "platformAdmin" });
+  const { setError } = useFormContext<UserFormData>();
+  useEffect(() => {
+    if (!passwordError) return;
+    setError(
+      "temporaryPassword",
+      { type: "server", message: passwordError.message },
+      { shouldFocus: true },
+    );
+  }, [passwordError, setError]);
   return (
     <UserSection
       title={translate("savia.users.sections.initialAccess", {
@@ -918,8 +1141,9 @@ function UserInitialAccessFields({
         })}
         type="password"
         autoComplete="new-password"
+        validate={temporaryPasswordValidators}
         helperText={translate("savia.tenants.fields.temporaryPasswordHelper", {
-          _: "Opcional. Si se deja vacía, se enviará un enlace para definirla.",
+          _: "Si la ingresas, usa de 12 a 128 caracteres. Si la dejas vacía, se enviará un enlace para definirla.",
         })}
         className="md:col-span-2"
       />
@@ -935,11 +1159,13 @@ function UserInitialAccessFields({
             })}
             className="md:col-span-2"
           />
-          <CommercialTenantInput
-            label={translate("savia.users.fields.commercialTenant", {
-              _: "Tenant comercial",
-            })}
-          />
+          {!platformAdmin && (
+            <CommercialTenantInput
+              label={translate("savia.users.fields.commercialTenant", {
+                _: "Tenant comercial",
+              })}
+            />
+          )}
         </>
       ) : (
         <TextInput
@@ -953,13 +1179,15 @@ function UserInitialAccessFields({
           })}
         />
       )}
-      <SelectInput
-        source="agencyRole"
-        label={translate("savia.users.fields.tenantRole", {
-          _: "Rol en el tenant",
-        })}
-        choices={getTenantRoleChoices(translate)}
-      />
+      {(!platformCanEdit || !platformAdmin) && (
+        <SelectInput
+          source="agencyRole"
+          label={translate("savia.users.fields.tenantRole", {
+            _: "Rol en el tenant",
+          })}
+          choices={getTenantRoleChoices(translate)}
+        />
+      )}
       <UserAccessRoles />
     </UserSection>
   );
@@ -967,6 +1195,9 @@ function UserInitialAccessFields({
 
 function UserPlatformAccessFields() {
   const translate = useTranslate();
+  const { record } = useEditContext<UserRecord>();
+  const platformAdmin = useWatch({ name: "platformAdmin" });
+  const demoting = record?.platformAdmin && platformAdmin === false;
   return (
     <UserSection
       title={translate("savia.users.sections.platformAccess", {
@@ -986,17 +1217,26 @@ function UserPlatformAccessFields() {
         })}
         className="md:col-span-2"
       />
-      <CommercialTenantInput
-        label={translate("savia.users.fields.commercialTenantRemove", {
-          _: "Tenant comercial al retirar acceso global",
-        })}
-      />
+      <ReferenceInput
+        source="tenantId"
+        reference="tenants"
+        perPage={100}
+        filter={{ kind: "commercial", isActive: true }}
+      >
+        <AutocompleteInput
+          label={translate("savia.users.fields.commercialTenantRemove", {
+            _: "Tenant comercial al retirar acceso global",
+          })}
+          validate={demoting ? requiredField : undefined}
+        />
+      </ReferenceInput>
       <SelectInput
         source="agencyRole"
         label={translate("savia.users.fields.tenantRoleRemove", {
           _: "Rol al retirar acceso global",
         })}
         choices={getTenantRoleChoices(translate)}
+        validate={demoting ? requiredField : undefined}
       />
     </UserSection>
   );
@@ -1008,7 +1248,7 @@ function CommercialTenantInput({ label }: { label: string }) {
       source="tenantId"
       reference="tenants"
       perPage={100}
-      filter={{ kind: "commercial" }}
+      filter={{ kind: "commercial", isActive: true }}
     >
       <CommercialTenantChoiceInput label={label} />
     </ReferenceInput>
@@ -1016,26 +1256,116 @@ function CommercialTenantInput({ label }: { label: string }) {
 }
 
 function CommercialTenantChoiceInput({ label }: { label: string }) {
-  const { allChoices = [] } = useChoicesContext();
+  const {
+    allChoices = [],
+    filterValues,
+    hasNextPage,
+    isFetching,
+  } = useChoicesContext();
   const tenants = allChoices as TenantRecord[];
   const { register, setValue } = useFormContext();
+  const tenantId = useWatch({ name: "tenantId" });
+  const onlyTenant =
+    !filterValues?.q && !hasNextPage && tenants.length === 1
+      ? tenants[0]
+      : undefined;
+  const useOnlyTenant =
+    onlyTenant &&
+    (tenantId == null ||
+      tenantId === "" ||
+      String(tenantId) === String(onlyTenant.id));
 
   useEffect(() => {
-    if (tenants.length === 1) {
-      setValue("tenantId", tenants[0].id, {
+    if (useOnlyTenant && !isFetching && (tenantId == null || tenantId === "")) {
+      setValue("tenantId", onlyTenant.id, {
         shouldDirty: false,
         shouldTouch: false,
       });
     }
-  }, [setValue, tenants]);
+  }, [isFetching, onlyTenant, setValue, tenantId, useOnlyTenant]);
 
-  if (tenants.length === 1) {
+  if (useOnlyTenant && !isFetching) {
     return (
       <input type="hidden" {...register("tenantId", { valueAsNumber: true })} />
     );
   }
 
-  return <SelectInput label={label} />;
+  return <AutocompleteInput label={label} validate={requiredField} />;
+}
+
+function TenantTransferPicker({
+  label,
+  tenants,
+  selected,
+  onSelect,
+  disabled,
+}: {
+  label: string;
+  tenants: TenantRecord[];
+  selected?: TenantRecord;
+  onSelect: (id: string) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const t = useMessages(settingsMessages);
+  const translate = useTranslate();
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-label={label}
+          aria-expanded={open}
+          disabled={disabled}
+          className="w-full min-w-0 justify-between gap-2 font-normal"
+        >
+          <span className="truncate">
+            {selected?.name ??
+              translate("savia.users.fields.selectTenantPlaceholder", {
+                _: "Selecciona un tenant",
+              })}
+          </span>
+          <ChevronsUpDown className="size-4 opacity-50" aria-hidden="true" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-(--radix-popover-trigger-width) p-0"
+      >
+        <Command
+          filter={(_id, search, keywords = []) => {
+            const term = tenantSearchText(search);
+            return keywords.some((value) => value.includes(term)) ? 1 : 0;
+          }}
+        >
+          <CommandInput
+            placeholder={translate("ra.action.search", { _: "Buscar" })}
+          />
+          <CommandList>
+            <CommandEmpty>{t("No matching item found.")}</CommandEmpty>
+            {tenants.map((tenant) => (
+              <CommandItem
+                key={tenant.id}
+                value={String(tenant.id)}
+                keywords={[
+                  tenantSearchText(tenant.name),
+                  tenantSearchText(tenant.idSlug),
+                ]}
+                onSelect={(id) => {
+                  onSelect(id);
+                  setOpen(false);
+                }}
+              >
+                {tenant.name}
+              </CommandItem>
+            ))}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 function UserMembershipEditor() {
@@ -1048,48 +1378,46 @@ function UserMembershipEditor() {
   const [tenantId, setTenantId] = useState("");
   const [role, setRole] = useState<AgencyAccessRole>("viewer");
   const [pending, setPending] = useState(false);
+  const [transferError, setTransferError] = useState<UserSubmissionError>();
   const { data: tenants = [] } = useGetList<TenantRecord>("tenants", {
-    pagination: { page: 1, perPage: 100 },
+    // The tenants endpoint already delivers the full authorized catalog.
+    pagination: { page: 1, perPage: Number.MAX_SAFE_INTEGER },
     sort: { field: "name", order: "ASC" },
-    filter: { kind: "commercial" },
+    filter: { kind: "commercial", isActive: true },
   });
+  const membership = record?.memberships[0];
+  const assignedTenantId = membership ? String(membership.tenantId) : "";
+  const savedRole = membership?.role;
+  const onlyTenant = tenants.length === 1 ? tenants[0] : undefined;
+  const fixedTenant =
+    onlyTenant &&
+    (!assignedTenantId || assignedTenantId === String(onlyTenant.id))
+      ? onlyTenant
+      : undefined;
+  const selectedTenant =
+    fixedTenant ?? tenants.find((tenant) => String(tenant.id) === tenantId);
+  const destinationId = Number(selectedTenant?.id);
+  const canTransfer =
+    !pending && Number.isSafeInteger(destinationId) && destinationId > 0;
 
   useEffect(() => {
-    const savedRole = record?.memberships[0]?.role;
     setRole(
       savedRole === "agency_admin" ? "tenant_admin" : (savedRole ?? "viewer"),
     );
-    setTenantId(
-      record?.memberships[0] ? String(record.memberships[0].tenantId) : "",
-    );
-  }, [record?.id, record?.memberships[0]?.role]);
-
-  useEffect(() => {
-    if (tenants.length === 1 && tenantId !== String(tenants[0].id)) {
-      setTenantId(String(tenants[0].id));
-    }
-  }, [tenantId, tenants]);
+    setTenantId(assignedTenantId);
+  }, [record?.id, savedRole, assignedTenantId]);
 
   if (!record) return null;
 
   const transferMembership = async () => {
-    const selectedTenantId = Number(tenantId);
-    if (!Number.isSafeInteger(selectedTenantId) || selectedTenantId < 1) {
-      notify(
-        translate("savia.users.notifications.selectTenant", {
-          _: "Selecciona un tenant.",
-        }),
-        { type: "warning" },
-      );
-      return;
-    }
+    if (!canTransfer) return;
+    setTransferError(undefined);
     setPending(true);
     try {
       await dataProvider.grantMembership(record.id, {
-        tenantId: selectedTenantId,
+        tenantId: destinationId,
         role,
       });
-      setTenantId("");
       notify(
         translate("savia.users.notifications.tenantUpdated", {
           _: "Asignación de tenant actualizada.",
@@ -1098,22 +1426,17 @@ function UserMembershipEditor() {
       );
       refresh();
     } catch (error) {
-      notify(
-        error instanceof Error
-          ? error.message
-          : translate("savia.users.notifications.updateAccessError", {
-              _: "No fue posible actualizar el acceso.",
-            }),
-        {
-          type: "error",
-        },
-      );
+      setTransferError({
+        userId: record.id,
+        message: userUpdateErrorMessage(error),
+      });
     } finally {
       setPending(false);
     }
   };
 
   const roleChoices = getTenantRoleChoices(translate);
+  const tenantLabel = translate("savia.users.fields.tenant", { _: "Tenant" });
 
   return (
     <UserSection
@@ -1143,39 +1466,26 @@ function UserMembershipEditor() {
       </div>
       <div className="grid gap-3 rounded-lg border p-3 md:col-span-2 md:grid-cols-[1fr_220px_auto] md:items-end">
         <label className="grid gap-2 text-sm font-medium">
-          {translate("savia.users.fields.tenant", { _: "Tenant" })}
-          {tenants.length === 1 ? (
+          {tenantLabel}
+          {fixedTenant ? (
             <span className="rounded-md border px-3 py-2 font-normal">
-              {tenants[0].name}
+              {fixedTenant.name}
             </span>
           ) : (
-            <Select
-              value={tenantId}
-              onValueChange={setTenantId}
+            <TenantTransferPicker
+              label={tenantLabel}
+              tenants={tenants}
+              selected={selectedTenant}
+              onSelect={setTenantId}
               disabled={pending}
-            >
-              <SelectTrigger>
-                <SelectValue
-                  placeholder={translate(
-                    "savia.users.fields.selectTenantPlaceholder",
-                    { _: "Selecciona un tenant" },
-                  )}
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {tenants.map((tenant) => (
-                  <SelectItem key={tenant.id} value={String(tenant.id)}>
-                    {tenant.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            />
           )}
         </label>
         <label className="grid gap-2 text-sm font-medium">
           {translate("savia.users.fields.role", { _: "Rol" })}
           <Select
             value={role}
+            disabled={pending}
             onValueChange={(value) => {
               const choice = roleChoices.find(
                 (candidate) => candidate.id === value,
@@ -1197,7 +1507,7 @@ function UserMembershipEditor() {
         </label>
         <Button
           type="button"
-          disabled={pending}
+          disabled={!canTransfer}
           onClick={() => void transferMembership()}
           className="max-sm:size-11 max-sm:p-0 max-sm:has-[>svg]:px-0"
         >
@@ -1213,6 +1523,7 @@ function UserMembershipEditor() {
           </span>
         </Button>
       </div>
+      <UserSubmissionAlert error={transferError} className="md:col-span-2" />
     </UserSection>
   );
 }

@@ -4,6 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { bookingMessages } from "./booking-messages";
 import { PublicBookingAvailability } from "./public-booking-availability";
 import { PublicBookingSummary } from "./public-booking-summary";
+import {
+  publicBookingRequest as publicRequest,
+  type PublicBookingApiError as ApiError,
+} from "./public-booking-request";
 import type { BookingSelection } from "./booking-types";
 import {
   BookingConference,
@@ -35,29 +39,6 @@ type ManageBootstrap = {
   leadMinutes: number;
   canReschedule: boolean;
 };
-type ApiError = Error & { code?: string; status?: number };
-
-async function publicRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    credentials: "omit",
-    headers: { Accept: "application/json", ...init?.headers },
-  });
-  const value = (await response.json()) as {
-    data?: T;
-    error?: { code?: string; message?: string };
-  };
-  if (!response.ok) {
-    const error = new Error(
-      value.error?.message ?? "Request failed",
-    ) as ApiError;
-    error.status = response.status;
-    error.code = value.error?.code;
-    throw error;
-  }
-  return value.data as T;
-}
-
 function timeForZone(iso: string, zone: string, locale: string) {
   return new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
@@ -67,54 +48,47 @@ function timeForZone(iso: string, zone: string, locale: string) {
 }
 
 export function PublicBookingManagePage({ token }: { token: string }) {
+  return <PublicBookingManagementLink key={token} token={token} />;
+}
+
+function PublicBookingManagementLink({ token }: { token: string }) {
   const t = useMessages(bookingMessages);
+  const appointmentMoved = t(
+    "This appointment was rescheduled. Review the updated time before making another change.",
+  );
   const locale = useAppLocale();
   const managePath = `/api/public/bookings/manage/${encodeURIComponent(token)}`;
   const [bootstrap, setBootstrap] = useState<ManageBootstrap>();
-  const [loadedToken, setLoadedToken] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [conferenceRefreshError, setConferenceRefreshError] = useState("");
+  const [closedDeadline, setClosedDeadline] = useState<number>();
   const [rescheduling, setRescheduling] = useState(false);
   const [reviewing, setReviewing] = useState(false);
-  const [updated, setUpdated] = useState(false);
+  const [rescheduleConfirmation, setRescheduleConfirmation] = useState<{
+    startsAt: string;
+    displayTimeZone: string;
+  }>();
   const [selection, setSelection] = useState<BookingSelection>();
   const [displayTimeZone, setDisplayTimeZone] = useState("");
-  const [slotsLoading, setSlotsLoading] = useState(false);
+  const [slotsReady, setSlotsReady] = useState(false);
   const [availabilityRefreshKey, setAvailabilityRefreshKey] = useState(0);
   const stepHeading = useRef<HTMLHeadingElement>(null);
   const refreshSequence = useRef(0);
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setError("");
-    setBootstrap(undefined);
-    setLoadedToken(undefined);
-    setRescheduling(false);
-    setReviewing(false);
-    setUpdated(false);
-    setSelection(undefined);
-    setConferenceRefreshError("");
     void publicRequest<ManageBootstrap>(managePath)
       .then((data) => {
         if (active) {
           setBootstrap(data);
           setDisplayTimeZone(data.timeZone);
-          setLoadedToken(token);
         }
       })
       .catch(() => {
-        if (active) {
-          setError(
-            t(
-              "This booking link could not be loaded. Ask the booking owner for help.",
-            ),
-          );
-          setLoadedToken(token);
-        }
+        if (active) setBootstrap(undefined);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -122,13 +96,48 @@ export function PublicBookingManagePage({ token }: { token: string }) {
     return () => {
       active = false;
     };
-  }, [managePath, t, token]);
+  }, [managePath]);
 
   useEffect(() => {
     if (rescheduling) stepHeading.current?.focus();
   }, [rescheduling, reviewing]);
 
   const reservation = bootstrap?.reservation;
+  const changeDeadline =
+    bootstrap && reservation?.status === "confirmed"
+      ? Date.parse(reservation.startsAt) - bootstrap.cancellationMinutes * 60000
+      : undefined;
+
+  useEffect(() => {
+    if (
+      changeDeadline === undefined ||
+      !Number.isFinite(changeDeadline) ||
+      changeDeadline < Date.now()
+    )
+      return;
+    let timer: number;
+    function scheduleDeadline(deadline: number) {
+      const remaining = deadline - Date.now() + 1;
+      if (remaining <= 0) {
+        setClosedDeadline(deadline);
+        return;
+      }
+      timer = window.setTimeout(
+        () => scheduleDeadline(deadline),
+        Math.min(remaining, 2_147_483_647),
+      );
+    }
+    scheduleDeadline(changeDeadline);
+    return () => window.clearTimeout(timer);
+  }, [changeDeadline]);
+
+  function checkChangeDeadline() {
+    if (changeDeadline === undefined) return false;
+    if (Date.now() <= changeDeadline) return true;
+    setClosedDeadline(changeDeadline);
+    return false;
+  }
+
   function updateBootstrap(next: ManageBootstrap) {
     setBootstrap((current) => {
       if (!current) return next;
@@ -157,13 +166,38 @@ export function PublicBookingManagePage({ token }: { token: string }) {
     refreshSequence.current += 1;
     setRefreshing(false);
   }
+  function closeRescheduleReview(message = "") {
+    setSelection(undefined);
+    setReviewing(false);
+    setRescheduling(false);
+    setError(message);
+  }
+
   async function refreshAppointment() {
+    if (!bootstrap) return;
+    const previous = bootstrap.reservation;
     const request = ++refreshSequence.current;
     setRefreshing(true);
     setConferenceRefreshError("");
     try {
       const data = await publicRequest<ManageBootstrap>(managePath);
-      if (request === refreshSequence.current) updateBootstrap(data);
+      if (
+        request !== refreshSequence.current ||
+        data.reservation.id !== previous.id ||
+        data.reservation.version < previous.version
+      )
+        return;
+      updateBootstrap(data);
+
+      const moved =
+        data.reservation.status === "confirmed" &&
+        Date.parse(data.reservation.startsAt) !== Date.parse(previous.startsAt);
+      if (
+        moved ||
+        !data.canReschedule ||
+        data.reservation.status !== "confirmed"
+      )
+        closeRescheduleReview(moved ? appointmentMoved : "");
     } catch {
       if (request === refreshSequence.current)
         setConferenceRefreshError(
@@ -201,7 +235,7 @@ export function PublicBookingManagePage({ token }: { token: string }) {
   );
 
   async function cancel() {
-    if (!bootstrap) return;
+    if (!bootstrap || busy || !checkChangeDeadline()) return;
     invalidateRefresh();
     setBusy(true);
     setError("");
@@ -215,18 +249,51 @@ export function PublicBookingManagePage({ token }: { token: string }) {
         },
       );
       updateReservation(nextReservation);
-      setUpdated(false);
+      setRescheduleConfirmation(undefined);
+      closeRescheduleReview();
     } catch {
-      setError(
-        t("This booking could not be cancelled. Refresh the page and retry."),
+      const failureMessage = t(
+        "This booking could not be cancelled. Refresh the page and retry.",
       );
+      const current = await publicRequest<ManageBootstrap>(managePath).catch(
+        () => undefined,
+      );
+      if (
+        current?.reservation?.id === bootstrap.reservation.id &&
+        current.reservation.version >= bootstrap.reservation.version
+      ) {
+        updateBootstrap(current);
+        if (current.reservation.status === "cancelled") {
+          setRescheduleConfirmation(undefined);
+          closeRescheduleReview();
+          return;
+        }
+        if (
+          Date.parse(current.reservation.startsAt) !==
+          Date.parse(bootstrap.reservation.startsAt)
+        ) {
+          closeRescheduleReview(appointmentMoved);
+          return;
+        }
+        if (!current.canReschedule) {
+          closeRescheduleReview(failureMessage);
+          return;
+        }
+      }
+      setError(failureMessage);
     } finally {
       setBusy(false);
     }
   }
 
   async function reschedule() {
-    if (!bootstrap || !selection) return;
+    if (
+      !bootstrap?.canReschedule ||
+      !selection ||
+      busy ||
+      !checkChangeDeadline()
+    )
+      return;
     const submittedStartsAt = selection.slot.startsAt;
     invalidateRefresh();
     setBusy(true);
@@ -246,63 +313,87 @@ export function PublicBookingManagePage({ token }: { token: string }) {
       updateReservation(nextReservation);
       setRescheduling(false);
       setReviewing(false);
-      setUpdated(true);
+      setRescheduleConfirmation({
+        startsAt: nextReservation.startsAt,
+        displayTimeZone: selection.displayTimeZone,
+      });
     } catch (requestError) {
-      if ([404, 409].includes((requestError as ApiError)?.status ?? 0)) {
-        try {
-          const current = await publicRequest<ManageBootstrap>(managePath);
-          updateBootstrap(current);
-          setDisplayTimeZone(selection.displayTimeZone);
-          setReviewing(false);
-          if (
-            current.reservation.status === "confirmed" &&
-            current.reservation.startsAt === submittedStartsAt
-          ) {
-            setUpdated(true);
-            setRescheduling(false);
-          } else {
-            setSelection(undefined);
-            const canContinueRescheduling =
-              current.reservation.status === "confirmed" &&
-              current.canReschedule &&
-              Date.parse(current.reservation.startsAt) - Date.now() >=
-                current.cancellationMinutes * 60000;
-            if (canContinueRescheduling) {
-              setAvailabilityRefreshKey((key) => key + 1);
-              setError(
-                t(
-                  (requestError as ApiError)?.code === "BOOKING_TIME_CONFLICT"
-                    ? "That time conflicts with another meeting or appointment. Choose another available time."
-                    : "That time is no longer available. Choose another available time.",
-                ),
-              );
-            } else {
-              setRescheduling(false);
-              setError(
-                t("To change this appointment, contact the booking business."),
-              );
-            }
-          }
-        } catch {
-          setError(
-            t(
-              "This booking could not be rescheduled. Refresh the times and retry.",
-            ),
-          );
-        }
-      } else {
-        setError(
-          t(
-            "This booking could not be rescheduled. Refresh the times and retry.",
-          ),
-        );
+      const apiError = requestError as ApiError | undefined;
+      const status = apiError?.status;
+      const conflict = status === 404 || status === 409;
+      const failureMessage = t(
+        "This booking could not be rescheduled. Refresh the times and retry.",
+      );
+      if (status !== undefined && status < 500 && !conflict) {
+        setError(failureMessage);
+        return;
       }
+
+      const current = await publicRequest<ManageBootstrap>(managePath).catch(
+        () => undefined,
+      );
+      if (
+        current?.reservation?.id !== bootstrap.reservation.id ||
+        current.reservation.version < bootstrap.reservation.version
+      ) {
+        setError(failureMessage);
+        return;
+      }
+      updateBootstrap(current);
+
+      const currentStart = Date.parse(current.reservation.startsAt);
+      const confirmed = current.reservation.status === "confirmed";
+      if (confirmed && currentStart === Date.parse(submittedStartsAt)) {
+        setRescheduleConfirmation({
+          startsAt: current.reservation.startsAt,
+          displayTimeZone: selection.displayTimeZone,
+        });
+        setRescheduling(false);
+        setReviewing(false);
+        return;
+      }
+
+      if (
+        confirmed &&
+        currentStart !== Date.parse(bootstrap.reservation.startsAt)
+      ) {
+        closeRescheduleReview(appointmentMoved);
+        return;
+      }
+
+      const canContinueRescheduling =
+        confirmed &&
+        current.canReschedule &&
+        currentStart - Date.now() >= current.cancellationMinutes * 60000;
+      if (!canContinueRescheduling) {
+        closeRescheduleReview(
+          t("To change this appointment, contact the booking business."),
+        );
+        return;
+      }
+
+      if (!conflict) {
+        setError(failureMessage);
+        return;
+      }
+
+      setDisplayTimeZone(selection.displayTimeZone);
+      setSelection(undefined);
+      setReviewing(false);
+      setAvailabilityRefreshKey((key) => key + 1);
+      setError(
+        t(
+          apiError?.code === "BOOKING_TIME_CONFLICT"
+            ? "That time conflicts with another meeting or appointment. Choose another available time."
+            : "That time is no longer available. Choose another available time.",
+        ),
+      );
     } finally {
       setBusy(false);
     }
   }
 
-  if (loading || loadedToken !== token)
+  if (loading)
     return (
       <main className="mx-auto max-w-2xl px-4 py-10" role="status">
         {t("Loading booking settings…")}
@@ -312,14 +403,17 @@ export function PublicBookingManagePage({ token }: { token: string }) {
     return (
       <main className="mx-auto max-w-2xl px-4 py-10">
         <p role="alert" className="text-sm text-destructive">
-          {error}
+          {t(
+            "This booking link could not be loaded. Ask the booking owner for help.",
+          )}
         </p>
       </main>
     );
 
   const canChange =
-    Date.parse(reservation.startsAt) - Date.now() >=
-    bootstrap.cancellationMinutes * 60000;
+    changeDeadline !== undefined &&
+    changeDeadline !== closedDeadline &&
+    Date.now() <= changeDeadline;
   const bookingCatalog = {
     id: reservation.id,
     timeZone: bootstrap.timeZone,
@@ -376,16 +470,30 @@ export function PublicBookingManagePage({ token }: { token: string }) {
           {conferenceRefreshError}
         </p>
       )}
-      {updated && summaryCatalog && selection && (
-        <section className="grid gap-2" aria-live="polite">
-          <h2 className="text-lg font-semibold">{t("Updated appointment")}</h2>
-          <p role="status">{t("Your appointment has been updated.")}</p>
-          <PublicBookingSummary
-            catalog={summaryCatalog}
-            selection={selection}
-          />
-        </section>
-      )}
+      {rescheduleConfirmation &&
+        summaryCatalog &&
+        reservation.status === "confirmed" &&
+        Date.parse(reservation.startsAt) ===
+          Date.parse(rescheduleConfirmation.startsAt) && (
+          <section className="grid gap-2" aria-live="polite">
+            <h2 className="text-lg font-semibold">
+              {t("Updated appointment")}
+            </h2>
+            <p role="status">{t("Your appointment has been updated.")}</p>
+            <PublicBookingSummary
+              catalog={summaryCatalog}
+              selection={{
+                serviceId: reservation.serviceId,
+                professionalId: reservation.professionalId,
+                displayTimeZone: rescheduleConfirmation.displayTimeZone,
+                slot: {
+                  startsAt: reservation.startsAt,
+                  endsAt: reservation.endsAt,
+                },
+              }}
+            />
+          </section>
+        )}
       {reservation.status === "confirmed" && (
         <div className="flex flex-wrap gap-2">
           {!rescheduling && bootstrap.canReschedule && canChange && (
@@ -397,7 +505,7 @@ export function PublicBookingManagePage({ token }: { token: string }) {
                 setSelection(undefined);
                 setDisplayTimeZone(bootstrap.timeZone);
                 setError("");
-                setUpdated(false);
+                setRescheduleConfirmation(undefined);
                 setReviewing(false);
                 setRescheduling(true);
               }}
@@ -428,7 +536,7 @@ export function PublicBookingManagePage({ token }: { token: string }) {
             {t("To change this appointment, contact the booking business.")}
           </p>
         )}
-      {rescheduling && reservation.status === "confirmed" && (
+      {rescheduling && canChange && (
         <section className="grid gap-4" aria-live="polite">
           {!reviewing && (
             <>
@@ -458,7 +566,7 @@ export function PublicBookingManagePage({ token }: { token: string }) {
                 onTimeZoneChange={setDisplayTimeZone}
                 value={selection}
                 onChange={setSelection}
-                onLoadingChange={setSlotsLoading}
+                onReadyChange={setSlotsReady}
                 refreshKey={availabilityRefreshKey}
                 hideHeading
                 excludedStartsAt={[reservation.startsAt]}
@@ -481,7 +589,7 @@ export function PublicBookingManagePage({ token }: { token: string }) {
                   disabled={
                     !selection ||
                     selection.slot.startsAt === reservation.startsAt ||
-                    slotsLoading ||
+                    !slotsReady ||
                     busy
                   }
                   onClick={() => setReviewing(true)}

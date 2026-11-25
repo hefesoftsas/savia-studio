@@ -13,17 +13,14 @@ const context = {
 describe("connector registry", () => {
   it("does not reveal a connection for an optional simulated action", async () => {
     const revealForExecution = vi.fn();
-    const registry = new ConnectorRegistry(
-      { revealForExecution },
-      [
-        {
-          extensionId: "inventory.sync",
-          actionId: "preview",
-          requiresConnection: (input) => input.mode !== "mock",
-          execute: async ({ connection }) => ({ connection }),
-        },
-      ],
-    );
+    const registry = new ConnectorRegistry({ revealForExecution }, [
+      {
+        extensionId: "inventory.sync",
+        actionId: "preview",
+        requiresConnection: (input) => input.mode !== "mock",
+        execute: async ({ connection }) => ({ connection }),
+      },
+    ]);
 
     await expect(
       registry.execute(

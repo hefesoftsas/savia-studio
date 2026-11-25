@@ -39,6 +39,56 @@ bucket for office assets.
 Log in with `savia.admin@example.test`; the bootstrap password is printed in
 the deploy summary (ephemeral per preview, like all its secrets).
 
+## Update individual components from a local checkout
+
+Once the required resources for an isolated branch Preview exist, reuse them for manual
+development updates. Run from the checkout containing the changes to test:
+
+```sh
+pnpm deploy:preview --branch dev-my-feature web
+pnpm deploy:preview --branch dev-my-feature api --apply
+pnpm deploy:preview --branch dev-my-feature db api web --apply
+```
+
+Omit `--apply` to print the exact targets without Cloudflare credentials.
+Before applying, the command checks local and known `origin` branches for
+names that resolve to the same Preview. It reports the conflicting names
+before contacting Cloudflare.
+Applying requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` for
+the development resources. `web` builds Admin and updates the branch gateway,
+`api` updates the branch API, and `db` applies pending migrations to the branch
+domain database. A web-only update checks the branch gateway and API Workers.
+A database-only update needs D1 access. API updates check the branch gateway,
+the API's service bindings and its domain database.
+When combined, Workers are built and checked first, then the
+database migration runs before API and web are published. Use compatible
+migrations so the existing API can continue serving during the update.
+Each D1 request has a 30-second deadline that includes reading the response.
+If a request times out, the update stops before publishing Workers. Running the
+update again reads the migration history before applying any pending files.
+The migration runner requires a successful result for every statement in the
+D1 batch, including its migration-history entry, before reporting success.
+If D1 rejects a batch after another update records the same migration filename
+in the history, the runner continues with the remaining files without replaying
+the committed migration.
+If Cloudflare returns an unreadable or non-JSON response, the runner reports
+the HTTP status and the affected operation without printing the response body.
+
+These updates run directly from the current checkout, including uncommitted
+changes. They do not run CI, deploy Flows, provision infrastructure, or touch
+shared Preview and Production. Use a complete managed branch deployment for
+changes to other Workers or infrastructure, and use the CI-gated path for releases.
+
+The manual web build ignores checkout-specific Vite environment files so the
+deployed page uses its own Preview API. It also skips building and packaging
+the embedded Flows editor. Each manual update builds, verifies, and publishes
+the web assets from its own temporary output directory.
+
+When applying changes, the command prints each stage as it starts. A failed
+command reports the stage, diagnostic category and exit code. To retain raw
+logs privately, set `SAVIA_RUNTIME_OPERATION_DIRECTORY` to an absolute path
+outside the repository.
+
 ## One-click destroy
 
 Same workflow, `action: destroy`, `confirm:` set to the exact branch name.

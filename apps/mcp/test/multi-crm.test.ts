@@ -31,6 +31,7 @@ it.each(["hubspot", "salesforce", "zoho", "pipedrive"])(
     );
     expect(await client.listStudioRecords(`${provider}_contacts`)).toEqual({
       data: [{ id: "123", name: "Ada" }],
+      total: null,
     });
     const recordRequest = calls.find((request) =>
       new URL(request.url).pathname.includes("/records/"),

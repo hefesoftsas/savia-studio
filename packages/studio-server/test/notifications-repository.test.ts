@@ -26,8 +26,8 @@ it('pages equal timestamps without overlap and isolates recipients',async()=>{
  expect(first.items.map(x=>x.id)).toEqual(['page2','page1']);
  const second=await repository.list('alice',[scope],{limit:2,cursor:first.nextCursor!});
  expect(second.items.map(x=>x.id)).toEqual(['page0']);
- await expect(repository.markRead('bob',scope,'page0',true)).rejects.toMatchObject({status:404});
- await repository.markRead('alice',scope,'page0',true);
- await repository.markRead('alice',scope,'page0',true);
+ await expect(repository.markRead('bob',[scope],'page0',true)).rejects.toMatchObject({status:404});
+ await repository.markRead('alice',[scope],'page0',true);
+ await repository.markRead('alice',[scope],'page0',true);
  expect((await repository.list('alice',[scope],{filter:'unread'})).items).toHaveLength(2);
 });

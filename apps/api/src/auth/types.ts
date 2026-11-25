@@ -55,6 +55,8 @@ export class AuthenticationError extends Error {
   constructor(
     public readonly code:
       | "IDENTITY_EMAIL_CONFLICT"
+      | "VERIFICATION_EMAIL_UNAVAILABLE"
+      | "PASSWORD_RESET_EMAIL_UNAVAILABLE"
       | "AUTHENTICATION_REQUIRED"
       | "AUTHENTICATION_UNAVAILABLE"
       | "INSUFFICIENT_SCOPE"

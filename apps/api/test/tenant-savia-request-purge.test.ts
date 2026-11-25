@@ -122,6 +122,17 @@ describe("tenant deletion purges Savia Request overlays", () => {
 const successfulPurge: SaviaRequestService = {
   fetch: async () => Response.json({ purged: {} }),
 };
+const authSettingsRemoved = () =>
+  Response.json({
+    configured: false,
+    googleEnabled: false,
+    microsoftEnabled: false,
+    microsoftTenantId: "",
+    googleAvailable: false,
+    microsoftAvailable: false,
+    googleCallbackUrl: "",
+    microsoftCallbackUrl: "",
+  });
 function createCascadeApp(options: Parameters<typeof createTestApp>[0] = {}) {
   return createTestApp({
     auth: platformAdministratorAuthenticator(),
@@ -134,6 +145,140 @@ function createCascadeApp(options: Parameters<typeof createTestApp>[0] = {}) {
 describe("explicit tenant cascade deletion", () => {
   const cascadeUrl = (id: number, confirmation = "Purge agency") =>
     `https://api.test/v1/tenants/${id}?cascade=true&confirmation=${encodeURIComponent(confirmation)}`;
+
+  it("returns an upload conflict before removing a tenant or its overlays", async () => {
+    const id = await tenant();
+    const imageId = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO tenant_branding_assets(id,tenant_id,kind,object_key,state,content_type,size,created_by,created_at) VALUES(?,?,'logo',?,'uploading','image/png',1,'test',?)",
+    )
+      .bind(
+        imageId,
+        id,
+        `tenant-branding/${id}/${imageId}`,
+        new Date().toISOString(),
+      )
+      .run();
+    const fetch = vi.fn(successfulPurge.fetch);
+    const app = createCascadeApp({ saviaRequestService: { fetch } });
+
+    const response = await app.request(cascadeUrl(id), { method: "DELETE" });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { code: "TENANT_BRANDING_UPLOAD_IN_PROGRESS" },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(
+      await env.DB.prepare("SELECT is_active FROM tenants WHERE id=?")
+        .bind(id)
+        .first("is_active"),
+    ).toBe(1);
+  });
+
+  it("leaves branding and overlays intact if the name changes before deactivation", async () => {
+    const id = await tenant();
+    const imageId = crypto.randomUUID();
+    const imageKey = `tenant-branding/${id}/${imageId}`;
+    await env.DB.prepare(
+      "INSERT INTO tenant_branding_assets(id,tenant_id,kind,object_key,state,content_type,size,created_by,created_at) VALUES(?,?,'logo',?,'live','image/png',1,'test',?)",
+    )
+      .bind(imageId, id, imageKey, new Date().toISOString())
+      .run();
+    await env.DOCUMENTS.put(imageKey, "image");
+    const fetch = vi.fn(successfulPurge.fetch);
+    const app = createCascadeApp({ saviaRequestService: { fetch } });
+    const prepare = env.DB.prepare.bind(env.DB);
+    const spy = vi.spyOn(env.DB, "prepare").mockImplementation((sql) => {
+      const statement = prepare(sql);
+      if (sql !== "SELECT name FROM tenants WHERE id=? AND kind='commercial'")
+        return statement;
+      return {
+        bind: (...args: unknown[]) => ({
+          first: async () => {
+            const row = await statement.bind(...args).first();
+            await prepare("UPDATE tenants SET name=? WHERE id=?")
+              .bind("Renamed tenant", id)
+              .run();
+            return row;
+          },
+        }),
+      } as unknown as D1PreparedStatement;
+    });
+    try {
+      const response = await app.request(cascadeUrl(id), { method: "DELETE" });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: { code: "TENANT_CONFIRMATION_REQUIRED" },
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await env.DOCUMENTS.head(imageKey)).not.toBeNull();
+      expect(
+        await prepare("SELECT name,is_active FROM tenants WHERE id=?")
+          .bind(id)
+          .first(),
+      ).toEqual({ name: "Renamed tenant", is_active: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    const retry = await app.request(cascadeUrl(id, "Renamed tenant"), {
+      method: "DELETE",
+    });
+    expect(retry.status, await retry.clone().text()).toBe(204);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(await env.DOCUMENTS.head(imageKey)).toBeNull();
+  });
+
+  it("leaves external data intact if the name changes during inventory", async () => {
+    const id = await tenant();
+    const imageId = crypto.randomUUID();
+    const imageKey = `tenant-branding/${id}/${imageId}`;
+    await env.DB.prepare(
+      "INSERT INTO tenant_branding_assets(id,tenant_id,kind,object_key,state,content_type,size,created_by,created_at) VALUES(?,?,'logo',?,'live','image/png',1,'test',?)",
+    )
+      .bind(imageId, id, imageKey, new Date().toISOString())
+      .run();
+    await env.DOCUMENTS.put(imageKey, "image");
+    const fetch = vi.fn(successfulPurge.fetch);
+    const app = createCascadeApp({ saviaRequestService: { fetch } });
+    const list = env.DOCUMENTS.list.bind(env.DOCUMENTS);
+    const inventory = vi
+      .spyOn(env.DOCUMENTS, "list")
+      .mockImplementationOnce(async (options) => {
+        const page = await list(options);
+        await env.DB.prepare("UPDATE tenants SET name=? WHERE id=?")
+          .bind("Renamed during inventory", id)
+          .run();
+        return page;
+      });
+    try {
+      const response = await app.request(cascadeUrl(id), { method: "DELETE" });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: { code: "TENANT_CONFIRMATION_REQUIRED" },
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await env.DOCUMENTS.head(imageKey)).not.toBeNull();
+      expect(
+        await env.DB.prepare(
+          "SELECT state FROM tenant_branding_assets WHERE id=?",
+        )
+          .bind(imageId)
+          .first("state"),
+      ).toBe("live");
+    } finally {
+      inventory.mockRestore();
+    }
+    const retry = await app.request(
+      cascadeUrl(id, "Renamed during inventory"),
+      {
+        method: "DELETE",
+      },
+    );
+    expect(retry.status, await retry.clone().text()).toBe(204);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(await env.DOCUMENTS.head(imageKey)).toBeNull();
+  });
 
   it("loads table metadata without individual D1 requests for each table", async () => {
     const id = await tenant();
@@ -318,6 +463,129 @@ describe("explicit tenant cascade deletion", () => {
 });
 
 describe("tenant purge authorization and storage", () => {
+  it("reports a rejected Auth cleanup as retryable and preserves the files", async () => {
+    const id = await tenant();
+    const key = `companion/samples/auth-cleanup-${id}.ogg`;
+    await env.DOCUMENTS.put(key, "audio", {
+      customMetadata: { tenantId: String(id) },
+    });
+    const fetch = vi
+      .fn(async () => authSettingsRemoved())
+      .mockResolvedValueOnce(
+        Response.json({ error: "Forbidden bridge access." }, { status: 403 }),
+      );
+    const app = createCascadeApp({
+      identityBridgeKey: "test-identity-bridge",
+      authService: { fetch },
+    });
+    const url = `https://api.test/v1/tenants/${id}?cascade=true&confirmation=Purge%20agency`;
+    const response = await app.request(url, { method: "DELETE" });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: { code: "TENANT_AUTH_CLEANUP_UNAVAILABLE" },
+    });
+    expect(await env.DOCUMENTS.head(key)).not.toBeNull();
+    expect(
+      await env.DB.prepare("SELECT is_active FROM tenants WHERE id=?")
+        .bind(id)
+        .first("is_active"),
+    ).toBe(0);
+
+    const retry = await app.request(url, { method: "DELETE" });
+    expect(retry.status).toBe(204);
+    expect(await env.DOCUMENTS.head(key)).toBeNull();
+  });
+
+  it.each(["missing", "repeated"] as const)(
+    "rejects an incomplete Companion inventory with a %s cursor",
+    async (kind) => {
+      const id = await tenant();
+      const key = `companion/samples/incomplete-${id}.ogg`;
+      await env.DOCUMENTS.put(key, "audio", {
+        customMetadata: { tenantId: String(id) },
+      });
+      const object = (await env.DOCUMENTS.head(key))!;
+      const incompletePage = {
+        objects: [object],
+        delimitedPrefixes: [],
+        truncated: true,
+        cursor: kind === "repeated" ? "page-two" : "",
+      } satisfies R2Objects;
+      const list = vi
+        .fn(env.DOCUMENTS.list.bind(env.DOCUMENTS))
+        .mockResolvedValueOnce(incompletePage)
+        .mockResolvedValueOnce(incompletePage);
+      const deleteFiles = vi.fn(env.DOCUMENTS.delete.bind(env.DOCUMENTS));
+      const fetch = vi.fn(successfulPurge.fetch);
+      const app = createCascadeApp({
+        documents: { list, delete: deleteFiles } as unknown as R2Bucket,
+        saviaRequestService: { fetch },
+      });
+      const response = await app.request(
+        `https://api.test/v1/tenants/${id}?cascade=true&confirmation=Purge%20agency`,
+        { method: "DELETE" },
+      );
+
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        error: { code: "TENANT_FILE_CLEANUP_UNAVAILABLE" },
+      });
+      expect(list).toHaveBeenCalledTimes(kind === "missing" ? 1 : 2);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(deleteFiles).not.toHaveBeenCalled();
+      expect(await env.DOCUMENTS.head(key)).not.toBeNull();
+      expect(
+        await env.DB.prepare("SELECT is_active FROM tenants WHERE id=?")
+          .bind(id)
+          .first("is_active"),
+      ).toBe(0);
+    },
+  );
+
+  it.each(["list", "delete"] as const)(
+    "reports a retryable file cleanup error when R2 %s fails",
+    async (operation) => {
+      const id = await tenant();
+      const key = `companion/samples/file-cleanup-${id}.ogg`;
+      await env.DOCUMENTS.put(key, "audio", {
+        customMetadata: { tenantId: String(id) },
+      });
+      const storage = {
+        list: vi.fn(env.DOCUMENTS.list.bind(env.DOCUMENTS)),
+        delete: vi.fn(env.DOCUMENTS.delete.bind(env.DOCUMENTS)),
+      };
+      storage[operation].mockRejectedValueOnce(
+        new Error("Storage unavailable"),
+      );
+      const app = createCascadeApp({
+        documents: storage as unknown as R2Bucket,
+      });
+      const url = `https://api.test/v1/tenants/${id}?cascade=true&confirmation=Purge%20agency`;
+      const first = await app.request(url, { method: "DELETE" });
+
+      expect(first.status).toBe(503);
+      expect(await first.json()).toMatchObject({
+        error: { code: "TENANT_FILE_CLEANUP_UNAVAILABLE" },
+      });
+      expect(await env.DOCUMENTS.head(key)).not.toBeNull();
+      expect(
+        await env.DB.prepare("SELECT is_active FROM tenants WHERE id=?")
+          .bind(id)
+          .first("is_active"),
+      ).toBe(0);
+
+      const retry = await app.request(url, { method: "DELETE" });
+      expect(retry.status).toBe(204);
+      expect(await env.DOCUMENTS.head(key)).toBeNull();
+      expect(
+        await env.DB.prepare("SELECT id FROM tenants WHERE id=?")
+          .bind(id)
+          .first(),
+      ).toBeNull();
+    },
+  );
+
   it("denies tenant administrators the cascade option", async () => {
     const id = await tenant();
     const app = createCascadeApp({
@@ -345,15 +613,21 @@ describe("tenant purge authorization and storage", () => {
     await env.DOCUMENTS.put(`${base}other.ogg`, "other", {
       customMetadata: { tenantId: String(id + 1) },
     });
+    const list = vi.fn((options?: R2ListOptions) =>
+      env.DOCUMENTS.list({ ...options, limit: 1 }),
+    );
     const app = createCascadeApp({
-      auth: platformAdministratorAuthenticator(),
-      documents: env.DOCUMENTS,
+      documents: {
+        list,
+        delete: env.DOCUMENTS.delete.bind(env.DOCUMENTS),
+      } as unknown as R2Bucket,
     });
     const response = await app.request(
       `https://api.test/v1/tenants/${id}?cascade=true&confirmation=Purge%20agency`,
       { method: "DELETE" },
     );
     expect(response.status, await response.clone().text()).toBe(204);
+    expect(list.mock.calls.length).toBeGreaterThan(1);
     expect(await env.DOCUMENTS.get(`${base}owned.ogg`)).toBeNull();
     expect(await env.DOCUMENTS.get(`${base}owned.notes.json`)).toBeNull();
     expect(await env.DOCUMENTS.get(`${base}personal.ogg`)).not.toBeNull();
@@ -361,40 +635,96 @@ describe("tenant purge authorization and storage", () => {
   });
 });
 
-it("rejects a cascade when the tenant name changes during external cleanup", async () => {
+it.each(["Savia Request", "Auth"] as const)(
+  "preserves tenant files if its name changes during %s cleanup",
+  async (service) => {
+    const id = await tenant();
+    const storageKey = `renamed-tenant/${id}/file`;
+    await env.DB.prepare(
+      "INSERT INTO studio_file_drafts(id,tenant_id,object_name,field_name,name,mime,size,storage_key,expires_at) VALUES(?,?,'items','file','file','text/plain',4,?,'2099-01-01')",
+    )
+      .bind(`rename-draft-${id}`, `tenant:${id}`, storageKey)
+      .run();
+    await env.DOCUMENTS.put(storageKey, "data");
+    const rename = () =>
+      env.DB.prepare("UPDATE tenants SET name='Renamed tenant' WHERE id=?")
+        .bind(id)
+        .run();
+    const app = createCascadeApp({
+      ...(service === "Savia Request"
+        ? {
+            saviaRequestService: {
+              fetch: async () => {
+                await rename();
+                return Response.json({ purged: {} });
+              },
+            },
+          }
+        : {
+            identityBridgeKey: "test-identity-bridge",
+            authService: {
+              fetch: async (request: Request) => {
+                if (
+                  new URL(request.url).pathname ===
+                  `/_internal/tenant-email/${id}`
+                )
+                  await rename();
+                return authSettingsRemoved();
+              },
+            },
+          }),
+    });
+    const response = await app.request(
+      `https://api.test/v1/tenants/${id}?cascade=true&confirmation=Purge%20agency`,
+      { method: "DELETE" },
+    );
+    expect(await env.DOCUMENTS.get(storageKey)).not.toBeNull();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { code: "TENANT_CONFIRMATION_REQUIRED" },
+    });
+    expect(
+      await env.DB.prepare("SELECT name FROM tenants WHERE id=?")
+        .bind(id)
+        .first("name"),
+    ).toBe("Renamed tenant");
+  },
+);
+
+it("asks for a fresh confirmation if the tenant name changes during R2 deletion", async () => {
   const id = await tenant();
-  const storageKey = `renamed-tenant/${id}/file`;
-  await env.DB.prepare(
-    "INSERT INTO studio_file_drafts(id,tenant_id,object_name,field_name,name,mime,size,storage_key,expires_at) VALUES(?,?,'items','file','file','text/plain',4,?,'2099-01-01')",
-  )
-    .bind(`rename-draft-${id}`, `tenant:${id}`, storageKey)
-    .run();
-  await env.DOCUMENTS.put(storageKey, "data");
+  const key = `companion/samples/late-rename-${id}.ogg`;
+  await env.DOCUMENTS.put(key, "audio", {
+    customMetadata: { tenantId: String(id) },
+  });
   const app = createCascadeApp({
-    auth: platformAdministratorAuthenticator(),
-    documents: env.DOCUMENTS,
-    saviaRequestService: {
-      fetch: async () => {
+    documents: {
+      list: env.DOCUMENTS.list.bind(env.DOCUMENTS),
+      delete: async (keys: string | string[]) => {
+        await env.DOCUMENTS.delete(keys);
         await env.DB.prepare(
           "UPDATE tenants SET name='Renamed tenant' WHERE id=?",
         )
           .bind(id)
           .run();
-        return Response.json({ purged: {} });
       },
-    },
+    } as R2Bucket,
   });
   const response = await app.request(
     `https://api.test/v1/tenants/${id}?cascade=true&confirmation=Purge%20agency`,
     { method: "DELETE" },
   );
-  expect(response.status).toBe(409);
-  expect(await env.DOCUMENTS.get(storageKey)).not.toBeNull();
+
+  expect(await env.DOCUMENTS.head(key)).toBeNull();
   expect(
     await env.DB.prepare("SELECT name FROM tenants WHERE id=?")
       .bind(id)
       .first("name"),
   ).toBe("Renamed tenant");
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({
+    error: { code: "TENANT_CONFIRMATION_REQUIRED" },
+  });
 });
 
 it.each(["documents", "saviaRequestService"] as const)(
@@ -415,54 +745,88 @@ it.each(["documents", "saviaRequestService"] as const)(
   },
 );
 
-it("preserves storage bytes also referenced by another tenant", async () => {
-  const id = await tenant(),
-    other = await tenant();
-  const principal = `office-owner-${id}`;
-  await env.DB.prepare(
-    "INSERT INTO identity_principal(id,issuer,subject,email,display_name,is_active,created_at,updated_at) VALUES(?,?,?,?,'Owner',1,'now','now')",
-  )
-    .bind(principal, "test", principal, `${principal}@test.example`)
-    .run();
-  const sharedKey = `office/shared-${id}`,
-    revisionKey = `office/revision-${id}`;
-  for (const ownerTenant of [id, other]) {
+it.each(["branding", "companion"] as const)(
+  "preserves %s storage bytes also referenced by another tenant",
+  async (source) => {
+    const id = await tenant(),
+      other = await tenant();
+    const principal = `office-owner-${id}`;
     await env.DB.prepare(
-      "INSERT INTO office_documents(id,tenant_id,owner_id,name,mime,size,version,storage_key,created_at,updated_at) VALUES(?,?,?,'Shared','text/plain',4,1,?,'now','now')",
+      "INSERT INTO identity_principal(id,issuer,subject,email,display_name,is_active,created_at,updated_at) VALUES(?,?,?,?,'Owner',1,'now','now')",
     )
-      .bind(`office-${ownerTenant}`, ownerTenant, principal, sharedKey)
+      .bind(principal, "test", principal, `${principal}@test.example`)
       .run();
-  }
-  await env.DB.prepare(
-    "INSERT INTO office_document_revisions(document_id,version,storage_key,size,created_at) VALUES(?,1,?,4,'now')",
-  )
-    .bind(`office-${id}`, revisionKey)
-    .run();
-  await env.DOCUMENTS.put(sharedKey, "data");
-  await env.DOCUMENTS.put(revisionKey, "old");
-  const app = createCascadeApp();
-  const response = await app.request(
-    `https://api.test/v1/tenants/${id}?cascade=true&confirmation=Purge%20agency`,
-    { method: "DELETE" },
-  );
-  expect(response.status, await response.clone().text()).toBe(204);
-  expect(
-    await env.DB.prepare("SELECT 1 FROM office_documents WHERE tenant_id=?")
-      .bind(id)
-      .first(),
-  ).toBeNull();
-  expect(
+    const sharedKey =
+        source === "companion"
+          ? `companion/samples/shared-${id}.ogg`
+          : `tenant-branding/${id}/shared`,
+      revisionKey = `office/revision-${id}`;
+    if (source === "branding")
+      await env.DB.prepare(
+        "INSERT INTO tenant_branding_assets(id,tenant_id,kind,object_key,state,content_type,size,created_by,created_at) VALUES(?,?,'logo',?,'live','image/png',4,'test',?)",
+      )
+        .bind(crypto.randomUUID(), id, sharedKey, new Date().toISOString())
+        .run();
+    for (const ownerTenant of [id, other]) {
+      await env.DB.prepare(
+        "INSERT INTO office_documents(id,tenant_id,owner_id,name,mime,size,version,storage_key,created_at,updated_at) VALUES(?,?,?,'Shared','text/plain',4,1,?,'now','now')",
+      )
+        .bind(
+          `office-${ownerTenant}`,
+          ownerTenant,
+          principal,
+          source === "companion" && ownerTenant === id
+            ? `office/owned-${id}`
+            : sharedKey,
+        )
+        .run();
+    }
     await env.DB.prepare(
-      "SELECT 1 FROM office_document_revisions WHERE document_id=?",
+      "INSERT INTO office_document_revisions(document_id,version,storage_key,size,created_at) VALUES(?,1,?,4,'now')",
     )
-      .bind(`office-${id}`)
-      .first(),
-  ).toBeNull();
-  expect(await env.DOCUMENTS.get(revisionKey)).toBeNull();
-  expect(await env.DOCUMENTS.get(sharedKey)).not.toBeNull();
-  expect(
-    await env.DB.prepare("SELECT 1 FROM office_documents WHERE tenant_id=?")
-      .bind(other)
-      .first(),
-  ).not.toBeNull();
-});
+      .bind(`office-${id}`, revisionKey)
+      .run();
+    await env.DOCUMENTS.put(
+      sharedKey,
+      "data",
+      source === "companion"
+        ? {
+            customMetadata: { tenantId: String(id) },
+          }
+        : undefined,
+    );
+    await env.DOCUMENTS.put(revisionKey, "old");
+    const app = createCascadeApp();
+    const response = await app.request(
+      `https://api.test/v1/tenants/${id}?cascade=true&confirmation=Purge%20agency`,
+      { method: "DELETE" },
+    );
+    expect(response.status, await response.clone().text()).toBe(204);
+    expect(
+      await env.DB.prepare("SELECT 1 FROM office_documents WHERE tenant_id=?")
+        .bind(id)
+        .first(),
+    ).toBeNull();
+    expect(
+      await env.DB.prepare(
+        "SELECT 1 FROM office_document_revisions WHERE document_id=?",
+      )
+        .bind(`office-${id}`)
+        .first(),
+    ).toBeNull();
+    expect(await env.DOCUMENTS.get(revisionKey)).toBeNull();
+    expect(await env.DOCUMENTS.get(sharedKey)).not.toBeNull();
+    expect(
+      await env.DB.prepare(
+        "SELECT 1 FROM tenant_branding_assets WHERE tenant_id=?",
+      )
+        .bind(id)
+        .first(),
+    ).toBeNull();
+    expect(
+      await env.DB.prepare("SELECT 1 FROM office_documents WHERE tenant_id=?")
+        .bind(other)
+        .first(),
+    ).not.toBeNull();
+  },
+);

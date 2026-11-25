@@ -55,6 +55,7 @@ it("completes fresh OAuth login through the API after TOTP verification", async 
     .replace(/\+/g, "-")
     .replace(/\//g, "_");
   const authorization = new URL(origin + "/api/auth/oauth2/authorize");
+  const state = "mfa-continuation.bookings?tab=reservations&date=2026-11-25";
   authorization.search = new URLSearchParams({
     client_id: client.clientId,
     redirect_uri: client.redirectUri,
@@ -62,7 +63,7 @@ it("completes fresh OAuth login through the API after TOTP verification", async 
     scope: client.scopes.join(" "),
     response_type: "code",
     prompt: "login",
-    state: "mfa-continuation",
+    state,
     code_challenge: challenge,
     code_challenge_method: "S256",
   }).toString();
@@ -117,5 +118,5 @@ it("completes fresh OAuth login through the API after TOTP verification", async 
   const destination = new URL(continuation.url!, origin);
   expect(destination.origin + destination.pathname).toBe(client.redirectUri);
   expect(destination.searchParams.get("code")).toBeTruthy();
-  expect(destination.searchParams.get("state")).toBe("mfa-continuation");
+  expect(destination.searchParams.get("state")).toBe(state);
 });

@@ -124,6 +124,19 @@ test("matches SQL null, boolean, literal text, date and empty-stage filtering", 
     ).total,
   ).toBe(1);
 });
+test.each([
+  ["searchField", "removed"],
+  ["searchFields", "removed,missing"],
+] as const)(
+  "rejects a search when none of the requested fields still exist (%s: %s)",
+  async (parameter, value) => {
+    const db = await setup([{ name: "Matching value" }]);
+    const params = new URLSearchParams({ [parameter]: value, q: "Matching" });
+    await expect(queryRecords(db, "deals", object, params)).rejects.toThrow(
+      "Unknown search field",
+    );
+  },
+);
 test("summary shares filters, sums numeric amounts and excludes trash", async () => {
   const db = await setup([
     { stage: "Won", amount: 10 },

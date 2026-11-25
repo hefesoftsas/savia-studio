@@ -50,15 +50,50 @@ describe("tenant user administration scope", () => {
   });
 
   it("strips platform and tenant scope from tenant-admin user updates", () => {
+    const data = {
+      firstName: "Ari",
+      lastName: "Rios",
+      platformAdmin: true,
+      tenantId: 999,
+      agencyId: 999,
+      memberships: [{ tenantId: 999, role: "tenant_admin" }],
+    };
+    expect(tenantAdminUserUpdateData(data)).toEqual({
+      firstName: "Ari",
+      lastName: "Rios",
+    });
+  });
+
+  it.each([
+    { previous: true, value: true, expected: {} },
+    { previous: false, value: false, expected: {} },
+    { previous: undefined, value: false, expected: {} },
+    { previous: true, value: false, expected: { emailVerified: false } },
+    { previous: false, value: true, expected: { emailVerified: true } },
+  ])(
+    "updates email verification from $previous to $value only when changed",
+    ({ previous, value, expected }) => {
+      expect(
+        tenantAdminUserUpdateData(
+          { firstName: "Ari", lastName: "Rios", emailVerified: value },
+          {
+            previousData: {
+              firstName: "Ari",
+              lastName: "Rios",
+              emailVerified: previous,
+            },
+          },
+        ),
+      ).toEqual(expected);
+    },
+  );
+
+  it("omits a legacy empty surname when saving a new first name", () => {
     expect(
-      tenantAdminUserUpdateData({
-        firstName: "Ari",
-        lastName: "Rios",
-        platformAdmin: true,
-        tenantId: 999,
-        agencyId: 999,
-        memberships: [{ tenantId: 999, role: "tenant_admin" }],
-      }),
-    ).toEqual({ firstName: "Ari", lastName: "Rios" });
+      tenantAdminUserUpdateData(
+        { firstName: "Ariana", lastName: "" },
+        { previousData: { firstName: "Ari", lastName: "" } },
+      ),
+    ).toEqual({ firstName: "Ariana" });
   });
 });

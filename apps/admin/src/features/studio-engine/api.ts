@@ -1,31 +1,65 @@
 import type { DataProvider } from "ra-core";
+import { REQUEST_TIMEOUT_MS, withRequestTimeout } from "@/api/request-timeout";
+import { problemMessage, responseMediaType } from "@/api/response-media-type";
+import { recordPath } from "./record-path";
+import { retryDeadline } from "@/api/retry-after";
 import { getStudioRuntime } from "./runtime";
+
+function readStudioBody<T>(
+  response: Response,
+  read: (input: Response) => Promise<T>,
+  callerSignal?: AbortSignal | null,
+): Promise<T> {
+  const body = response.body;
+  if (!body) return read(response);
+  return withRequestTimeout(
+    (signal) => {
+      const stream = body.pipeThrough(new TransformStream(), { signal });
+      return read(new Response(stream, { headers: response.headers }));
+    },
+    REQUEST_TIMEOUT_MS,
+    callerSignal,
+  );
+}
+
 export async function apiFetch<T>(
   url: string,
   options?: RequestInit & { responseType?: "blob" },
   transport = studioFetch,
 ): Promise<T> {
   const { responseType, ...init } = options ?? {};
+  const headers = new Headers(init.headers);
+  if (!(init.body instanceof FormData) && !headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
   const response = await transport(url, {
     ...init,
-    headers: {
-      ...(init.body instanceof FormData
-        ? {}
-        : { "Content-Type": "application/json" }),
-      ...init.headers,
-    },
+    headers,
   });
   if (response.status === 204 || response.status === 205) return undefined as T;
+  const mediaType = responseMediaType(response);
   if (!response.ok) {
-    const failure = await response.json().catch(() => undefined);
+    const retryAt = retryDeadline(response);
+    const failure = await readStudioBody(
+      response,
+      (input) => input.json(),
+      init.signal,
+    ).catch((error) => {
+      if (init.signal?.aborted) throw error;
+      return undefined;
+    });
     throw Object.assign(
       new Error(
         typeof failure?.error === "string"
           ? failure.error
-          : (failure?.error?.message ?? `Error ${response.status}`),
+          : (failure?.error?.message ??
+              (mediaType === "application/problem+json"
+                ? problemMessage(failure)
+                : undefined) ??
+              `Error ${response.status}`),
       ),
       {
         status: response.status,
+        retryAt,
         code:
           typeof failure?.error?.code === "string"
             ? failure.error.code
@@ -37,8 +71,20 @@ export async function apiFetch<T>(
     );
   }
   if (responseType === "blob") return (await response.blob()) as T;
-  const data: any = await response.json();
-  return data as T;
+  if (mediaType === "text/html") {
+    void response.body?.cancel().catch(() => undefined);
+    throw Object.assign(
+      new Error(
+        "Studio recibió una página web en lugar de los datos solicitados.",
+      ),
+      { status: response.status, code: "UNEXPECTED_HTML_RESPONSE" },
+    );
+  }
+  return readStudioBody(
+    response,
+    (input) => input.json() as Promise<T>,
+    init.signal,
+  );
 }
 
 /** Plugin writes succeed only after the backend commits and returns a version. */
@@ -165,25 +211,23 @@ const list = async (resource: string, params: any) => {
 };
 export const dataProvider: DataProvider = {
   getList: list,
-  getOne: (resource, params) => api(`/records/${resource}/${params.id}`),
+  getOne: (resource, params) => api(recordPath(resource, params.id)),
   getMany: async (resource, params) => ({
     data: await Promise.all(
-      params.ids.map((id) =>
-        api(`/records/${resource}/${id}`).then((r) => r.data),
-      ),
+      params.ids.map((id) => api(recordPath(resource, id)).then((r) => r.data)),
     ),
   }),
   getManyReference: (resource, params) => list(resource, params),
   create: (resource, params) =>
     api(`/records/${resource}`, "POST", params.data),
   update: (resource, params) =>
-    api(`/records/${resource}/${params.id}`, "PATCH", {
+    api(recordPath(resource, params.id), "PATCH", {
       ...params.data,
       _version: params.previousData?._version ?? params.data._version,
     }),
   delete: (resource, params) =>
     api(
-      `/records/${resource}/${params.id}?version=${params.previousData?._version}`,
+      `${recordPath(resource, params.id)}?version=${params.previousData?._version}`,
       "DELETE",
     ),
   updateMany: async (resource, params) => {
@@ -243,14 +287,47 @@ export function studioFetch(
     );
   return fetch(url, init);
 }
-export async function downloadCrm(url: string, name: string) {
-  const response = await studioFetch(url);
-  if (!response.ok)
-    throw new Error(
-      ((await response.json()) as { error?: string }).error ??
-        "No se pudo descargar el archivo.",
+
+export async function downloadCrm(
+  url: string,
+  name: string,
+  expectedType?: "text/csv",
+) {
+  const response = await studioFetch(
+    url,
+    expectedType ? { headers: { Accept: expectedType } } : undefined,
+  );
+  const mediaType = responseMediaType(response);
+  if (!response.ok) {
+    const retryAt = retryDeadline(response);
+    const failure = await readStudioBody(response, (input) =>
+      input.json(),
+    ).catch(() => undefined);
+    const message =
+      typeof failure?.error === "string"
+        ? failure.error
+        : failure?.error?.message;
+    throw Object.assign(
+      new Error(
+        typeof message === "string" && message.trim()
+          ? message
+          : ((mediaType === "application/problem+json"
+              ? problemMessage(failure)
+              : undefined) ?? "No se pudo descargar el archivo."),
+      ),
+      { status: response.status, retryAt },
     );
-  const blob = URL.createObjectURL(await response.blob());
+  }
+  if (expectedType && mediaType !== expectedType) {
+    void response.body?.cancel().catch(() => undefined);
+    throw new Error("No se recibió un archivo CSV válido.");
+  }
+  const file = expectedType
+    ? await readStudioBody(response, (input) => input.blob())
+    : await response.blob();
+  if (expectedType && !file.size)
+    throw new Error("No se recibió un archivo CSV válido.");
+  const blob = URL.createObjectURL(file);
   const link = document.createElement("a");
   link.href = blob;
   link.download = name;

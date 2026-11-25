@@ -50,17 +50,32 @@ export type StudioNavigationObject = {
 };
 
 type CollectionSource = { kind?: unknown; sourceId?: unknown };
+type CollectionCountMetadata = {
+  collection?: CollectionSource;
+  business?: unknown;
+  requestPage?: unknown;
+};
 
 export function isHubspotCollection(source?: CollectionSource): boolean {
   return source?.kind === "crm" && source.sourceId === "hubspot";
 }
 
 export function studioCollectionCount(
-  source: CollectionSource | undefined,
-  count: number | undefined,
+  studio: CollectionCountMetadata | undefined,
+  count: unknown,
   hubspotTotal?: number,
 ): number | undefined {
-  return isHubspotCollection(source) ? hubspotTotal : count;
+  if (studio?.requestPage || studio?.business) return undefined;
+  const source = studio?.collection;
+  if (source?.kind && !isHubspotCollection(source)) return undefined;
+  const total = isHubspotCollection(source) ? hubspotTotal : count;
+  const numeric =
+    typeof total === "string" && total.trim() ? Number(total) : total;
+  return typeof numeric === "number" &&
+    Number.isSafeInteger(numeric) &&
+    numeric >= 0
+    ? numeric
+    : undefined;
 }
 
 export type StudioView =
@@ -247,9 +262,7 @@ export function summarizeStudioObject(input: {
   count?: unknown;
   hidden?: boolean;
   config?: {
-    studio?: {
-      collection?: CollectionSource;
-      requestPage?: unknown;
+    studio?: CollectionCountMetadata & {
       screen?: { hidden?: boolean; section?: unknown; icon?: unknown };
     };
   };
@@ -266,13 +279,7 @@ export function summarizeStudioObject(input: {
     name: input.name,
     label:
       typeof input.label === "string" && input.label ? input.label : input.name,
-    count:
-      input.config?.studio?.requestPage || input.count == null
-        ? undefined
-        : studioCollectionCount(
-            input.config?.studio?.collection,
-            Number(input.count) || 0,
-          ),
+    count: studioCollectionCount(input.config?.studio, input.count),
     hidden: Boolean(input.hidden ?? input.config?.studio?.screen?.hidden),
     ...(hubspot ? { hubspot: true as const } : {}),
     ...(section.success ? { section: section.data } : {}),

@@ -8,9 +8,21 @@ Tenant creation with `initialUser` provisions a new authentication account. If
 the email already exists in Better Auth, the private provisioning bridge returns
 the same HTTP 409 conflict instead of throwing an unhandled service error. The
 API preserves that conflict and rolls back the new tenant. The existing account
-and its membership remain unchanged. To create a tenant around an existing
+and its membership remain unchanged. If provisioning fails after Auth creates
+a new account, the API attempts to remove that account even if cleanup of the
+tenant database fails. To create a tenant around an existing
 account, a platform administrator must explicitly use `existingMember`; that
 operation transfers the user's membership and applies its usual tenant rules.
+The form explains when the selected user is unavailable, is a platform
+administrator, or is the last active member of their current organization.
+The latter two cases return `TENANT_CONFLICT` with a specific reason.
+The API checks for a last active member before reserving the new tenant's URL
+or updating Auth and rechecks membership when applying the transfer.
+A tenant created as inactive can have a first administrator assigned during
+creation. The tenant remains inaccessible to its members until activation.
+If the transfer fails, the API removes the provisional tenant and releases its
+URL even if the Auth service fails to restore the user's previous email scope.
+In that case the API returns the Auth rollback error.
 The existing-user selector shows each account's name and email, including the
 selected account, so administrators can distinguish identical display names.
 Search accepts either name or email.

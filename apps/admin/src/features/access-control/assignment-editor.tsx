@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useOnlineStatus } from "@/offline/use-online-status";
+import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/access-control";
 import type {
   AccessControlClient,
   AccessRole,
@@ -36,6 +37,7 @@ export function AssignmentEditor({
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState("");
   const online = useOnlineStatus();
+  const atRoleLimit = selection.length >= MAX_CUSTOM_ROLES_PER_USER;
   const [dirty, setDirty] = useState(false);
   const [remoteVersion, setRemoteVersion] = useState(0);
   const remote = useRealtimeRefresh({
@@ -157,13 +159,23 @@ export function AssignmentEditor({
           <legend className="mb-3 text-sm font-medium">
             {t("Custom roles")}
           </legend>
+          {atRoleLimit && (
+            <p role="status" className="text-sm text-muted-foreground">
+              {t(
+                "You can assign up to %{count} custom roles per user. Deselect a role to choose another.",
+                { count: MAX_CUSTOM_ROLES_PER_USER },
+              )}
+            </p>
+          )}
           {roles
             .filter((r) => !r.protected)
             .map((r) => (
               <label key={r.id} className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
-                  disabled={!r.enabled && !selection.includes(r.id)}
+                  disabled={
+                    (!r.enabled || atRoleLimit) && !selection.includes(r.id)
+                  }
                   checked={selection.includes(r.id)}
                   onChange={(e) => {
                     setDirty(true);
@@ -180,6 +192,7 @@ export function AssignmentEditor({
             ))}
           <Button
             className="max-sm:size-11 max-sm:p-0 max-sm:has-[>svg]:px-0"
+            disabled={selection.length > MAX_CUSTOM_ROLES_PER_USER}
             onClick={async () => {
               if (revision === undefined) return;
               setBusy(true);

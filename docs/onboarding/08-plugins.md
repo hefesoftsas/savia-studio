@@ -90,6 +90,17 @@ See the [hosted release procedure](../runbooks/public-repository-operations.md).
 `PluginApi.files` uses the native record-file routes (multipart upload,
 authenticated binary download and versioned deletion).
 `PluginApi.access.effective()` reads the current authenticated policy.
+The embedded transport keeps the backend HTTP status for JSON error responses.
+For `application/problem+json`, it uses the problem detail or title as the error message.
+If the response has no readable message, it supplies a generic operation error.
+The request deadline and caller abort signal stay active while the host reads
+a JSON error body. When the deadline expires after error headers arrive,
+the host keeps the HTTP status and any retry delay and supplies a generic message.
+Studio preserves caller-supplied headers for writes, including custom content
+types and idempotency keys. Multipart requests let the browser set the boundary.
+Studio rejects HTML pages returned where JSON data is expected. Files requested
+explicitly as blobs can still contain HTML. Studio cancels stalled JSON response
+bodies after 15 seconds and preserves any HTTP failure status already received.
 
 ### Editors that outgrow an iframe
 

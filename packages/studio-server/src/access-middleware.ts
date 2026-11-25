@@ -25,7 +25,20 @@ import { decideRecord } from "@savia/studio-shared/access-evaluator";
 import { compileAccessWhere } from "./access-query";
 import { buildWhere } from "./query";
 import { csvLine } from "@savia/studio-shared/csv";
+import { parseCsvExportColumns } from "@savia/studio-shared/records-csv-export";
 import { disabledSolutionObjects } from "./solution-state";
+
+function exportAccessFields(policy: AccessPolicy, name: string): string[] {
+  const grants = policy.grants.filter(
+    (grant) =>
+      grant.resource === `collection:${name}` && grant.action === "export",
+  );
+  return grants.length
+    ? queryAccessFields(policy, name).filter((field) =>
+        grants.every((grant) => grant.fields.includes(field)),
+      )
+    : [];
+}
 
 export function visibleAccessObject(
   policy: AccessPolicy,
@@ -40,6 +53,10 @@ export function visibleAccessObject(
   const can = (action: AccessAction) => grants.some((g) => g.action === action);
   return {
     ...object,
+    exportFields:
+      object.config.studio?.collection || object.config.studio?.business
+        ? []
+        : exportAccessFields(policy, object.name),
     config: {
       ...object.config,
       performance: undefined,
@@ -354,13 +371,7 @@ export function registerAccessMiddleware(app: Hono<Env>, policy: AccessPolicy) {
       object.config.studio?.pipeline?.field ?? "stage",
     );
     if (exportMatch) {
-      const allowed = queryAccessFields(policy, name).filter((f) =>
-        policy.grants
-          .filter(
-            (g) => g.resource === `collection:${name}` && g.action === "export",
-          )
-          .every((g) => g.fields.includes(f)),
-      );
+      const allowed = exportAccessFields(policy, name);
       let columns: string[] = allowed;
       if (params.columns) {
         try {
@@ -374,17 +385,34 @@ export function registerAccessMiddleware(app: Hono<Env>, policy: AccessPolicy) {
         columns.some((f) => typeof f !== "string" || !allowed.includes(f))
       )
         accessDenied();
-      const read = buildWhere(object, tenant, params, policy, dialectFor(db)),
+      let headers = columns;
+      if (params.headers !== undefined) {
+        try {
+          const custom = parseCsvExportColumns(params, object);
+          if (!custom) return c.json({ error: "Invalid export headers." }, 422);
+          headers = custom.headers;
+        } catch {
+          return c.json({ error: "Invalid export headers." }, 422);
+        }
+      }
+      const dialect = dialectFor(db);
+      const sort = params.sort || "id";
+      const order = params.sort && params.order !== "ASC" ? "DESC" : "ASC";
+      const systemSort = ["created_at", "updated_at", "id"].includes(sort);
+      if (!systemSort && !Object.hasOwn(object.config.fields, sort))
+        return c.json({ error: "Invalid export sort field." }, 422);
+      const sortSql = systemSort ? sort : dialect.jsonSort("data", `$.${sort}`);
+      const read = buildWhere(object, tenant, params, policy, dialect),
         exp = compileAccessWhere(
           policy,
           `collection:${name}`,
           "export",
-          accessColumns(object, dialectFor(db)),
-          dialectFor(db),
+          accessColumns(object, dialect),
+          dialect,
         );
       const rows = await db
         .prepare(
-          `SELECT * FROM studio_records WHERE ${read.where} AND ${exp.sql} ORDER BY id LIMIT 10001`,
+          `SELECT * FROM studio_records WHERE ${read.where} AND ${exp.sql} ORDER BY ${sortSql} ${order}, id ASC LIMIT 10001`,
         )
         .bind(...read.args, ...exp.bindings)
         .all();
@@ -392,7 +420,7 @@ export function registerAccessMiddleware(app: Hono<Env>, policy: AccessPolicy) {
         return c.json({ error: "Export exceeds 10000 records." }, 422);
       return new Response(
         "\uFEFF" +
-          csvLine(columns) +
+          csvLine(headers) +
           rows.results
             .map((row) => {
               const r = projectCrmRecord(policy, name, parseRecord(row));

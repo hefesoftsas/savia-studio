@@ -9,6 +9,7 @@ export const accessMessages = {
     "Reload and discard draft",
     "Recarregar e descartar rascunho",
   ],
+  "Reloading…": ["Recargando…", "Reloading…", "Recarregando…"],
   "This role was removed. Your draft is preserved but cannot be saved.": [
     "Este rol fue eliminado. Tu borrador se conserva, pero ya no puede guardarse.",
     "This role was removed. Your draft is preserved but cannot be saved.",
@@ -37,6 +38,17 @@ export const accessMessages = {
     "Unable to load tenant roles.",
     "Não foi possível carregar os papéis do tenant.",
   ],
+  "Some selected roles are no longer available and were removed.": [
+    "Algunos roles seleccionados dejaron de estar disponibles y se quitaron de la selección.",
+    "Some selected roles are no longer available and were removed.",
+    "Algumas funções selecionadas deixaram de estar disponíveis e foram removidas da seleção.",
+  ],
+  "You can assign up to %{count} custom roles per user. Deselect a role to choose another.":
+    [
+      "Puedes asignar hasta %{count} roles personalizados por usuario. Quita un rol de la selección para elegir otro.",
+      "You can assign up to %{count} custom roles per user. Deselect a role to choose another.",
+      "Você pode atribuir até %{count} papéis personalizados por usuário. Desmarque um papel para escolher outro.",
+    ],
   "No enabled custom roles in this tenant. Roles from other tenants are not available here.":
     [
       "Este tenant no tiene roles personalizados activos. Los roles de otros tenants no están disponibles aquí.",

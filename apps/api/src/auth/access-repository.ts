@@ -3,6 +3,7 @@ import { z } from "@hono/zod-openapi";
 import {
   accessGrantSchema,
   accessScopeSchema,
+  MAX_CUSTOM_ROLES_PER_USER,
   type AccessScope,
   type AccessGrant,
   type AccessPolicy,
@@ -54,7 +55,7 @@ export const replaceAccessAssignmentsSchema = z
   .object({
     scope: accessScopeSchema,
     principalId: z.string().min(1).max(200),
-    roleIds: z.array(z.string().min(1).max(200)).max(100),
+    roleIds: z.array(z.string().min(1).max(200)).max(MAX_CUSTOM_ROLES_PER_USER),
     expectedRevision: z
       .number()
       .int()
@@ -84,6 +85,11 @@ const parseRole = (r: RoleRow) => ({
   enabled: Boolean(r.enabled),
   protected: Boolean(r.protected),
 });
+function roleIdsQuery(db: D1Database): string {
+  return dialectFor(db).name === "postgres"
+    ? "SELECT value FROM jsonb_array_elements_text(?::jsonb) AS role_ids(value)"
+    : "SELECT value FROM json_each(?)";
+}
 async function grantsForRoles(
   db: D1Database,
   scope: AccessScope,
@@ -92,9 +98,9 @@ async function grantsForRoles(
   if (!ids.length) return [];
   const rows = await db
     .prepare(
-      `SELECT * FROM access_grants WHERE scope=? AND role_id IN (${ids.map(() => "?").join(",")}) ORDER BY id`,
+      `SELECT * FROM access_grants WHERE scope=? AND role_id IN (${roleIdsQuery(db)}) ORDER BY id`,
     )
-    .bind(scope, ...ids)
+    .bind(scope, JSON.stringify(ids))
     .all<{
       id: string;
       role_id: string;
@@ -164,17 +170,14 @@ export async function listAccessRoles(
     .bind(scope)
     .all<RoleRow>();
   const mutableRows = rows.results.filter((r) => !r.protected);
-  const grants = await grantsForRoles(
-    db,
-    scope,
-    mutableRows.map((r) => r.id),
-  );
-  const assignments = mutableRows.length
+  const roleIds = mutableRows.map((r) => r.id);
+  const grants = await grantsForRoles(db, scope, roleIds);
+  const assignments = roleIds.length
     ? await db
         .prepare(
-          `SELECT a.role_id,p.id,p.display_name,p.email FROM access_assignments a JOIN identity_principal p ON p.id=a.principal_id WHERE a.scope=? AND a.role_id IN (${mutableRows.map(() => "?").join(",")}) AND p.is_active=1 ORDER BY p.display_name,p.id`,
+          `SELECT a.role_id,p.id,p.display_name,p.email FROM access_assignments a JOIN identity_principal p ON p.id=a.principal_id WHERE a.scope=? AND a.role_id IN (${roleIdsQuery(db)}) AND p.is_active=1 ORDER BY p.display_name,p.id`,
         )
-        .bind(scope, ...mutableRows.map((r) => r.id))
+        .bind(scope, JSON.stringify(roleIds))
         .all<{
           role_id: string;
           id: string;
@@ -442,6 +445,22 @@ export async function saveAccessRole(
   );
   return { id, ...result };
 }
+export async function areCustomRolesAssignable(
+  db: D1Database,
+  scope: AccessScope,
+  roleIds: string[],
+): Promise<boolean> {
+  if (roleIds.length === 0) return true;
+
+  const matching = await db
+    .prepare(
+      `SELECT CAST(COUNT(*) AS INTEGER) AS count FROM access_roles WHERE scope=? AND enabled=1 AND protected=0 AND id IN (${roleIdsQuery(db)})`,
+    )
+    .bind(scope, JSON.stringify(roleIds))
+    .first<{ count: number }>();
+  return matching?.count === roleIds.length;
+}
+
 export async function replaceAccessAssignments(
   db: D1Database,
   actor: AppActor,
@@ -472,20 +491,12 @@ export async function replaceAccessAssignments(
   )
     return denyAccess();
   const roleIds = [...new Set(input.roleIds)];
-  for (const id of roleIds) {
-    const role = await db
-      .prepare(
-        "SELECT id FROM access_roles WHERE scope=? AND id=? AND enabled=1 AND protected=0",
-      )
-      .bind(input.scope, id)
-      .first();
-    if (!role)
-      throw new AccessControlError(
-        422,
-        "INVALID_ACCESS_ROLE",
-        "Only enabled business roles in this scope may be assigned.",
-      );
-  }
+  if (!(await areCustomRolesAssignable(db, input.scope, roleIds)))
+    throw new AccessControlError(
+      422,
+      "INVALID_ACCESS_ROLE",
+      "Only enabled business roles in this scope may be assigned.",
+    );
   const before = await db
     .prepare(
       "SELECT role_id FROM access_assignments WHERE scope=? AND principal_id=?",

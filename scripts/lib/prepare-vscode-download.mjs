@@ -19,19 +19,53 @@ export async function prepareVscodeDownload({
   const expectedChecksum = createHash("sha256")
     .update(artifactBytes)
     .digest("hex");
-  const recordedChecksum = (await fs.readFile(checksumFile, "utf8")).trim();
+  const checksumContents = await fs.readFile(checksumFile, "utf8");
+  const recordedChecksum = checksumContents.trim();
 
   if (recordedChecksum !== `${expectedChecksum} ${filename}`) {
     throw new Error(`VSIX checksum is missing or invalid for ${filename}.`);
   }
 
   await fs.mkdir(downloadsDir, { recursive: true });
-  for (const entry of await fs.readdir(downloadsDir)) {
-    if (/^savia-plugin-authoring-.*\.vsix(?:\.sha256)?$/.test(entry)) {
-      await fs.rm(join(downloadsDir, entry));
+  const artifactTarget = join(downloadsDir, filename);
+  const checksumTarget = `${artifactTarget}.sha256`;
+  const stagingDir = await fs.mkdtemp(join(downloadsDir, ".savia-vsix-"));
+  try {
+    const stagedArtifact = join(stagingDir, filename);
+    const stagedChecksum = `${stagedArtifact}.sha256`;
+    await fs.writeFile(stagedArtifact, artifactBytes);
+    await fs.writeFile(stagedChecksum, checksumContents);
+
+    const previousArtifact = join(stagingDir, "previous.vsix");
+    let hadPreviousArtifact = true;
+    try {
+      await fs.copyFile(artifactTarget, previousArtifact);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      hadPreviousArtifact = false;
     }
+
+    await fs.rename(stagedArtifact, artifactTarget);
+    try {
+      await fs.rename(stagedChecksum, checksumTarget);
+    } catch (error) {
+      if (hadPreviousArtifact)
+        await fs.rename(previousArtifact, artifactTarget);
+      else await fs.rm(artifactTarget, { force: true });
+      throw error;
+    }
+
+    for (const entry of await fs.readdir(downloadsDir)) {
+      if (
+        entry !== filename &&
+        entry !== `${filename}.sha256` &&
+        /^savia-plugin-authoring-.*\.vsix(?:\.sha256)?$/.test(entry)
+      ) {
+        await fs.rm(join(downloadsDir, entry), { force: true });
+      }
+    }
+  } finally {
+    await fs.rm(stagingDir, { recursive: true, force: true });
   }
-  await fs.copyFile(artifact, join(downloadsDir, filename));
-  await fs.copyFile(checksumFile, join(downloadsDir, `${filename}.sha256`));
   return { filename, checksum: expectedChecksum };
 }

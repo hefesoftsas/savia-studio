@@ -162,6 +162,22 @@ it("previews rename, preserves data on publish and restores archived fields", as
   expect((await json(`/records/schema_item/${r.id}`)).data.renamed).toBe(
     "Valor conservado",
   );
+  expect(
+    (await request("/records/schema_item?q=conservado&searchField=legacy"))
+      .status,
+  ).toBe(422);
+  expect(
+    (await json("/records/schema_item?q=conservado&searchField=renamed")).data,
+  ).toHaveLength(1);
+  const exportQuery = new URLSearchParams({
+    q: "conservado",
+    searchField: "legacy",
+    columns: '["renamed"]',
+    headers: '["Nuevo"]',
+  });
+  expect((await request(`/export/schema_item?${exportQuery}`)).status).toBe(
+    422,
+  );
   await json("/objects/schema_item/restore", "POST", {
     version: 2,
     targetVersion: 1,

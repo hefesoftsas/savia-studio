@@ -34,3 +34,4 @@ minimumReleaseAgeExclude:
   - "@tauri-apps/cli@2.12.1"
 patchedDependencies:
   "@cloudflare/vitest-pool-workers@0.19.1": patches/@cloudflare__vitest-pool-workers@0.19.1.patch
+  monaco-editor@0.52.2: patches/monaco-editor@0.52.2.patch

@@ -187,6 +187,9 @@ async function currentSourceConfigDigest(
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([name, config]) => [`workers/${name}/wrangler.json`, config]),
     };
+    if (expected.has("savia-preview"))
+      configFingerprint.flowsFrontendEnabled =
+        env.SAVIA_CI_FLOWS_ENABLED !== "false";
     if (includePluginEditor) {
       configFingerprint.pluginEditorDeploymentUrl = pluginEditorDeploymentUrl;
       configFingerprint.pluginEditorRuntimeUrl = `${pluginEditorDeploymentUrl}/plugin-editor`;

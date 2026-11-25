@@ -1,13 +1,13 @@
-import { companionDownloadsResponse } from "./src/companion-downloads-catalog";
-import { PUBLIC_VISITOR_ROUTE_DENYLIST } from "./src/pwa/deployment-recovery";
-import { pluginDevelopmentReload } from "./build/plugin-development";
-import { officePlugin } from "./build/office-plugin";
-import { collectOfflineShellAssets } from "./build/offline-shell-assets";
-import { reactSandboxPlugin } from "./build/react-sandbox-plugin";
-import { pluginIdeRuntimePlugin } from "./build/plugin-ide-runtime";
-import { compactBrandIcons } from "./build/compact-brand-icons";
-import { saviaManualChunk } from "./build/manual-chunks";
-import { flowsPlugin } from "./build/flows-plugin";
+import { companionDownloadsResponse } from "./src/companion-downloads-catalog.ts";
+import { PUBLIC_VISITOR_ROUTE_DENYLIST } from "./src/pwa/deployment-recovery.ts";
+import { pluginDevelopmentReload } from "./build/plugin-development.ts";
+import { officePlugin } from "./build/office-plugin.ts";
+import { collectOfflineShellAssets } from "./build/offline-shell-assets.ts";
+import { reactSandboxPlugin } from "./build/react-sandbox-plugin.ts";
+import { pluginIdeRuntimePlugin } from "./build/plugin-ide-runtime.ts";
+import { compactBrandIcons } from "./build/compact-brand-icons.ts";
+import { saviaManualChunk } from "./build/manual-chunks.ts";
+import { flowsPlugin } from "./build/flows-plugin.ts";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
@@ -37,6 +37,8 @@ const devApiTarget = process.env.SAVIA_DEV_API_URL || "http://127.0.0.1:8787";
 const devChangeOrigin = false;
 
 export default defineConfig({
+  envDir:
+    process.env.SAVIA_ADMIN_IGNORE_ENV_FILES === "true" ? false : undefined,
   plugins: [
     compactBrandIcons(),
     {
@@ -84,6 +86,7 @@ export default defineConfig({
         clientsClaim: true,
         navigateFallback: "index.html",
         navigateFallbackDenylist: [
+          /^\/downloads\//,
           /^\/api/,
           /^\/v1/,
           ...PUBLIC_VISITOR_ROUTE_DENYLIST,
@@ -182,6 +185,7 @@ export default defineConfig({
     },
   },
   build: {
+    outDir: process.env.SAVIA_ADMIN_OUT_DIR || "dist",
     chunkSizeWarningLimit: 800,
     rollupOptions: {
       input: {

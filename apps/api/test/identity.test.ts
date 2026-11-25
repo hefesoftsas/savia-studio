@@ -1,8 +1,11 @@
 import { installExampleSolutionFixture } from "./example-solution-fixtures";
 import { env } from "cloudflare:workers";
+import { OpenAPIHono } from "@hono/zod-openapi";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./combined-app";
+import { authenticationMiddleware } from "../src/auth/middleware";
+import { registerIdentityRoutes } from "../src/routes/identity";
 import {
   ensureBootstrapAdministrator,
   findPrincipalBySubject,
@@ -1535,6 +1538,353 @@ describe("Identity and access", () => {
     expect(updateUser).not.toHaveBeenCalled();
   });
 
+  it.each(["too-short", "a".repeat(129)])(
+    "identifies invalid temporary password length before provisioning",
+    async (temporaryPassword) => {
+      await seedAgency(101);
+      const administrator = identityUserAdministrator();
+      const createUser = vi.spyOn(administrator, "createUser");
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        platformAdministratorAuthenticator(),
+        administrator,
+      );
+      const response = await app.request("/v1/identity/users", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: "invalid-password@savia.test",
+          firstName: "New",
+          lastName: "User",
+          membership: { tenantId: 101, role: "viewer" },
+          temporaryPassword,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "USER_TEMPORARY_PASSWORD_INVALID",
+          message: "The temporary password must contain 12 to 128 characters.",
+        },
+      });
+      expect(createUser).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["POST", "PATCH"])(
+    "rejects whitespace-only name fields in %s user requests before calling Auth",
+    async (method) => {
+      await seedAgency(101);
+      const principal = await upsertPrincipal(env.DB, {
+        issuer: "savia:better-auth",
+        subject: "blank-name-user",
+        email: "blank-name@savia.test",
+        displayName: "Existing Name",
+      });
+      const administrator = identityUserAdministrator();
+      const createUser = vi.spyOn(administrator, "createUser");
+      const updateUser = vi.spyOn(administrator, "updateUser");
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        platformAdministratorAuthenticator(),
+        administrator,
+      );
+      const response = await app.request(
+        method === "POST"
+          ? "/v1/identity/users"
+          : `/v1/identity/users/${principal.id}`,
+        {
+          method,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            method === "POST"
+              ? {
+                  email: "new-name@savia.test",
+                  firstName: "New",
+                  lastName: " \t ",
+                  membership: { tenantId: 101, role: "viewer" },
+                }
+              : { firstName: " \t " },
+          ),
+        },
+      );
+      expect(response.status).toBe(400);
+      expect(createUser).not.toHaveBeenCalled();
+      expect(updateUser).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    {
+      method: "POST",
+      destination: 202,
+      status: 409,
+      code: "COMMERCIAL_TENANT_REQUIRED",
+    },
+    { method: "POST", destination: 303, status: 404, code: "TENANT_NOT_FOUND" },
+    {
+      method: "PATCH",
+      destination: 202,
+      status: 409,
+      code: "COMMERCIAL_TENANT_REQUIRED",
+    },
+    {
+      method: "PATCH",
+      destination: 303,
+      status: 404,
+      code: "TENANT_NOT_FOUND",
+    },
+  ])(
+    "rejects $method transfer to unavailable tenant $destination before updating Auth",
+    async ({ method, destination, status, code }) => {
+      await seedAgency(101);
+      await seedAgency(202);
+      await env.DB.prepare("UPDATE tenants SET is_active=0 WHERE id=202").run();
+      const principal = await upsertPrincipal(env.DB, {
+        issuer: "savia:better-auth",
+        subject: "unavailable-destination-user",
+        email: "unavailable-destination@savia.test",
+        displayName: "Unavailable Destination",
+      });
+      const { grantMembership } =
+        await import("../src/auth/identity-repository");
+      await grantMembership(env.DB, principal.id, 101, "operator");
+      const administrator = identityUserAdministrator();
+      const updateUser = vi.spyOn(administrator, "updateUser");
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        platformAdministratorAuthenticator(),
+        administrator,
+      );
+      const membership = { tenantId: destination, role: "viewer" };
+      const response = await app.request(
+        `/v1/identity/users/${principal.id}${method === "POST" ? "/memberships" : ""}`,
+        {
+          method,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            method === "POST"
+              ? membership
+              : { firstName: "Changed", lastName: "Name", membership },
+          ),
+        },
+      );
+      expect(response.status).toBe(status);
+      expect(await response.json()).toMatchObject({ error: { code } });
+      expect(updateUser).not.toHaveBeenCalled();
+      expect(
+        await env.DB.prepare(
+          "SELECT tenant_id, role FROM identity_tenant_membership WHERE principal_id=?",
+        )
+          .bind(principal.id)
+          .first(),
+      ).toEqual({ tenant_id: 101, role: "operator" });
+      expect(
+        await env.DB.prepare(
+          "SELECT display_name FROM identity_principal WHERE id=?",
+        )
+          .bind(principal.id)
+          .first(),
+      ).toEqual({ display_name: principal.displayName });
+    },
+  );
+
+  it.each([
+    { destination: 202, tenantRooms: ["tenant:101", "tenant:202"] },
+    { destination: 101, tenantRooms: ["tenant:101"] },
+  ])(
+    "notifies all affected tenants of assignment to $destination",
+    async ({ destination, tenantRooms }) => {
+      await seedAgency(101);
+      await seedAgency(202);
+      const principal = await upsertPrincipal(env.DB, {
+        issuer: "savia:better-auth",
+        subject: "membership-event-user",
+        email: "membership-event@savia.test",
+        displayName: "Membership Event",
+      });
+      const remaining = await upsertPrincipal(env.DB, {
+        issuer: "savia:better-auth",
+        subject: "remaining-active-user",
+        email: "remaining-active@savia.test",
+        displayName: "Remaining Active",
+      });
+      const { grantMembership } =
+        await import("../src/auth/identity-repository");
+      await grantMembership(env.DB, principal.id, 101, "operator");
+      await grantMembership(env.DB, remaining.id, 101, "viewer");
+      const publish = vi.fn();
+      const app = new OpenAPIHono();
+      app.use(
+        "*",
+        authenticationMiddleware(env.DB, platformAdministratorAuthenticator()),
+      );
+      registerIdentityRoutes(
+        app,
+        env.DB,
+        identityUserAdministrator(),
+        undefined,
+        {
+          publish,
+          issue: vi.fn(),
+          forward: vi.fn(),
+        },
+      );
+      const response = await app.request(
+        `/v1/identity/users/${principal.id}/memberships`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ tenantId: destination, role: "viewer" }),
+        },
+      );
+      expect(response.status).toBe(201);
+      expect(
+        publish.mock.calls.filter(
+          ([, event]) => event.topic === "access-control",
+        ),
+      ).toEqual(
+        tenantRooms.map((room) => [
+          room,
+          {
+            topic: "access-control",
+            type: "updated",
+            collection: "memberships",
+            id: principal.id,
+            actor: "test-platform-admin",
+          },
+        ]),
+      );
+      expect(publish).toHaveBeenCalledWith(
+        "platform",
+        expect.objectContaining({
+          topic: "users",
+          id: principal.id,
+        }),
+      );
+    },
+  );
+
+  it("notifies the tenant and platform lists after a tenant administrator edits a user", async () => {
+    await seedAgency(101);
+    const principal = await upsertPrincipal(env.DB, {
+      issuer: "savia:better-auth",
+      subject: "profile-event-user",
+      email: "profile-event@savia.test",
+      displayName: "Profile Event",
+    });
+    const { grantMembership } = await import("../src/auth/identity-repository");
+    await grantMembership(env.DB, principal.id, 101, "viewer");
+    const publish = vi.fn();
+    const app = new OpenAPIHono();
+    app.use(
+      "*",
+      authenticationMiddleware(env.DB, agencyAdministratorAuthenticator()),
+    );
+    registerIdentityRoutes(
+      app,
+      env.DB,
+      identityUserAdministrator(),
+      undefined,
+      {
+        publish,
+        issue: vi.fn(),
+        forward: vi.fn(),
+      },
+    );
+    const response = await app.request(`/v1/identity/users/${principal.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        firstName: "Updated",
+        lastName: "Name",
+        emailVerified: true,
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(publish).toHaveBeenCalledWith(
+      "tenant:101",
+      expect.objectContaining({
+        topic: "access-control",
+        type: "updated",
+        collection: "memberships",
+        id: principal.id,
+      }),
+    );
+    expect(publish).toHaveBeenCalledWith(
+      "platform",
+      expect.objectContaining({
+        topic: "users",
+        type: "updated",
+        id: principal.id,
+      }),
+    );
+  });
+
+  it("notifies the tenant when a user is suspended, reactivated, or deleted", async () => {
+    await seedAgency(101);
+    const principal = await upsertPrincipal(env.DB, {
+      issuer: "savia:better-auth",
+      subject: "status-event-user",
+      email: "status-event@savia.test",
+      displayName: "Status Event",
+    });
+    const remaining = await upsertPrincipal(env.DB, {
+      issuer: "savia:better-auth",
+      subject: "remaining-status-user",
+      email: "remaining-status@savia.test",
+      displayName: "Remaining Active",
+    });
+    const { grantMembership } = await import("../src/auth/identity-repository");
+    await grantMembership(env.DB, principal.id, 101, "operator");
+    await grantMembership(env.DB, remaining.id, 101, "viewer");
+    const publish = vi.fn();
+    const app = new OpenAPIHono();
+    app.use(
+      "*",
+      authenticationMiddleware(env.DB, platformAdministratorAuthenticator()),
+    );
+    registerIdentityRoutes(
+      app,
+      env.DB,
+      identityUserAdministrator(),
+      undefined,
+      {
+        publish,
+        issue: vi.fn(),
+        forward: vi.fn(),
+      },
+    );
+    const path = `/v1/identity/users/${principal.id}`;
+    for (const [url, method] of [
+      [`${path}/suspension`, "POST"],
+      [`${path}/suspension`, "DELETE"],
+      [path, "DELETE"],
+    ]) {
+      publish.mockClear();
+      expect((await app.request(url, { method })).status).toBe(204);
+      expect(publish).toHaveBeenCalledWith(
+        "tenant:101",
+        expect.objectContaining({
+          topic: "access-control",
+          type: "updated",
+          collection: "memberships",
+          id: principal.id,
+        }),
+      );
+      expect(publish).toHaveBeenCalledWith(
+        "platform",
+        expect.objectContaining({ topic: "users", id: principal.id }),
+      );
+    }
+  });
+
   it("restores the auth email tenant when a membership change is rejected", async () => {
     await seedAgency(101);
     await seedAgency(202);
@@ -1587,7 +1937,7 @@ describe("Identity and access", () => {
     ).toEqual({ tenant_id: 101 });
   });
 
-  it("restores the auth email tenant when an identity update cannot change membership", async () => {
+  it("restores profile and Auth settings when an identity update cannot change membership", async () => {
     await seedAgency(101);
     await seedAgency(202);
     const principal = await upsertPrincipal(env.DB, {
@@ -1600,6 +1950,15 @@ describe("Identity and access", () => {
     await grantMembership(env.DB, principal.id, 101, "operator");
     const administrator = identityUserAdministrator();
     const updateUser = vi.spyOn(administrator, "updateUser");
+    vi.spyOn(administrator, "getUser").mockResolvedValue({
+      subject: principal.subject,
+      email: principal.email,
+      displayName: "Saved Auth Name",
+      role: "user",
+      isBanned: false,
+      twoFactorEnabled: false,
+      emailVerified: false,
+    });
     const app = createApp(
       env.DB,
       env.DOCUMENTS,
@@ -1612,6 +1971,9 @@ describe("Identity and access", () => {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        firstName: "Changed",
+        lastName: "Display Name",
+        emailVerified: true,
         membership: { tenantId: 202, role: "viewer" },
       }),
     });
@@ -1620,13 +1982,17 @@ describe("Identity and access", () => {
     expect(updateUser).toHaveBeenNthCalledWith(
       1,
       principal.subject,
-      expect.objectContaining({ tenantId: 202 }),
+      expect.objectContaining({
+        tenantId: 202,
+        displayName: "Changed Display Name",
+        emailVerified: true,
+      }),
       expect.any(Request),
     );
     expect(updateUser).toHaveBeenNthCalledWith(
       2,
       principal.subject,
-      { tenantId: 101 },
+      { tenantId: 101, displayName: "Saved Auth Name", emailVerified: false },
       expect.any(Request),
     );
     expect(
@@ -1636,35 +2002,80 @@ describe("Identity and access", () => {
         .bind(principal.id)
         .first(),
     ).toEqual({ tenant_id: 101 });
+    expect(
+      await env.DB.prepare(
+        "SELECT display_name FROM identity_principal WHERE id=?",
+      )
+        .bind(principal.id)
+        .first(),
+    ).toEqual({ display_name: principal.displayName });
   });
 
-  it("checks tenant active-user capacity before creating the auth account", async () => {
+  it.each([
+    ["tenant", agencyAdministratorAuthenticator],
+    ["platform", platformAdministratorAuthenticator],
+  ] as const)(
+    "checks tenant active-user capacity before %s admin provisions an auth account",
+    async (_scope, authenticate) => {
+      await seedAgency(101);
+      await env.DB.prepare(
+        "INSERT INTO tenant_user_limits(tenant_id,max_active_users) VALUES(101,0)",
+      ).run();
+      const administrator = identityUserAdministrator();
+      const createUser = vi.spyOn(administrator, "createUser");
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        authenticate(),
+        administrator,
+      );
+
+      const response = await app.request("/v1/identity/users", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: "at-capacity@savia.test",
+          firstName: "At",
+          lastName: "Capacity",
+          membership: { role: "operator", tenantId: 101 },
+        }),
+      });
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: { code: "TENANT_ACTIVE_USER_LIMIT_REACHED" },
+      });
+      expect(createUser).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an inactive provisioning destination before creating the auth account", async () => {
     await seedAgency(101);
-    await env.DB.prepare(
-      "INSERT INTO tenant_user_limits(tenant_id,max_active_users) VALUES(101,0)",
-    ).run();
+    await env.DB.prepare("UPDATE tenants SET is_active=0 WHERE id=101").run();
     const administrator = identityUserAdministrator();
     const createUser = vi.spyOn(administrator, "createUser");
     const app = createApp(
       env.DB,
       env.DOCUMENTS,
       undefined,
-      agencyAdministratorAuthenticator(),
+      platformAdministratorAuthenticator(),
       administrator,
     );
-
     const response = await app.request("/v1/identity/users", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        email: "at-capacity@savia.test",
-        firstName: "At",
-        lastName: "Capacity",
-        membership: { role: "operator", tenantId: 101 },
+        email: "inactive-destination@savia.test",
+        firstName: "Inactive",
+        lastName: "Destination",
+        membership: { role: "viewer", tenantId: 101 },
       }),
     });
-
     expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { code: "COMMERCIAL_TENANT_REQUIRED" },
+    });
     expect(createUser).not.toHaveBeenCalled();
   });
 
@@ -1841,6 +2252,49 @@ describe("Identity and access", () => {
     ).toMatchObject({
       results: [{ action: "assignments.saved", target_id: created.data.id }],
     });
+  });
+
+  it("provisions a user with all 100 allowed custom roles", async () => {
+    await seedAgency();
+    await seedPlatformAdministratorForAccessControl();
+    const roleIds = Array.from(
+      { length: 100 },
+      (_, index) => `custom-${index}`,
+    );
+    for (const roleId of roleIds) {
+      await seedCustomAccessRole(roleId, 101);
+    }
+    const app = createApp(
+      env.DB,
+      env.DOCUMENTS,
+      undefined,
+      platformAdministratorAuthenticator(),
+      identityUserAdministrator(),
+    );
+
+    const response = await app.request("/v1/identity/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: "maximum-custom-roles@acme.test",
+        firstName: "Custom",
+        lastName: "Roles",
+        temporaryPassword: "DemoPassword123!",
+        membership: { tenantId: 101, role: "operator" },
+        accessRoleIds: roleIds,
+      }),
+    });
+
+    expect(response.status, await response.clone().text()).toBe(201);
+    const created = await response.json<{ data: { id: string } }>();
+    const assignedRoles = await env.DB.prepare(
+      "SELECT role_id FROM access_assignments WHERE scope='tenant:101' AND principal_id=?",
+    )
+      .bind(created.data.id)
+      .all<{ role_id: string }>();
+    expect(assignedRoles.results.map((row) => row.role_id).sort()).toEqual(
+      ["builtin:tenant:101:operator", ...roleIds].sort(),
+    );
   });
 
   it("assigns platform custom roles in tenant:0 to a new platform administrator", async () => {
@@ -2138,6 +2592,53 @@ describe("Identity and access", () => {
       ],
     });
   });
+
+  it.each([
+    {
+      stored: "Ana De la Cruz",
+      change: { firstName: "  Andrea  " },
+      expected: "Andrea De la Cruz",
+    },
+    {
+      stored: "Ana De la Cruz",
+      change: { lastName: "Ríos" },
+      expected: "Ana Ríos",
+    },
+    { stored: "Ana", change: { lastName: "Ríos" }, expected: "Ana Ríos" },
+  ])(
+    "preserves the untouched part of the display name $stored",
+    async ({ stored, change, expected }) => {
+      const principal = await upsertPrincipal(env.DB, {
+        issuer: "savia:better-auth",
+        subject: "partial-name-user",
+        email: "partial-name@savia.test",
+        displayName: stored,
+      });
+      const administrator = identityUserAdministrator();
+      const updateUser = vi.spyOn(administrator, "updateUser");
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        platformAdministratorAuthenticator(),
+        administrator,
+      );
+      const response = await app.request(`/v1/identity/users/${principal.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(change),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        data: { attributes: { displayName: expected } },
+      });
+      expect(updateUser).toHaveBeenCalledWith(
+        principal.subject,
+        expect.objectContaining({ displayName: expected }),
+        expect.any(Request),
+      );
+    },
+  );
 
   it("updates access, account state, sessions, and recovery delivery for a managed user", async () => {
     await seedAgency();

@@ -273,7 +273,9 @@ it("discovers and queries authorized collections hidden only from navigation", a
 
 it("uses live HubSpot records and totals instead of the catalog's local count", async () => {
   const calls: string[] = [];
-  let summaryTotal: number | undefined = 6;
+  let summaryTotal: unknown = 6;
+  let summaryUnavailable = false;
+  let listTotal: number | undefined;
   const client = new SaviaApiClient(
     "https://api.test",
     "caller",
@@ -299,10 +301,21 @@ it("uses live HubSpot records and totals instead of the catalog's local count", 
           ],
         });
       if (pathname.endsWith("/summary"))
-        return Response.json({ data: [], total: summaryTotal });
+        return summaryUnavailable
+          ? Response.json(
+              {
+                error: {
+                  code: "CRM_UNAVAILABLE",
+                  message: "Provider unavailable",
+                },
+              },
+              { status: 502 },
+            )
+          : Response.json({ data: [], total: summaryTotal });
       return Response.json({
         data: [{ id: "1" }],
         pageInfo: { hasNextPage: true },
+        total: listTotal,
       });
     },
   );
@@ -321,6 +334,14 @@ it("uses live HubSpot records and totals instead of the catalog's local count", 
   ).toMatchObject({
     data: [{ id: "1" }],
     pageInfo: { hasNextPage: true },
+    total: null,
+  });
+  listTotal = 0;
+  expect(
+    await client.listStudioRecords("hubspot_contacts", { perPage: 1 }),
+  ).toMatchObject({
+    data: [{ id: "1" }],
+    total: null,
   });
   expect(await client.aggregateStudioRecords("hubspot_contacts")).toEqual({
     total: 6,
@@ -330,6 +351,14 @@ it("uses live HubSpot records and totals instead of the catalog's local count", 
   expect(await client.aggregateStudioRecords("hubspot_contacts")).toEqual({
     total: null,
   });
+  summaryTotal = "0";
+  expect(await client.aggregateStudioRecords("hubspot_contacts")).toEqual({
+    total: null,
+  });
+  summaryUnavailable = true;
+  await expect(
+    client.aggregateStudioRecords("hubspot_contacts"),
+  ).rejects.toThrow("502 CRM_UNAVAILABLE: Provider unavailable");
   await expect(
     client.aggregateStudioRecords("hubspot_contacts", {
       groupBy: "lifecyclestage",
@@ -340,14 +369,96 @@ it("uses live HubSpot records and totals instead of the catalog's local count", 
   ).rejects.toThrow("do not support structured filters");
 });
 
-it("rejects optional quote operations without sending network requests", async () => {
+it("does not report local counts as totals for connected and request-backed screens", async () => {
   const client = new SaviaApiClient(
     "https://api.test",
     "caller",
-    async () => {
-      throw new Error("Unexpected network request");
+    async (url) => {
+      if (String(url).endsWith("/active-tenant"))
+        return Response.json({ activeTenantId: 14 });
+      return Response.json({
+        data: [
+          { name: "local", count: 0 },
+          {
+            name: "salesforce_contacts",
+            count: 0,
+            config: {
+              studio: { collection: { kind: "crm", sourceId: "salesforce" } },
+            },
+          },
+          {
+            name: "database_contacts",
+            count: 2,
+            config: {
+              studio: {
+                collection: { kind: "postgres", sourceId: "postgres" },
+              },
+            },
+          },
+          {
+            name: "request_contacts",
+            count: 0,
+            config: { studio: { requestPage: { flowId: "contacts" } } },
+          },
+        ],
+      });
     },
   );
+  expect((await client.listStudioCollections({ all: true })).data).toEqual([
+    expect.objectContaining({ name: "local", recordCount: 0 }),
+    expect.objectContaining({ name: "salesforce_contacts", recordCount: null }),
+    expect.objectContaining({ name: "database_contacts", recordCount: null }),
+    expect.objectContaining({ name: "request_contacts", recordCount: null }),
+  ]);
+  expect((await client.listStudioCollections()).data).toEqual([
+    expect.objectContaining({ name: "salesforce_contacts", count: null }),
+  ]);
+});
+
+it("requests an ungrouped HubSpot sum and rejects an unsupported ungrouped local sum", async () => {
+  const calls: string[] = [];
+  const sum = { data: [{ value: null, count: 2, amount: 150 }], total: 2 };
+  const client = new SaviaApiClient(
+    "https://api.test",
+    "caller",
+    async (url) => {
+      const { pathname, search } = new URL(String(url));
+      calls.push(pathname + search);
+      if (pathname.endsWith("/active-tenant"))
+        return Response.json({ activeTenantId: 14 });
+      if (pathname.endsWith("/objects"))
+        return Response.json({
+          data: [
+            {
+              name: "hubspot_deals",
+              config: {
+                studio: { collection: { kind: "crm", sourceId: "hubspot" } },
+              },
+            },
+            { name: "local_deals" },
+          ],
+        });
+      return Response.json(sum);
+    },
+  );
+  await expect(
+    client.aggregateStudioRecords("hubspot_deals", { amountField: "amount" }),
+  ).resolves.toEqual(sum);
+  expect(calls).toContain(
+    "/v1/studio/14/api/records/hubspot_deals/summary?amountField=amount",
+  );
+  await expect(
+    client.aggregateStudioRecords("local_deals", { amountField: "amount" }),
+  ).rejects.toThrow(/groupBy/i);
+  expect(calls.some((path) => path.includes("/records/local_deals"))).toBe(
+    false,
+  );
+});
+
+it("rejects optional quote operations without sending network requests", async () => {
+  const client = new SaviaApiClient("https://api.test", "caller", async () => {
+    throw new Error("Unexpected network request");
+  });
 
   await expect(client.getQuoteSummary("COT-1")).rejects.toMatchObject({
     name: "OptionalCapabilityUnavailableError",

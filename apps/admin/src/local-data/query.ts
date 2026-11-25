@@ -3,6 +3,7 @@ import {
   type StudioObject,
   type StudioRecord,
 } from "@savia/studio-shared/metadata";
+import { resolveRecordSearchFields } from "@savia/studio-shared/record-search-fields";
 import type { Table } from "dexie";
 import { queryCache } from "./query-cache";
 import {
@@ -130,6 +131,15 @@ function compare(a: ReturnType<typeof scalar>, b: ReturnType<typeof scalar>) {
     return forwardText(a) < forwardText(b) ? -1 : 1;
   return a < b ? -1 : 1;
 }
+function searchFieldsFor(object: StudioObject, params: URLSearchParams) {
+  const fields = resolveRecordSearchFields(
+    object,
+    params.get("searchField"),
+    params.get("searchFields"),
+  );
+  if (!fields) throw new Error("Unknown search field");
+  return fields;
+}
 function predicate(object: StudioObject, params: URLSearchParams) {
   for (const key of params.keys())
     if (!supported.has(key))
@@ -154,21 +164,12 @@ function predicate(object: StudioObject, params: URLSearchParams) {
     )
       throw new Error("Invalid filter value");
   }
-  const fields =
-    params
-      .get("searchFields")
-      ?.split(",")
-      .map((v) => v.trim())
-      .filter((v) => object.config.fields[v])
-      .slice(0, 20) ??
-    (object.config.fields[params.get("searchField") ?? ""]
-      ? [params.get("searchField")!]
-      : []);
+  const q = params.get("q");
+  const fields = q ? searchFieldsFor(object, params) : [];
   const pipeline = object.config.studio?.pipeline?.field ?? "stage";
   return (record: StudioRecord) => {
     if ((record.deleted_at != null) !== (params.get("trash") === "true"))
       return false;
-    const q = params.get("q");
     if (q) {
       const values = fields.length
         ? fields.map((field) => record[field])
@@ -313,16 +314,7 @@ async function filteredIds(
       );
   }
   if (params.get("q") && candidates?.size !== 0) {
-    const fields =
-      params
-        .get("searchFields")
-        ?.split(",")
-        .map((v) => v.trim())
-        .filter((v) => object.config.fields[v])
-        .slice(0, 20) ??
-      (object.config.fields[params.get("searchField") ?? ""]
-        ? [params.get("searchField")!]
-        : []);
+    const fields = searchFieldsFor(object, params);
     constrain(
       await searchIds(
         db.records,

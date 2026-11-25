@@ -175,4 +175,37 @@ describe("notification inbox routes", () => {
     );
     expect(response.status).toBe(401);
   });
+
+  it.each([
+    ["read", "readAt", { read: true }],
+    ["archive", "archivedAt", undefined],
+  ] as const)(
+    "lets the account owner %s an individual notice",
+    async (action, field, body) => {
+      await seedDelivery("principal-inbox", "Account notice");
+      const path =
+        "https://savia.test/api/notifications/" +
+        `${encodeURIComponent("delivery-principal-inbox-Account notice")}/${action}`;
+      const init = {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: body && JSON.stringify(body),
+      };
+      expect(
+        (await request(appFor("principal-other"), path, init)).status,
+      ).toBe(404);
+
+      const owner = appFor("principal-inbox");
+      expect((await request(owner, path, init)).status).toBe(200);
+      const response = await request(
+        owner,
+        "https://savia.test/api/notifications",
+      );
+      expect(await response.json()).toMatchObject({
+        data: {
+          items: [{ title: "Account notice", [field]: expect.any(Number) }],
+        },
+      });
+    },
+  );
 });

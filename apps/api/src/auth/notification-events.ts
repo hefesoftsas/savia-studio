@@ -25,12 +25,17 @@ export async function importAuthNoticeEvents(
   const headers: Record<string, string> = {};
   if (options.bridgeKey) headers["x-savia-bridge-key"] = options.bridgeKey;
   const read = await authService.fetch(
-    new Request("https://savia-auth.internal/_internal/notification-events/read?limit=100", {
-      headers,
-    }),
+    new Request(
+      "https://savia-auth.internal/_internal/notification-events/read?limit=100",
+      {
+        headers,
+      },
+    ),
   );
-  if (read.status === 403) throw Object.assign(new Error("Forbidden bridge access."), { status: 403 });
-  if (!read.ok) throw new Error(`Auth notice bridge failed with status ${read.status}.`);
+  if (read.status === 403)
+    throw Object.assign(new Error("Forbidden bridge access."), { status: 403 });
+  if (!read.ok)
+    throw new Error(`Auth notice bridge failed with status ${read.status}.`);
   const { events } = (await read.json()) as { events: AuthNoticeEvent[] };
   const repository = new NotificationRepository(db);
   let accepted = 0;
@@ -44,7 +49,9 @@ export async function importAuthNoticeEvents(
       actor: { kind: "system", id: null },
       source: { kind: "security-request", id: event.id },
       title:
-        event.kind === "email-verified" ? "Email verified" : "Two-factor authentication enabled",
+        event.kind === "email-verified"
+          ? "Email verified"
+          : "Two-factor authentication enabled",
       body: "",
       audience: { kind: "explicit", principals: [principal.id] },
       createdAt: event.createdAt,
@@ -55,13 +62,19 @@ export async function importAuthNoticeEvents(
   }
   if (done.length === 0) return { accepted, acknowledged: 0 };
   const ack = await authService.fetch(
-    new Request("https://savia-auth.internal/_internal/notification-events/ack", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({ ids: done }),
-    }),
+    new Request(
+      "https://savia-auth.internal/_internal/notification-events/ack",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ ids: done }),
+      },
+    ),
   );
-  if (!ack.ok) throw new Error(`Auth notice acknowledgement failed with status ${ack.status}.`);
+  if (!ack.ok)
+    throw new Error(
+      `Auth notice acknowledgement failed with status ${ack.status}.`,
+    );
   const { acknowledged } = (await ack.json()) as { acknowledged: number };
   return { accepted, acknowledged };
 }

@@ -7,13 +7,17 @@ import {
 import type { CaptchaOptions } from "./public-forms/captcha";
 import { databaseConflict, databaseInputFailure } from "@savia/db/errors";
 import { returnOriginFromRequest } from "./auth/admin-oauth";
-import { tenantBrandingContextForRequest } from "./tenant-branding/service";
+import {
+  TenantBrandingUploadInProgressError,
+  tenantBrandingContextForRequest,
+} from "./tenant-branding/service";
 import { resolveTenantSlug } from "./tenant-slugs";
 import { parseTenantSlugFromHostname } from "@savia/tenant-host/tenant-host";
 import { RealtimeHubError } from "./realtime/hub-client";
 import { installRequestResultEnvelope } from "./request-results/routes";
 
 import { HTTPException } from "hono/http-exception";
+import { TenantFileCleanupError } from "./routes/tenant-purge";
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { Scalar } from "@scalar/hono-api-reference";
@@ -440,10 +444,30 @@ export function createApiShell(
         exception.status,
       );
     if (exception instanceof RealtimeHubError) return exception.getResponse();
+    if (exception instanceof TenantBrandingUploadInProgressError)
+      return context.json(
+        {
+          error: {
+            code: "TENANT_BRANDING_UPLOAD_IN_PROGRESS",
+            message: exception.message,
+          },
+        },
+        409,
+      );
     if (exception instanceof HTTPException)
       return context.json(
         { error: { code: "CRM_SYNC_ERROR", message: exception.message } },
         exception.status,
+      );
+    if (exception instanceof TenantFileCleanupError)
+      return context.json(
+        {
+          error: {
+            code: "TENANT_FILE_CLEANUP_UNAVAILABLE",
+            message: exception.message,
+          },
+        },
+        503,
       );
     if (exception instanceof AuthenticationError)
       return authenticationErrorResponse(exception);

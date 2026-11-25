@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
   officeDocumentHeaders,
   officeRuntimeAsset,
-} from "../src/office-gateway";
+} from "../src/office-gateway.ts";
 export function officePlugin(): Plugin {
   return {
     name: "savia-office",

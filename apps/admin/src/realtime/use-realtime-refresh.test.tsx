@@ -127,6 +127,41 @@ it("cancels queued work when the tenant changes or the view unmounts", async () 
   expect(refresh).not.toHaveBeenCalled();
 });
 
+it("clears the notice and queued work when the displayed record changes in the same room", async () => {
+  const refresh = vi.fn();
+  const { rerender, result } = renderHook(
+    ({ recordId }) =>
+      useRealtimeRefresh({
+        topics: ["access-control"],
+        tenantId: 101,
+        refreshScope: recordId,
+        blocked: true,
+        refresh,
+      }),
+    { initialProps: { recordId: "user-1" } },
+  );
+  const emit = () =>
+    connection().onEvent({
+      topic: "access-control",
+      type: "updated",
+      collection: "memberships",
+    });
+  act(emit);
+  await tick();
+  expect(result.current.changed).toBe(true);
+
+  act(emit);
+  rerender({ recordId: "user-2" });
+  expect(result.current.changed).toBe(false);
+  await tick();
+  expect(result.current.changed).toBe(false);
+  expect(refresh).not.toHaveBeenCalled();
+
+  act(emit);
+  await tick();
+  expect(result.current.changed).toBe(true);
+});
+
 it("treats a different tenant's first acknowledgement as initial", async () => {
   const refresh = vi.fn();
   const { rerender } = renderHook(

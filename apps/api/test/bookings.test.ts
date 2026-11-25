@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { beforeAll, expect, it } from "vitest";
+import { beforeAll, expect, it, vi } from "vitest";
 import { createApp } from "../src/app";
 import { PersonalCalendarService } from "../src/personal-calendars/service";
 import { createPersonalIntegrationProviderRegistry } from "../src/personal-integrations/providers";
@@ -187,6 +187,46 @@ async function fixture(
     reserve,
   };
 }
+
+it("paginates reservation history with a stable order for identical start times", async () => {
+  const f = await fixture();
+  const startsAt = f.payload.startsAt;
+  const endsAt = new Date(Date.parse(startsAt) + 1800000).toISOString();
+  await env.DB.prepare(
+    `WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<501)
+     INSERT INTO tenant_bookings(id,tenant_id,professional_id,principal_id,service_id,service_name,professional_name,starts_at,ends_at,buffer_minutes,customer_name,customer_email,manage_token,request_key,request_hash,status,created_at)
+     SELECT printf('00000000-0000-4000-8000-%012d', n),?,?,? ,?,'Consultation','Test professional',?,?,0,'Test customer','test@example.test', printf('history-token-%d', n),printf('history-key-%d', n),'history-test','confirmed',? FROM rows`,
+  )
+    .bind(
+      f.tenantId,
+      f.professionalId,
+      f.principalId,
+      f.serviceId,
+      startsAt,
+      endsAt,
+      startsAt,
+    )
+    .run();
+  const range = new URLSearchParams({ from: startsAt, to: endsAt });
+  const url = `${f.base}/reservations`;
+  const first = await f.app.request(`${url}?${range}`);
+  expect(first.status).toBe(200);
+  const body = (await first.json()) as {
+    data: { id: string }[];
+    nextCursor?: string;
+  };
+  expect(body.data).toHaveLength(500);
+  expect(body.nextCursor).toBeTruthy();
+  range.set("cursor", body.nextCursor!);
+  const second = await f.app.request(`${url}?${range}`);
+  expect(second.status).toBe(200);
+  expect(await second.json()).toEqual({
+    data: [
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000501" }),
+    ],
+  });
+  expect(body.data.at(-1)?.id).toBe("00000000-0000-4000-8000-000000000500");
+});
 
 function countingDatabase(
   database: D1Database,
@@ -593,7 +633,9 @@ it("queues Zoom conference generation only from the assigned professional's pinn
   )
     .bind(reservation.id)
     .run();
-  const from = new Date(Date.parse(reservation.startsAt) - 60_000).toISOString();
+  const from = new Date(
+    Date.parse(reservation.startsAt) - 60_000,
+  ).toISOString();
   const to = new Date(Date.parse(reservation.endsAt) + 60_000).toISOString();
   const list = async () =>
     (
@@ -943,6 +985,60 @@ it("blocks recurring My Day meetings only after the professional grants agenda a
   expect((await f.reserve()).status).toBe(201);
 });
 
+it("checks availability for all-day events in zones that skip midnight", async () => {
+  const clock = vi
+    .spyOn(Date, "now")
+    .mockReturnValue(Date.parse("2025-09-04T01:00:00Z"));
+  try {
+    const f = await fixture();
+    await new PersonalCalendarService(env.DB, {
+      secret: "booking agenda test secret",
+    }).create(f.principalId, {
+      kind: "import",
+      name: "Local days",
+      timeZone: "America/Santiago",
+      color: "blue",
+      content: [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "BEGIN:VEVENT",
+        "UID:transition-day",
+        "DTSTART;VALUE=DATE:20250907",
+        "DTEND;VALUE=DATE:20250908",
+        "END:VEVENT",
+        "END:VCALENDAR",
+      ].join("\r\n"),
+    });
+    const granted = await f.app.request(`${f.base}/agenda`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(granted.status).toBe(200);
+    const slots = (day: string) =>
+      f.app.request(
+        `${f.publicBase}/slots?serviceId=${f.serviceId}&professionalId=${f.professionalId}&date=${day}`,
+      );
+    const busy = await slots("2025-09-07");
+    expect(busy.status).toBe(200);
+    expect(await busy.json()).toMatchObject({ data: { slots: [] } });
+    const next = await slots("2025-09-08");
+    expect(next.status).toBe(200);
+    expect(await next.json()).toMatchObject({
+      data: {
+        slots: expect.arrayContaining([
+          {
+            startsAt: "2025-09-08T09:00:00.000Z",
+            endsAt: "2025-09-08T09:30:00.000Z",
+          },
+        ]),
+      },
+    });
+  } finally {
+    clock.mockRestore();
+  }
+});
+
 it("uses the source timezone for all-day meetings and keeps transparent events bookable", async () => {
   const f = await fixture();
   await f.app.request(f.base, {
@@ -1233,6 +1329,56 @@ it("supports private management capabilities, cancellation and reuse of released
   expect(((await cancel.json()) as any).data.status).toBe("cancelled");
   expect((await f.reserve()).status).toBe(201);
 });
+
+it.each(["workspace", "management"])(
+  "replays an already saved %s cancellation without starting new jobs",
+  async (surface) => {
+    const f = await fixture();
+    const created = ((await (await f.reserve()).json()) as any).data;
+    const bookingId = created.reservation.id;
+    const token = new URL(created.managementUrl).pathname.split("/").at(-1);
+    const route =
+      surface === "workspace"
+        ? `${f.base}/reservations/${bookingId}/cancel`
+        : `/api/public/bookings/manage/${token}/cancel`;
+    const cancel = (version: number) =>
+      f.app.request(route, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version }),
+      });
+    const results = await Promise.all([cancel(1), cancel(1)]);
+    for (const response of results) {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        data: { id: bookingId, status: "cancelled", version: 2 },
+      });
+    }
+    const listJobs = () =>
+      env.DB.prepare(
+        "SELECT id, revision, kind FROM tenant_booking_jobs WHERE tenant_id=? AND booking_id=? ORDER BY id",
+      )
+        .bind(f.tenantId, bookingId)
+        .all();
+    const jobs = await listJobs();
+    expect(jobs.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ revision: 2, kind: "cancellation" }),
+      ]),
+    );
+    if (surface === "management") {
+      const updated = await f.app.request(f.base, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...f.settings, cancellationMinutes: 43200 }),
+      });
+      expect(updated.status).toBe(200);
+    }
+    expect((await cancel(1)).status).toBe(200);
+    expect((await cancel(3)).status).toBe(409);
+    expect((await listJobs()).results).toEqual(jobs.results);
+  },
+);
 
 it("reschedules atomically and preserves old occupancy when the new slot conflicts", async () => {
   const f = await fixture(),

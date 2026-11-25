@@ -4,6 +4,7 @@ import type { RealtimeChangeEvent } from "./use-realtime";
 type ListPage = {
   data: unknown[];
   total?: number;
+  pageInfo?: { hasNextPage?: boolean; hasPreviousPage?: boolean };
 };
 
 function rowId(row: unknown): string | undefined {
@@ -13,11 +14,10 @@ function rowId(row: unknown): string | undefined {
 }
 
 /**
- * Applies a realtime hint to cached `getList` queries (`{ data, total }`)
- * with the least work possible:
- * - `deleted` with an id removes the row surgically — no network at all;
- * - anything else (creates, updates, hints without id, unknown shapes)
- *   invalidates the single affected prefix so exactly one refetch happens.
+ * Removes known deleted rows from cached lists immediately. Complete lists
+ * need no refetch. Partial pages are invalidated so the server can backfill
+ * shifted rows and correct totals on pages that did not contain the deletion.
+ * Other events invalidate the affected resource prefix.
  *
  * Never throws: on any doubt it falls back to invalidating.
  */
@@ -38,10 +38,20 @@ export function applyRealtimeListEvent(
     }
     const targetId = String(event.id);
     let removed = false;
+    let needsRefetch = false;
     queryClient.setQueriesData<ListPage>(
-      { queryKey: [queryKeyPrefix] },
+      { queryKey: [queryKeyPrefix, "getList"] },
       (previous) => {
-        if (!previous || !Array.isArray(previous.data)) return previous;
+        if (!previous || !Array.isArray(previous.data)) {
+          needsRefetch = true;
+          return previous;
+        }
+        if (
+          previous.total !== previous.data.length ||
+          previous.pageInfo?.hasNextPage ||
+          previous.pageInfo?.hasPreviousPage
+        )
+          needsRefetch = true;
         const data = previous.data.filter((row) => rowId(row) !== targetId);
         if (data.length === previous.data.length) return previous;
         removed = true;
@@ -54,7 +64,7 @@ export function applyRealtimeListEvent(
         };
       },
     );
-    if (!removed) invalidate();
+    if (!removed || needsRefetch) invalidate();
   } catch {
     invalidate();
   }

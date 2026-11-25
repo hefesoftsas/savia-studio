@@ -91,9 +91,9 @@ describe("provider credential vault", () => {
     await expect(
       providerVault.test("actor-2", "example-lookup", "actor-2", "success"),
     ).rejects.toMatchObject({ code: "PROVIDER_CREDENTIALS_NOT_CONFIGURED" });
-    expect(await providerVault.remove("actor-2", "example-lookup", "actor-2")).toBe(
-      false,
-    );
+    expect(
+      await providerVault.remove("actor-2", "example-lookup", "actor-2"),
+    ).toBe(false);
     await providerVault.replace(
       "actor-2",
       "example-lookup",
@@ -101,10 +101,14 @@ describe("provider credential vault", () => {
       { sample_lookup_api_key: "second-secret" },
       "actor-2",
     );
-    expect(await providerVault.credentialsFor("actor-1", "example-lookup")).toEqual({
+    expect(
+      await providerVault.credentialsFor("actor-1", "example-lookup"),
+    ).toEqual({
       sample_lookup_api_key: "first-secret",
     });
-    expect(await providerVault.credentialsFor("actor-2", "example-lookup")).toEqual({
+    expect(
+      await providerVault.credentialsFor("actor-2", "example-lookup"),
+    ).toEqual({
       sample_lookup_api_key: "second-secret",
     });
   });
@@ -113,12 +117,24 @@ describe("provider credential vault", () => {
     const credentials = { sample_lookup_api_key: "provider-secret" };
     const providerVault = vault();
 
-    await providerVault.replace("actor-1", "example-lookup", 1, credentials, "actor-1");
+    await providerVault.replace(
+      "actor-1",
+      "example-lookup",
+      1,
+      credentials,
+      "actor-1",
+    );
     const first = await env.DB.prepare(
       `SELECT credential_ciphertext, credential_iv
        FROM user_provider_credentials WHERE owner_principal_id = 'actor-1' AND provider = 'example-lookup'`,
     ).first<{ credential_ciphertext: string; credential_iv: string }>();
-    await providerVault.replace("actor-1", "example-lookup", 1, credentials, "actor-1");
+    await providerVault.replace(
+      "actor-1",
+      "example-lookup",
+      1,
+      credentials,
+      "actor-1",
+    );
     const second = await env.DB.prepare(
       `SELECT credential_ciphertext, credential_iv
        FROM user_provider_credentials WHERE owner_principal_id = 'actor-1' AND provider = 'example-lookup'`,

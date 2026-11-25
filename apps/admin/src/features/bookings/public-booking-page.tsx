@@ -8,6 +8,7 @@ import { bookingMessages } from "./booking-messages";
 import { publicBookingWizardMessages } from "./public-booking-wizard-messages";
 import { PublicBookingAvailability } from "./public-booking-availability";
 import { PublicBookingSummary } from "./public-booking-summary";
+import { publicBookingRequest as publicRequest } from "./public-booking-request";
 import type { BookingLinkScope, BookingSelection } from "./booking-types";
 import {
   BookingConference,
@@ -38,51 +39,31 @@ type PublicCatalog = {
     siteKey?: string;
   };
 };
-type Envelope<T> = { data: T };
-
-async function publicRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    credentials: "omit",
-    headers: { Accept: "application/json", ...init?.headers },
-  });
-  const body = (await response.json()) as
-    Envelope<T> | { error?: { code?: string; message?: string } };
-  if (!response.ok)
-    throw Object.assign(
-      new Error(
-        body && "error" in body ? body.error?.message : "Request failed",
-      ),
-      {
-        status: response.status,
-        code: body && "error" in body ? body.error?.code : undefined,
-      },
-    );
-  return (body as Envelope<T>).data;
-}
-
 const createIdempotencyKey = () =>
   globalThis.crypto?.randomUUID?.() ??
   `booking-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 export function PublicBookingPage({ token }: { token: string }) {
+  return <PublicBookingLink key={token} token={token} />;
+}
+
+function PublicBookingLink({ token }: { token: string }) {
   const t = useMessages(bookingMessages);
   const wt = useMessages(publicBookingWizardMessages);
   const locale = useAppLocale();
   const captchaElement = useRef<HTMLDivElement>(null);
-  const idempotency = useRef<{ signature: string; key: string } | undefined>(
-    undefined,
-  );
+  const idempotency = useRef<
+    | { signature: string; key: string; customerLocale: typeof locale }
+    | undefined
+  >(undefined);
   const [catalog, setCatalog] = useState<PublicCatalog>();
-  const [loadedToken, setLoadedToken] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [catalogError, setCatalogError] = useState(false);
   const [serviceId, setServiceId] = useState("");
   const [professionalId, setProfessionalId] = useState("");
   const [displayTimeZone, setDisplayTimeZone] = useState("");
   const [selection, setSelection] = useState<BookingSelection>();
-  const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  const [availabilityReady, setAvailabilityReady] = useState(false);
   const [customerName, setCustomerName] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [captchaToken, setCaptchaToken] = useState("");
@@ -108,25 +89,6 @@ export function PublicBookingPage({ token }: { token: string }) {
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setLoadedToken(undefined);
-    setCatalog(undefined);
-    setError("");
-    setCatalogError(false);
-    setServiceId("");
-    setProfessionalId("");
-    setDisplayTimeZone("");
-    setSelection(undefined);
-    setCustomerName("");
-    setCustomerEmail("");
-    setCaptchaToken("");
-    setCaptchaError("");
-    setCaptchaAttempt(0);
-    setSlotsAttempt(0);
-    setStep(1);
-    previousStepRef.current = 1;
-    setReservation(undefined);
-    idempotency.current = undefined;
     void publicRequest<PublicCatalog>(
       `/api/public/bookings/${encodeURIComponent(token)}`,
     )
@@ -157,14 +119,9 @@ export function PublicBookingPage({ token }: { token: string }) {
         setStep(chooseService || chooseProfessional ? 1 : 2);
         if (data.captcha.captchaProvider === "disabled")
           setCaptchaToken("local-bypass");
-        setLoadedToken(token);
       })
       .catch(() => {
-        if (active) {
-          setCatalogError(true);
-          setError(t("Booking settings could not be loaded."));
-          setLoadedToken(token);
-        }
+        if (active) setCatalog(undefined);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -172,7 +129,7 @@ export function PublicBookingPage({ token }: { token: string }) {
     return () => {
       active = false;
     };
-  }, [token, t]);
+  }, [token]);
 
   useEffect(() => {
     if (
@@ -182,6 +139,8 @@ export function PublicBookingPage({ token }: { token: string }) {
       reservation
     )
       return;
+    setCaptchaToken("");
+    setCaptchaError("");
     const activeCatalog = catalog;
     let active = true;
     let widget: { remove(): void } | undefined;
@@ -249,11 +208,6 @@ export function PublicBookingPage({ token }: { token: string }) {
     [catalog, selectedService],
   );
 
-  function changed() {
-    idempotency.current = undefined;
-    setError("");
-  }
-
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (
@@ -265,6 +219,7 @@ export function PublicBookingPage({ token }: { token: string }) {
       selection.serviceId !== serviceId ||
       selection.professionalId !== professionalId ||
       !captchaToken ||
+      !availabilityReady ||
       busy
     )
       return;
@@ -273,9 +228,8 @@ export function PublicBookingPage({ token }: { token: string }) {
       professionalId: selection.professionalId,
       startsAt: selection.slot.startsAt,
       customerName: customerName.trim(),
-      customerEmail: customerEmail.trim(),
+      customerEmail: customerEmail.trim().toLowerCase(),
       captchaToken,
-      customerLocale: locale,
     };
     const signature = JSON.stringify({
       serviceId,
@@ -285,7 +239,11 @@ export function PublicBookingPage({ token }: { token: string }) {
       customerEmail: body.customerEmail,
     });
     if (!idempotency.current || idempotency.current.signature !== signature)
-      idempotency.current = { signature, key: createIdempotencyKey() };
+      idempotency.current = {
+        signature,
+        key: createIdempotencyKey(),
+        customerLocale: locale,
+      };
     setBusy(true);
     setError("");
     try {
@@ -302,7 +260,10 @@ export function PublicBookingPage({ token }: { token: string }) {
           "Content-Type": "application/json",
           "Idempotency-Key": idempotency.current.key,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          ...body,
+          customerLocale: idempotency.current.customerLocale,
+        }),
       });
       setReservation({
         ...result.reservation,
@@ -348,7 +309,7 @@ export function PublicBookingPage({ token }: { token: string }) {
     }
   }
 
-  if (loading || loadedToken !== token)
+  if (loading)
     return (
       <main className="mx-auto grid max-w-2xl gap-4 px-4 py-10" role="status">
         <div className="h-8 w-56 animate-pulse rounded bg-muted" />
@@ -356,11 +317,11 @@ export function PublicBookingPage({ token }: { token: string }) {
         <span className="sr-only">{t("Loading booking settings…")}</span>
       </main>
     );
-  if (catalogError || !catalog)
+  if (!catalog)
     return (
       <main className="mx-auto max-w-2xl px-4 py-10">
         <p role="alert" className="text-sm text-destructive">
-          {error}
+          {t("Booking settings could not be loaded.")}
         </p>
       </main>
     );
@@ -417,7 +378,7 @@ export function PublicBookingPage({ token }: { token: string }) {
     selection &&
     selection.serviceId === serviceId &&
     selection.professionalId === professionalId &&
-    !availabilityLoading,
+    availabilityReady,
   );
   return (
     <main className="mx-auto grid max-w-3xl gap-5 px-4 py-6 md:gap-7 md:py-12">
@@ -508,7 +469,7 @@ export function PublicBookingPage({ token }: { token: string }) {
                         checked={service.id === serviceId}
                         className="mt-1 size-4 accent-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         onChange={() => {
-                          changed();
+                          setError("");
                           const eligible = service.professionalIds;
                           setServiceId(service.id);
                           setProfessionalId(
@@ -542,7 +503,7 @@ export function PublicBookingPage({ token }: { token: string }) {
                       disabled={!selectedService}
                       value={professionalId}
                       onChange={(event) => {
-                        changed();
+                        setError("");
                         setProfessionalId(event.target.value);
                         setSelection(undefined);
                       }}
@@ -599,10 +560,10 @@ export function PublicBookingPage({ token }: { token: string }) {
                   value={selection}
                   onChange={(next) => {
                     if (selection?.slot.startsAt !== next?.slot.startsAt)
-                      changed();
+                      setError("");
                     setSelection(next);
                   }}
-                  onLoadingChange={setAvailabilityLoading}
+                  onReadyChange={setAvailabilityReady}
                   hideHeading
                   refreshKey={slotsAttempt}
                 />
@@ -658,7 +619,7 @@ export function PublicBookingPage({ token }: { token: string }) {
                     maxLength={200}
                     value={customerName}
                     onChange={(event) => {
-                      changed();
+                      setError("");
                       setCustomerName(event.target.value);
                     }}
                   />
@@ -673,7 +634,7 @@ export function PublicBookingPage({ token }: { token: string }) {
                     maxLength={320}
                     value={customerEmail}
                     onChange={(event) => {
-                      changed();
+                      setError("");
                       setCustomerEmail(event.target.value);
                     }}
                   />
@@ -687,9 +648,23 @@ export function PublicBookingPage({ token }: { token: string }) {
                     className="min-h-16 max-w-full overflow-hidden"
                   />
                   {captchaError && (
-                    <p role="alert" className="text-sm text-destructive">
-                      {captchaError}
-                    </p>
+                    <div className="grid gap-2">
+                      <p role="alert" className="text-sm text-destructive">
+                        {captchaError}
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="w-fit"
+                        onClick={() => {
+                          stepHeadingRef.current?.focus();
+                          setCaptchaAttempt((attempt) => attempt + 1);
+                        }}
+                      >
+                        {t("Retry verification")}
+                      </Button>
+                    </div>
                   )}
                 </div>
               )}
@@ -706,7 +681,7 @@ export function PublicBookingPage({ token }: { token: string }) {
                   type="submit"
                   className="h-11 min-w-40"
                   disabled={
-                    busy || availabilityLoading || !captchaToken || !selection
+                    busy || !availabilityReady || !captchaToken || !selection
                   }
                 >
                   {busy

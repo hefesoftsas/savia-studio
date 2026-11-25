@@ -4,9 +4,22 @@
 
 New password accounts require email verification by default. Creating an account sends a Better Auth verification link; signing in is blocked until the link is consumed. The login screen offers **Forgot your password?** only when an email transport is configured for that access (tenant SMTP or the global fallback). Without email delivery, the recovery link and form are omitted, including on direct recovery URLs. This checks configuration, not live SMTP reachability. A verification-email resend action is also available. Public recovery and resend responses use the same confirmation for known and unknown addresses.
 
-The administrator can explicitly enable **Email verified** when creating or editing a user, including the initial user of a new tenant, after confirming ownership through another channel. The bootstrap administrator remains verified to preserve initial access. Existing ordinary accounts retain their stored verification state; they are not silently marked verified.
+The administrator can explicitly enable **Email verified** when creating or editing a user, including the initial user of a new tenant, after confirming ownership through another channel. The bootstrap administrator remains verified to preserve initial access. The user editor saves the verification state only when its switch changes. Saving a name with the switch untouched preserves verification completed while the form was open.
 
-Password recovery uses Better Auth's request/reset endpoints. Links expire after 15 minutes, can be used once, and lead to `/auth/reset-password`. Passwords require at least 12 characters. A completed reset revokes existing sessions. When creating a tenant and its first administrator, the optional temporary password must contain 12 to 128 characters. Accounts created without a temporary password receive a password setup link as well as their verification message. Provisioning fails and removes the newly created account when the required verification message cannot be sent.
+Password recovery uses Better Auth's request/reset endpoints. Links expire after 15 minutes, can be used once, and lead to `/auth/reset-password`. Passwords require at least 12 characters. A completed reset revokes existing sessions. In the user creation form and the form for a tenant's first administrator, the optional temporary password must contain 12 to 128 characters. The forms validate the length before sending the request. Accounts created without a temporary password receive a password setup link as well as their verification message. Provisioning fails and removes the newly created account when the required verification message cannot be sent.
+
+If tenant creation rejects a temporary password outside the allowed length, the
+form focuses the password field and displays the error beside it. If the
+administrator has switched to transferring an existing user while waiting, the
+error appears at the bottom of the form. The entered values remain available for
+correction. The API error omits the password value.
+The separate user creation endpoint reports an invalid temporary password as
+`USER_TEMPORARY_PASSWORD_INVALID` and also omits the password value.
+The user creation form focuses the field, shows the error, and preserves the
+entered values so the administrator can correct them and retry.
+
+To create a tenant by transferring its first administrator, select the existing
+user before saving. Savia requires this selection to submit a transfer.
 
 ## Tenant SMTP
 

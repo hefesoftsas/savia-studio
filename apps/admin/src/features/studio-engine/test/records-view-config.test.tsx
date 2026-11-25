@@ -14,6 +14,7 @@ import Root from "../app";
 import { setStudioRuntime } from "../runtime";
 import { createStudioQueryClient } from "../studio-query-cache";
 import { makeConfig } from "@savia/studio-shared/metadata";
+import { toast } from "sonner";
 
 afterEach(async () => {
   cleanup();
@@ -398,6 +399,56 @@ it("opens a stale record URL through the collection currently visible", async ()
   ).not.toBeInTheDocument();
 });
 
+it("opens a record link with punctuation without changing its identifier", async () => {
+  const object = { ...agencyProfiles, name: "orders", label: "Orders" };
+  const record = { id: "order#2026", displayName: "Order from Pages" };
+  const transport = vi.fn(async (path: string) => {
+    if (path === "/api/objects") return Response.json({ data: [object] });
+    if (path === "/api/records/orders/order%232026")
+      return Response.json({ data: record });
+    if (path.startsWith("/api/record-detail/orders/order%232026?"))
+      return Response.json({ data: { record, relations: [] } });
+    if (path.startsWith("/api/records/orders/"))
+      return Response.json({ error: "Record not found" }, { status: 404 });
+    return Response.json({ data: [], total: 0 });
+  });
+  setStudioRuntime({ embedded: true, tenantId: 24, transport });
+  const search = new URLSearchParams({ object: "orders", record: record.id });
+  render(<Root embedded search={search.toString()} />);
+
+  expect(await screen.findByText("Order from Pages")).toBeVisible();
+  expect(
+    transport.mock.calls.some(([path]) =>
+      path.startsWith("/api/record-detail/orders/order%232026?"),
+    ),
+  ).toBe(true);
+});
+
+it("does not open the same record ID in another collection when the linked collection is unavailable", async () => {
+  const object = { ...agencyProfiles, name: "orders", label: "Orders" };
+  const navigate = vi.fn();
+  const transport = vi.fn(async (path: string) => {
+    if (path === "/api/objects") return Response.json({ data: [object] });
+    if (path === "/api/records/orders/12")
+      return Response.json({
+        data: { id: "12", displayName: "Unrelated order" },
+      });
+    return Response.json({ data: [], total: 0 });
+  });
+  setStudioRuntime({ embedded: true, tenantId: 24, transport, navigate });
+  render(<Root embedded search="object=missing&view=records&record=12" />);
+
+  expect(
+    await screen.findByRole("heading", { name: "Registro no disponible" }),
+  ).toBeVisible();
+  expect(
+    transport.mock.calls.some(([path]) => path === "/api/records/orders/12"),
+  ).toBe(false);
+  expect(navigate).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Volver a la lista" }));
+  expect(navigate).toHaveBeenCalledWith("object=orders&view=records", false);
+});
+
 it("replaces a stale collection name in an embedded record URL", async () => {
   const navigate = vi.fn();
   const transport = vi.fn(async (path: string) => {
@@ -461,6 +512,265 @@ it("offers a CSV export for Agency profiles", async () => {
   ).toBeVisible();
 });
 
+it("prevents duplicate CSV downloads and lets the user retry after a failure", async () => {
+  let finishExport!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    finishExport = resolve;
+  });
+  const download = vi.fn(async () => pending);
+  const reportError = vi
+    .spyOn(toast, "error")
+    .mockImplementation(() => "export-error");
+  const click = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(() => {});
+  setStudioRuntime({
+    embedded: true,
+    tenantId: 24,
+    transport: async (path) => {
+      if (path === "/api/objects")
+        return Response.json({ data: [sourceAgencyProfiles] });
+      if (path.startsWith("/api/export/agency_profiles?")) return download();
+      return Response.json({ data: [], total: 0 });
+    },
+  });
+  try {
+    render(<Root embedded search="object=agency_profiles&view=records" />);
+    const button = await screen.findByRole("button", {
+      name: "Exportar a CSV",
+    });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(download).toHaveBeenCalledOnce();
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(click).not.toHaveBeenCalled();
+
+    finishExport(
+      Response.json(
+        { error: "HubSpot limit reached" },
+        {
+          status: 429,
+          headers: { "Retry-After": "30" },
+        },
+      ),
+    );
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(reportError).toHaveBeenCalledWith("HubSpot limit reached", {
+      description: expect.stringContaining("Puedes reintentar a partir de"),
+    });
+    download.mockResolvedValueOnce(
+      new Response("Nombre\r\nAna\r\n", {
+        headers: { "Content-Type": "text/csv" },
+      }),
+    );
+    fireEvent.click(button);
+    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(download).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(button).toBeEnabled());
+  } finally {
+    click.mockRestore();
+    reportError.mockRestore();
+  }
+});
+
+it.each([
+  ["crm", "salesforce"],
+  ["crm", "zoho"],
+  ["crm", "pipedrive"],
+  ["postgres", "database-source"],
+  ["jsonapi", "json-source"],
+  ["mcp", "mcp-source"],
+] as const)(
+  "keeps records visible without an unsupported CSV action for %s / %s",
+  async (kind, sourceId) => {
+    const object = {
+      ...agencyProfiles,
+      name: "connected_records",
+      label: "Registros conectados",
+      config: {
+        ...agencyProfiles.config,
+        studio: {
+          collection: {
+            kind,
+            sourceId,
+            resource: "contacts",
+            capabilities:
+              sourceAgencyProfiles.config.studio.collection.capabilities,
+          },
+        },
+      },
+    };
+    setStudioRuntime({
+      embedded: true,
+      tenantId: 24,
+      transport: async (path) => {
+        if (path === "/api/objects") return Response.json({ data: [object] });
+        if (path.startsWith("/api/records/connected_records?"))
+          return Response.json({
+            data: [{ id: "1", displayName: "Cuenta de prueba" }],
+            total: 1,
+          });
+        return Response.json({ data: [] });
+      },
+    });
+    render(<Root embedded search="object=connected_records&view=records" />);
+
+    expect(await screen.findByText("Cuenta de prueba")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Exportar a CSV" }),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it.each([false, true])(
+  "exports only HubSpot-supported query settings (saved view selected: %s)",
+  async (useSavedView) => {
+    const contacts = {
+      name: "hubspot_contacts",
+      label: "Contactos",
+      description: "",
+      config: {
+        ...makeConfig({ firstname: { type: "Textbox", label: "Nombre" } }),
+        studio: {
+          collection: {
+            ...studioAgencyProfiles.config.studio.collection,
+            sourceId: "hubspot",
+            resource: "contacts",
+            capabilities: {
+              ...studioAgencyProfiles.config.studio.collection.capabilities,
+              search: true,
+              filter: false,
+              sort: false,
+            },
+          },
+        },
+      },
+    };
+    const transport = vi.fn(async (path: string) => {
+      if (path === "/api/objects") return Response.json({ data: [contacts] });
+      if (path === "/api/views/hubspot_contacts")
+        return Response.json({
+          data: [
+            {
+              id: "saved-search",
+              name: "Vista anterior",
+              config: {
+                q: "Ana",
+                searchField: "firstname",
+                stage: "lead",
+                sort: { field: "firstname", order: "ASC" },
+                filters: {
+                  logic: "and",
+                  conditions: [{ field: "firstname", op: "eq", value: "Ana" }],
+                },
+              },
+            },
+          ],
+          default: null,
+        });
+      return Response.json({ data: [], total: 0 });
+    });
+    setStudioRuntime({ embedded: true, tenantId: 24, transport });
+    render(<Root embedded search="object=hubspot_contacts&view=records" />);
+
+    const exportButton = await screen.findByRole("button", {
+      name: "Exportar a CSV",
+    });
+    if (useSavedView) {
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Vista anterior" }),
+      );
+      expect(exportButton).toBeDisabled();
+      fireEvent.click(exportButton);
+      expect(
+        transport.mock.calls.some(([path]) => path.startsWith("/api/export/")),
+      ).toBe(false);
+      await waitFor(() => expect(exportButton).toBeEnabled());
+      const listRequests = transport.mock.calls
+        .map(([path]) => new URL(path, "https://savia.test"))
+        .filter((url) => url.pathname === "/api/records/hubspot_contacts");
+      expect(
+        listRequests.some((url) => url.searchParams.get("q") === "Ana"),
+      ).toBe(true);
+    }
+    fireEvent.click(exportButton);
+
+    const exportPath = transport.mock.calls.find(([path]) =>
+      path.startsWith("/api/export/hubspot_contacts?"),
+    )?.[0];
+    expect(exportPath).toBeDefined();
+    const query = new URL(exportPath!, "https://savia.test").searchParams;
+    expect(query.get("q")).toBe(useSavedView ? "Ana" : "");
+    expect(query.get("columns")).toBe('["firstname"]');
+    for (const parameter of [
+      "filters",
+      "stage",
+      "searchField",
+      "sort",
+      "order",
+    ])
+      expect(query.has(parameter), parameter).toBe(false);
+  },
+);
+
+it.each([
+  { field: "email", label: "channels · email", unavailable: false },
+  {
+    field: "old_email",
+    label: "Campo no disponible (old_email)",
+    unavailable: true,
+  },
+])(
+  "keeps the saved search field identifiable when it is absent from visible columns ($field)",
+  async ({ field, label, unavailable }) => {
+    const object = { ...agencyProfiles, name: "saved_search_records" };
+    const transport = vi.fn(async (path: string) => {
+      if (path === "/api/objects") return Response.json({ data: [object] });
+      if (path === "/api/views/saved_search_records")
+        return Response.json({
+          data: [
+            {
+              id: "saved-search",
+              name: "Búsqueda guardada",
+              config: {
+                q: "Ana",
+                searchField: field,
+                columns: ["displayName"],
+              },
+            },
+          ],
+          default: null,
+        });
+      return Response.json({ data: [], total: 0 });
+    });
+    setStudioRuntime({ embedded: true, tenantId: 24, transport });
+    render(<Root embedded search="object=saved_search_records&view=records" />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Búsqueda guardada" }),
+    );
+    const selector = screen.getByRole("combobox", { name: "Buscar por campo" });
+    expect(selector).toHaveValue(field);
+    const option = within(selector).getByRole("option", { name: label });
+    if (unavailable) expect(option).toBeDisabled();
+    else expect(option).toBeEnabled();
+
+    fireEvent.change(selector, { target: { value: "" } });
+    expect(selector).toHaveValue("");
+    await waitFor(() =>
+      expect(
+        transport.mock.calls.some(([path]) => {
+          if (!path.startsWith("/api/records/saved_search_records?"))
+            return false;
+          const query = new URL(path, "https://savia.test").searchParams;
+          return query.get("q") === "Ana" && !query.has("searchField");
+        }),
+      ).toBe(true),
+    );
+  },
+);
+
 it("offers a CSV export for local record tables", async () => {
   const localObject = {
     name: "test",
@@ -497,6 +807,44 @@ it("offers a CSV export for local record tables", async () => {
     await screen.findByRole("button", { name: "Exportar a CSV" }),
   ).toBeVisible();
 });
+
+it.each([{ fields: [] }, { fields: ["displayName"] }])(
+  "reflects scoped CSV permissions in the table ($fields)",
+  async ({ fields }) => {
+    const object = {
+      ...agencyProfiles,
+      name: "scoped_records",
+      exportFields: fields,
+    };
+    const transport = vi.fn(async (path: string) => {
+      if (path === "/api/objects") return Response.json({ data: [object] });
+      if (path.startsWith("/api/records/scoped_records?"))
+        return Response.json({
+          data: [{ id: "1", displayName: "Savia", shortName: "SV" }],
+          total: 1,
+        });
+      return Response.json({ data: [] });
+    });
+    setStudioRuntime({ embedded: true, tenantId: 24, transport });
+    render(<Root embedded search="object=scoped_records&view=records" />);
+    expect(await screen.findByText("SV")).toBeVisible();
+
+    const button = screen.queryByRole("button", { name: "Exportar a CSV" });
+    if (fields.length === 0) {
+      expect(button).toBeNull();
+      return;
+    }
+    expect(button).toBeVisible();
+    fireEvent.click(button!);
+    const request = transport.mock.calls.find(([path]) =>
+      path.startsWith("/api/export/scoped_records?"),
+    )?.[0];
+    expect(request).toBeDefined();
+    expect(
+      new URL(request!, "https://savia.test").searchParams.get("columns"),
+    ).toBe(JSON.stringify(fields));
+  },
+);
 
 it("keeps the trash action compact while preserving its accessible name", async () => {
   const transport = vi.fn(async (path: string) => {

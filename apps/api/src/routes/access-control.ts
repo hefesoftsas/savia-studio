@@ -320,7 +320,11 @@ export function registerAccessControlRoutes(
       const actor = actorFromContext(c);
       const roleScope = scope(q.scope);
       const roleId = c.req.valid("param").id;
-      const affectedPrincipals = await assignedPrincipals(db, roleScope, roleId);
+      const affectedPrincipals = await assignedPrincipals(
+        db,
+        roleScope,
+        roleId,
+      );
       const result = await deleteAccessRole(db, actor, {
         id: roleId,
         scope: roleScope,

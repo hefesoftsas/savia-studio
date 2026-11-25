@@ -14,8 +14,10 @@ vi.mock("../api", () => ({
   studioFetch: vi.fn(),
   downloadCrm: vi.fn(),
 }));
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  // Let Radix restore focus before the test environment disposes its window.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   setStudioRuntime({ embedded: false });
 });
 it("keeps canonical customer details without querying unsupported generic activity and files", async () => {

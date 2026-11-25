@@ -305,6 +305,7 @@ function gatewayConfig({
           ? true
           : [
               "/companion-downloads.json",
+              "/downloads/*",
               "/register",
               "/public/forms",
               "/public/forms/*",

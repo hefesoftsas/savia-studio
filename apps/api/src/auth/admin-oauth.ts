@@ -6,6 +6,7 @@ import {
   isAllowedTenantOrigin,
 } from "@savia/tenant-host/tenant-host";
 import type { AuthService } from "./better-auth";
+import { normalizeBookingRouteQuery } from "@savia/tenant-host/bookings-route";
 
 type AdminOAuthClient = {
   clientId: string;
@@ -30,6 +31,8 @@ type OAuthTransaction = {
 };
 
 const transactionLifetimeMilliseconds = 5 * 60 * 1000;
+const authProviderTimeoutMilliseconds = 10_000;
+const authClientLookupTimeoutMilliseconds = 4_000;
 const bookingsStateSuffix = ".bookings";
 const refreshCookieName = "savia.admin_refresh_token";
 const refreshCookiePath = "/api/auth/admin";
@@ -65,7 +68,10 @@ async function codeChallenge(codeVerifier: string): Promise<string> {
 }
 
 function error(code: string, message: string, status: number): Response {
-  return Response.json({ error: { code, message } }, { status });
+  return Response.json(
+    { error: { code, message } },
+    { status, headers: cacheHeaders() },
+  );
 }
 
 function cacheHeaders(headers: HeadersInit = {}): Headers {
@@ -327,6 +333,8 @@ function validClient(value: unknown): value is AdminOAuthClient {
   return (
     typeof client.clientId === "string" &&
     typeof client.redirectUri === "string" &&
+    /^https?:\/\//i.test(client.redirectUri) &&
+    URL.canParse(client.redirectUri) &&
     typeof client.resource === "string" &&
     Array.isArray(client.scopes) &&
     client.scopes.every((scope) => typeof scope === "string")
@@ -337,26 +345,29 @@ async function adminClient(
   service: AuthService | undefined,
 ): Promise<AdminOAuthClient | undefined> {
   if (!service) return undefined;
-  const response = await service.fetch(
-    new Request("https://savia-auth.internal/_internal/oauth/admin-client"),
+  const result = await requestAuthJson(
+    service,
+    "https://savia-auth.internal/_internal/oauth/admin-client",
+    undefined,
+    authClientLookupTimeoutMilliseconds,
   );
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    return undefined;
-  }
-  const payload = (await response.json()) as unknown;
-  return validClient(payload) ? payload : undefined;
+  return result?.response.ok && validClient(result.payload)
+    ? result.payload
+    : undefined;
 }
-
 
 async function createTransaction(
   d1: D1Database,
   client: AdminOAuthClient,
   initiatedOrigin: string,
-  resumeBookings: boolean,
+  bookingQuery: string | undefined,
 ): Promise<{ codeChallenge: string; state: string }> {
   // Bind the allowlisted destination to the one-time server-side transaction.
-  const state = randomValue() + (resumeBookings ? bookingsStateSuffix : "");
+  const state =
+    randomValue() +
+    (bookingQuery === undefined
+      ? ""
+      : bookingsStateSuffix + (bookingQuery ? `?${bookingQuery}` : ""));
   const codeVerifier = randomValue(64);
   const now = new Date();
   const expiresAt = new Date(
@@ -452,6 +463,35 @@ function callbackInput(
     : undefined;
 }
 
+async function requestAuthJson(
+  service: AuthService,
+  url: string | URL,
+  init?: RequestInit,
+  timeoutMilliseconds = authProviderTimeoutMilliseconds,
+) {
+  const controller = new AbortController();
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const exchange = service
+      .fetch(new Request(url, { ...init, signal: controller.signal }))
+      .then(async (response) => ({
+        response,
+        payload: await response.json().catch(() => undefined),
+      }));
+    const timeout = new Promise<undefined>((resolve) => {
+      deadline = setTimeout(() => {
+        resolve(undefined);
+        controller.abort();
+      }, timeoutMilliseconds);
+    });
+    return await Promise.race([exchange, timeout]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
 function tokenResponse(value: unknown): OAuthTokenResponse | undefined {
   if (!value || typeof value !== "object") return undefined;
   const token = value as OAuthTokenResponse;
@@ -498,7 +538,11 @@ function providerRedirect(
 ): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const payload = value as { redirect?: unknown; url?: unknown };
-  if (payload.redirect !== true || typeof payload.url !== "string")
+  if (
+    payload.redirect !== true ||
+    typeof payload.url !== "string" ||
+    !URL.canParse(payload.url, publicUrl)
+  )
     return undefined;
 
   const destination = new URL(payload.url, publicUrl);
@@ -527,18 +571,10 @@ async function authorizationRedirect(
   const headers = new Headers({ accept: "application/json" });
   const cookie = request.headers.get("cookie");
   if (cookie) headers.set("cookie", cookie);
-  const response = await service.fetch(
-    new Request(providerRequest, { headers }),
-  );
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    return undefined;
-  }
-  return providerRedirect(
-    await response.json().catch(() => undefined),
-    client,
-    request.url,
-  );
+  const result = await requestAuthJson(service, providerRequest, { headers });
+  return result?.response.ok
+    ? providerRedirect(result.payload, client, request.url)
+    : undefined;
 }
 
 export function registerAdminOAuthRoutes(
@@ -627,7 +663,6 @@ export function registerAdminOAuthRoutes(
     }
   }
 
-
   app.get("/api/auth/admin/authorize", async (context) => {
     if (!service)
       return error(
@@ -655,7 +690,9 @@ export function registerAdminOAuthRoutes(
       d1,
       client,
       initiatedOrigin,
-      Boolean(targetOrigin) && context.req.query("resume") === "bookings",
+      context.req.query("resume") === "bookings"
+        ? normalizeBookingRouteQuery(context.req.query("booking_query") ?? "")
+        : undefined,
     );
     const transactionDuration = performance.now() - phaseStarted;
     const authorization = new URL(
@@ -793,12 +830,30 @@ export function registerAdminOAuthRoutes(
         { status: 400, headers },
       );
     }
-    const tokenEndpoint = new URL(
-      "/api/auth/oauth2/token",
-      "https://savia-auth.internal",
-    );
-    const response = await service!.fetch(
-      new Request(tokenEndpoint, {
+    const domain = cookieDomain(context.req.url);
+    // The transaction is authoritative; a shared return cookie may belong to
+    // another tab or an earlier tenant login.
+    const returnOrigin = isAllowedTenantOrigin(
+      transaction.initiatedOrigin,
+      canonicalHost,
+    )
+      ? transaction.initiatedOrigin
+      : undefined;
+    for (const cookie of clearReturnOriginCookies(context.req.url, domain)) {
+      headers.append("set-cookie", cookie);
+    }
+    const bookingResume = /\.bookings(?:\?(.*))?$/.exec(input.state);
+    const bookingDestination = bookingResume
+      ? {
+          returnOrigin,
+          returnRoute: "bookings",
+          ...(bookingResume[1] ? { returnBookingQuery: bookingResume[1] } : {}),
+        }
+      : undefined;
+    const exchange = await requestAuthJson(
+      service!,
+      "https://savia-auth.internal/api/auth/oauth2/token",
+      {
         method: "POST",
         headers: {
           accept: "application/json",
@@ -812,23 +867,26 @@ export function registerAdminOAuthRoutes(
           redirect_uri: transaction.redirectUri,
           resource: client.resource,
         }).toString(),
-      }),
+      },
     );
-    const payload = await response.json().catch(() => undefined);
+    if (!exchange || exchange.response.status >= 500) {
+      console.error("Savia admin OAuth token service unavailable", {
+        status: exchange?.response.status,
+      });
+      return Response.json(
+        {
+          error: {
+            code: "AUTHENTICATION_UNAVAILABLE",
+            message: "Authentication service is temporarily unavailable",
+          },
+          ...bookingDestination,
+        },
+        { status: 503, headers },
+      );
+    }
+    const { response, payload } = exchange;
     const token = response.ok ? tokenResponse(payload) : undefined;
     const nextRefreshToken = token ? refreshToken(token) : undefined;
-    const domain = cookieDomain(context.req.url);
-    // The transaction is authoritative; a shared return cookie may belong to
-    // another tab or an earlier tenant login.
-    const returnOrigin = isAllowedTenantOrigin(
-      transaction.initiatedOrigin,
-      canonicalHost,
-    )
-      ? transaction.initiatedOrigin
-      : undefined;
-    for (const cookie of clearReturnOriginCookies(context.req.url, domain)) {
-      headers.append("set-cookie", cookie);
-    }
     if (!token || !nextRefreshToken) {
       const providerError = oauthErrorCode(payload);
       console.error("Savia admin OAuth token exchange failed", {
@@ -843,6 +901,7 @@ export function registerAdminOAuthRoutes(
               ? `Better Auth rejected the authorization code (${providerError})`
               : "Better Auth rejected the authorization code",
           },
+          ...bookingDestination,
         },
         { status: 401, headers },
       );
@@ -865,9 +924,7 @@ export function registerAdminOAuthRoutes(
       {
         ...publicTokenResponse(token),
         ...(returnOrigin ? { returnOrigin } : {}),
-        ...(returnOrigin && input.state.endsWith(bookingsStateSuffix)
-          ? { returnRoute: "bookings" }
-          : {}),
+        ...bookingDestination,
       },
       { headers },
     );
@@ -1008,32 +1065,27 @@ export function registerAdminOAuthRoutes(
         },
         { status: 503, headers },
       );
-    let response: Response;
-    try {
-      response = await service!.fetch(
-        new Request("https://savia-auth.internal/api/auth/oauth2/token", {
-          method: "POST",
-          headers: {
-            accept: "application/json",
-            "content-type": "application/x-www-form-urlencoded",
-          },
-          body: new URLSearchParams({
-            client_id: client.clientId,
-            grant_type: "refresh_token",
-            refresh_token: currentRefreshToken,
-            resource: client.resource,
-          }).toString(),
-        }),
-      );
-    } catch {
-      return unavailable();
-    }
-    let token: OAuthTokenResponse | undefined;
-    if (response.ok) {
-      token = tokenResponse(await response.json().catch(() => undefined));
-    } else {
-      const providerError = await response.json().catch(() => undefined);
-      const code = oauthErrorCode(providerError);
+    const exchange = await requestAuthJson(
+      service!,
+      "https://savia-auth.internal/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          client_id: client.clientId,
+          grant_type: "refresh_token",
+          refresh_token: currentRefreshToken,
+          resource: client.resource,
+        }).toString(),
+      },
+    );
+    if (!exchange) return unavailable();
+    const { response, payload } = exchange;
+    if (!response.ok) {
+      const code = oauthErrorCode(payload);
       if (
         (response.status === 400 || response.status === 401) &&
         (code === "invalid_grant" || code === "invalid_token")
@@ -1057,6 +1109,7 @@ export function registerAdminOAuthRoutes(
       }
       return unavailable();
     }
+    const token = tokenResponse(payload);
     const nextRefreshToken = token ? refreshToken(token) : undefined;
     if (!token || !nextRefreshToken) {
       return unavailable();

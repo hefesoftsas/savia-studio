@@ -12,6 +12,7 @@ const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
 const databaseId = process.env.CLOUDFLARE_DATABASE_ID;
 const token = process.env.CLOUDFLARE_API_TOKEN;
 const dryRun = process.argv.includes("--dry-run");
+const requestTimeoutMs = 30_000;
 
 if (
   accountId === undefined ||
@@ -37,26 +38,53 @@ const migrationsDir =
     : fileURLToPath(new URL("../packages/db/migrations/", import.meta.url));
 const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
 
-async function query(sql) {
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(
-      Array.isArray(sql)
-        ? { batch: sql.map((statement) => ({ sql: statement })) }
-        : { sql },
-    ),
-  });
-  const payload = await response.json();
-  if (response.ok === false || payload.success === false) {
-    throw new Error(
-      `D1 query failed (${response.status}): ${JSON.stringify(payload.errors ?? payload)}`,
-    );
+class D1StatementRejected extends Error {}
+
+async function query(sql, operation) {
+  const signal = AbortSignal.timeout(requestTimeoutMs);
+  let response;
+  let payload;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(
+        Array.isArray(sql)
+          ? { batch: sql.map((statement) => ({ sql: statement })) }
+          : { sql },
+      ),
+      signal,
+    });
+    payload = await response.json();
+  } catch (error) {
+    if (signal.aborted)
+      throw new Error(`D1 query timed out after 30 seconds (${operation}).`);
+    if (response)
+      throw new Error(
+        `D1 query failed (${response.status}): could not read a JSON response (${operation}).`,
+      );
+    throw error;
   }
-  return payload.result ?? [];
+  if (response.ok === false || payload?.success === false) {
+    const message = `D1 query failed (${response.status}): ${JSON.stringify(payload?.errors ?? payload)}`;
+    if (response.status === 400 || response.status === 409)
+      throw new D1StatementRejected(message);
+    throw new Error(message);
+  }
+  if (!Array.isArray(payload?.result) || payload.result.length === 0)
+    throw new Error(`D1 query did not return results (${operation}).`);
+  if (payload.result.some((statement) => statement?.success === false))
+    throw new D1StatementRejected(`D1 statement failed (${operation}).`);
+  if (
+    Array.isArray(sql) &&
+    (payload.result.length !== sql.length ||
+      payload.result.some((statement) => statement?.success !== true))
+  )
+    throw new Error(`D1 batch result is incomplete (${operation}).`);
+  return payload.result;
 }
 
 function splitStatements(sql) {
@@ -84,18 +112,24 @@ if (dryRun) {
 
 await query(
   "CREATE TABLE IF NOT EXISTS _savia_migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+  "initialize migration history",
 );
-const [appliedRows] = await query("SELECT filename FROM _savia_migrations");
-const applied = new Set(
-  (appliedRows?.results ?? []).map((row) => row.filename),
-);
-
-const unknown = [...applied].filter((filename) => !files.includes(filename));
-if (unknown.length)
-  throw new Error(
-    "Database uses the retired migration history. Reset or explicitly reconcile its verified schema before applying the initial baseline.",
+async function readMigrationHistory() {
+  const [appliedRows] = await query(
+    "SELECT filename FROM _savia_migrations",
+    "read migration history",
   );
+  if (!Array.isArray(appliedRows?.results))
+    throw new Error("D1 did not return the migration history.");
+  const applied = new Set(appliedRows.results.map((row) => row.filename));
+  if ([...applied].some((filename) => !files.includes(filename)))
+    throw new Error(
+      "Database uses the retired migration history. Reset or explicitly reconcile its verified schema before applying the initial baseline.",
+    );
+  return applied;
+}
 
+let applied = await readMigrationHistory();
 let pending = 0;
 for (const file of files) {
   if (applied.has(file)) continue;
@@ -105,10 +139,22 @@ for (const file of files) {
   const escaped = file.replaceAll("'", "''");
   // One transactional D1 batch preserves complete trigger bodies and prevents
   // partially applied initial schemas or bootstrap rows on retry.
-  await query([
-    ...statements,
-    `INSERT INTO _savia_migrations(filename,applied_at) VALUES ('${escaped}',datetime('now'))`,
-  ]);
+  try {
+    await query(
+      [
+        ...statements,
+        `INSERT INTO _savia_migrations(filename,applied_at) VALUES ('${escaped}',datetime('now'))`,
+      ],
+      file,
+    );
+  } catch (error) {
+    if (!(error instanceof D1StatementRejected)) throw error;
+    // Another publisher may have committed this file after our history read.
+    applied = await readMigrationHistory();
+    if (!applied.has(file)) throw error;
+    console.log(`Already applied ${file} (confirmed in D1 migration history).`);
+    continue;
+  }
   pending += 1;
   console.log(`Applied ${file} (${statements.length} statements).`);
 }

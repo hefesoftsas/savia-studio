@@ -25,6 +25,53 @@ export type GatewayEnv = {
 
 const FLOWS_UI_PATH = "/flows-ui";
 const LEGACY_PRODUCTION_HOST = "savia.app.hefesoft.com";
+const vscodeDownloadPath =
+  /^\/downloads\/(savia-plugin-authoring-[a-z0-9.+-]+\.vsix(?:\.sha256)?)$/i;
+
+async function vscodeDownloadResponse(
+  request: Request,
+  assets: GatewayFetcher,
+  filename: string,
+): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD")
+    return new Response(null, {
+      status: 405,
+      headers: { Allow: "GET, HEAD", "Cache-Control": "no-store" },
+    });
+  const asset = await assets.fetch(request);
+  const contentType = asset.headers.get("Content-Type") ?? "";
+  if (
+    asset.status === 404 ||
+    (asset.ok && /^text\/html\b/i.test(contentType))
+  ) {
+    await asset.body?.cancel().catch(() => undefined);
+    return new Response(null, {
+      status: 404,
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+  if (!asset.ok) return asset;
+  const download = new Response(
+    request.method === "HEAD" ? null : asset.body,
+    asset,
+  );
+  download.headers.set(
+    "Content-Type",
+    filename.toLowerCase().endsWith(".sha256")
+      ? "text/plain; charset=utf-8"
+      : "application/octet-stream",
+  );
+  download.headers.set(
+    "Content-Disposition",
+    `attachment; filename="${filename}"`,
+  );
+  download.headers.set(
+    "Cache-Control",
+    "public, max-age=3600, must-revalidate",
+  );
+  download.headers.set("X-Content-Type-Options", "nosniff");
+  return download;
+}
 
 type LegacyHostResolution =
   | { kind: "not-legacy" }
@@ -257,6 +304,9 @@ export async function gatewayFetch(
   }
 
   const pathname = new URL(request.url).pathname;
+  const extensionFilename = vscodeDownloadPath.exec(pathname)?.[1];
+  if (extensionFilename)
+    return vscodeDownloadResponse(request, env.ASSETS, extensionFilename);
   if (isFlowsUiPath(pathname)) return flowsAssetResponse(request, env.ASSETS);
   if (pathname === "/companion-downloads.json")
     return companionDownloadsResponse(request);

@@ -356,7 +356,43 @@ export async function uploadBrandingAsset(
   }
   return { url: "/api/public/tenant-branding/assets/" + id + "/" + assetId };
 }
-/** Called only by the authorized tenant deletion flow, before deleting its DB row. */
+export class TenantBrandingUploadInProgressError extends HTTPException {
+  constructor() {
+    super(409, {
+      message: "An image upload is in progress. Retry tenant deletion shortly.",
+    });
+  }
+}
+
+export async function deactivateTenantForDeletion(
+  db: D1Database,
+  id: number,
+  confirmedName?: string,
+): Promise<boolean> {
+  // Recheck confirmation and in-flight uploads in the deactivation statement,
+  // before marking or removing any branding assets.
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const locked = await db
+    .prepare(
+      "UPDATE tenants SET is_active=0 WHERE id=? AND name=COALESCE(?,name) AND NOT EXISTS(SELECT 1 FROM tenant_branding_assets WHERE tenant_id=? AND state='uploading' AND created_at>=?) RETURNING id",
+    )
+    .bind(id, confirmedName ?? null, id, cutoff)
+    .first();
+  if (!locked) {
+    const tenant = await db
+      .prepare("SELECT name FROM tenants WHERE id=?")
+      .bind(id)
+      .first<{ name: string }>();
+    if (!tenant)
+      throw new HTTPException(404, { message: "The tenant no longer exists." });
+    if (confirmedName !== undefined && tenant.name !== confirmedName)
+      return false;
+    throw new TenantBrandingUploadInProgressError();
+  }
+  return true;
+}
+
+/** Removes assets for ordinary deletion, after its restrictive-reference checks. */
 export async function deleteTenantBrandingAssets(
   db: D1Database,
   bucket: R2Bucket | undefined,
@@ -370,19 +406,7 @@ export async function deleteTenantBrandingAssets(
     throw new HTTPException(503, {
       message: "Image storage cleanup unavailable.",
     });
-  // Deactivate and check uploads in the same statement. Upload reservations also
-  // check active status atomically, closing the delete-versus-upload race.
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const locked = await db
-    .prepare(
-      "UPDATE tenants SET is_active=0 WHERE id=? AND NOT EXISTS(SELECT 1 FROM tenant_branding_assets WHERE tenant_id=? AND state='uploading' AND created_at>=?) RETURNING id",
-    )
-    .bind(id, id, cutoff)
-    .first();
-  if (!locked)
-    throw new HTTPException(409, {
-      message: "An image upload is in progress. Retry tenant deletion shortly.",
-    });
+  await deactivateTenantForDeletion(db, id);
   await db
     .prepare(
       "UPDATE tenant_branding_assets SET state='deleting' WHERE tenant_id=?",

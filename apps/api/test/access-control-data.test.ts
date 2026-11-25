@@ -63,6 +63,104 @@ beforeAll(async () => {
   );
 });
 const base = "/v1/dynamic-crm/101/api";
+it("reports allowed CSV fields, then exports them with the requested headers and order", async () => {
+  const admin = await f.actor("agency_admin");
+  const revision = (await loadAccessPolicy(f.db, admin, "tenant:101")).revision;
+  const role = await saveAccessRole(f.db, admin, {
+    scope: "tenant:101",
+    name: "csv-export",
+    label: "CSV export",
+    description: "",
+    enabled: true,
+    expectedRevision: revision,
+    grants: [
+      {
+        resource: "page:acl_contacts",
+        action: "read",
+        predicate: { all: true },
+        fields: [],
+      },
+      {
+        resource: "collection:acl_contacts",
+        action: "read",
+        predicate: { all: true },
+        fields: ["name", "commission"],
+      },
+      {
+        resource: "collection:acl_contacts",
+        action: "export",
+        predicate: { all: true },
+        fields: ["name"],
+      },
+    ],
+  });
+  await replaceAccessAssignments(f.db, admin, {
+    scope: "tenant:101",
+    principalId: f.principalId("operator"),
+    roleIds: [role.id],
+    expectedRevision: role.revision,
+  });
+  const response = await f.request(
+    "operator",
+    101,
+    base + "/objects/acl_contacts",
+  );
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    data: { exportFields: ["name"] },
+  });
+  const csv = await f.request(
+    "operator",
+    101,
+    base +
+      "/export/acl_contacts?" +
+      new URLSearchParams({ columns: '["name"]' }),
+  );
+  expect(csv.status).toBe(200);
+  expect(csv.headers.get("content-type")).toMatch(/^text\/csv/);
+  expect(await csv.text()).toContain("Tenant 101");
+  for (const [order, expected] of [
+    ["ASC", ['"Hidden client"', '"Tenant 101"']],
+    ["DESC", ['"Tenant 101"', '"Hidden client"']],
+  ] as const) {
+    const query = new URLSearchParams({
+      columns: '["name"]',
+      headers: '["Nombre de contacto"]',
+      sort: "name",
+      order,
+    });
+    const result = await f.request(
+      "operator",
+      101,
+      base + "/export/acl_contacts?" + query,
+    );
+    expect(result.status).toBe(200);
+    expect((await result.text()).trim().split("\r\n")).toEqual([
+      '"Nombre de contacto"',
+      ...expected,
+    ]);
+  }
+  const invalidHeaders = await f.request(
+    "operator",
+    101,
+    base +
+      "/export/acl_contacts?" +
+      new URLSearchParams({ columns: '["name"]', headers: "[]" }),
+  );
+  expect(invalidHeaders.status).toBe(422);
+  const unexportableField = await f.request(
+    "operator",
+    101,
+    base +
+      "/export/acl_contacts?" +
+      new URLSearchParams({
+        columns: '["commission"]',
+        headers: '["Commission"]',
+      }),
+  );
+  expect(unexportableField.status).toBe(403);
+});
+
 it("filters before pagination and count, and projects fields", async () => {
   const response = await f.request(
     "viewer",
@@ -112,6 +210,28 @@ it("protects single-record reads and rejects hidden query fields", async () => {
     ).status,
   ).toBe(403);
 });
+it.each([
+  "null",
+  '{"conditions":{}}',
+  '{"conditions":[null]}',
+  '{"conditions":[{"field":"name"}]}',
+])(
+  "returns 422 for malformed filters in scoped record queries and exports (%s)",
+  async (filters) => {
+    const query = new URLSearchParams({ filters });
+    for (const surface of ["records", "export"])
+      expect(
+        (
+          await f.request(
+            "viewer",
+            101,
+            `${base}/${surface}/acl_contacts?${query}`,
+          )
+        ).status,
+      ).toBe(422);
+  },
+);
+
 it("rejects unauthorized write fields and allows a permitted update", async () => {
   const init = (body: unknown) => ({
     method: "PATCH",

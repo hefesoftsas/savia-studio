@@ -42,6 +42,7 @@ it("expands full details and exports the same screen scope", async () => {
     expect(downloadCrm).toHaveBeenCalledWith(
       "/api/audit/export.csv?object=clients",
       "historial.csv",
+      "text/csv",
     ),
   );
 });

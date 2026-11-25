@@ -7,9 +7,9 @@ import { loadingMessages } from "@/i18n/locales/loading";
 
 export const LOADING_RECOVERY_DELAY_MS = 15_000;
 
-export function getAdminAuthorizeUrl(): string {
+export function getAdminAuthorizeUrl(bookingQuery?: string): string {
   const apiUrl = import.meta.env.VITE_SAVIA_API_URL ?? window.location.origin;
-  return adminAuthorizeUrl(apiUrl, window.location.href);
+  return adminAuthorizeUrl(apiUrl, window.location.href, bookingQuery);
 }
 
 function getRecoveryCopy() {

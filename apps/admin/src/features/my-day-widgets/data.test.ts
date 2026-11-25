@@ -34,6 +34,37 @@ const response: ObjectsResponse = {
 };
 
 describe("normalizeCollections", () => {
+  it("shows catalog counts for local collections only", () => {
+    const collections = normalizeCollections("/v1/studio/0", {
+      data: [
+        { name: "Local", count: 0 },
+        {
+          name: "Salesforce",
+          count: 0,
+          config: {
+            studio: { collection: { kind: "crm", sourceId: "salesforce" } },
+          },
+        },
+        {
+          name: "PostgreSQL",
+          count: 4,
+          config: {
+            studio: { collection: { kind: "postgres", sourceId: "db" } },
+          },
+        },
+      ],
+    });
+    expect(
+      collections.find((collection) => collection.name === "Local")?.count,
+    ).toBe(0);
+    expect(
+      collections.find((collection) => collection.name === "Salesforce")?.count,
+    ).toBeUndefined();
+    expect(
+      collections.find((collection) => collection.name === "PostgreSQL")?.count,
+    ).toBeUndefined();
+  });
+
   it("keeps visible collections sorted by label", () => {
     const collections = normalizeCollections("/v1/studio/0", response);
     expect(collections.map((entry) => entry.name)).toEqual(["contracts"]);

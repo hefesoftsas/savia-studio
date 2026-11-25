@@ -552,6 +552,21 @@ export const bookingMessages = {
     "Reservations could not be loaded.",
     "Não foi possível carregar as reservas.",
   ],
+  "More reservations could not be loaded.": [
+    "No se pudieron cargar más reservas.",
+    "More reservations could not be loaded.",
+    "Não foi possível carregar mais reservas.",
+  ],
+  "Load more reservations": [
+    "Cargar más reservas",
+    "Load more reservations",
+    "Carregar mais reservas",
+  ],
+  "Loading reservations…": [
+    "Cargando reservas…",
+    "Loading reservations…",
+    "Carregando reservas…",
+  ],
   "No reservations in this period.": [
     "No hay reservas en este período.",
     "No reservations in this period.",
@@ -721,6 +736,11 @@ export const bookingMessages = {
     "Reservation could not be cancelled. Refresh and retry.",
     "Não foi possível cancelar a reserva. Atualize e tente novamente.",
   ],
+  "Cancelling reservation…": [
+    "Cancelando reserva…",
+    "Cancelling reservation…",
+    "Cancelando reserva…",
+  ],
   Confirmed: ["Confirmada", "Confirmed", "Confirmado"],
   Cancelled: ["Cancelada", "Cancelled", "Cancelado"],
   Service: ["Servicio", "Service", "Serviço"],
@@ -814,15 +834,20 @@ export const bookingMessages = {
     "That time is no longer available. Choose another available time.",
     "Esse horário não está mais disponível. Escolha outro horário disponível.",
   ],
-  "Available times could not be loaded. Choose another date and retry.": [
-    "No se pudieron cargar los horarios. Elige otra fecha e inténtalo de nuevo.",
-    "Available times could not be loaded. Choose another date and retry.",
-    "Não foi possível carregar os horários. Escolha outra data e tente novamente.",
+  "Available times could not be loaded. Check your connection and retry.": [
+    "No se pudieron cargar los horarios. Revisa tu conexión e inténtalo de nuevo.",
+    "Available times could not be loaded. Check your connection and retry.",
+    "Não foi possível carregar os horários. Verifique sua conexão e tente novamente.",
   ],
   "Verification could not load. Check your connection and retry.": [
     "No se pudo cargar la verificación. Revisa tu conexión e inténtalo de nuevo.",
     "Verification could not load. Check your connection and retry.",
     "Não foi possível carregar a verificação. Verifique sua conexão e tente novamente.",
+  ],
+  "Retry verification": [
+    "Reintentar verificación",
+    "Retry verification",
+    "Tentar verificação novamente",
   ],
   Reschedule: ["Cambiar horario", "Reschedule", "Remarcar"],
   Cancel: ["Cerrar", "Cancel", "Fechar"],
@@ -914,6 +939,12 @@ export const bookingMessages = {
     "Confirmar alteração",
   ],
   "Saving…": ["Guardando…", "Saving…", "Salvando…"],
+  "This appointment was rescheduled. Review the updated time before making another change.":
+    [
+      "Esta cita cambió de horario. Revisa la hora actualizada antes de hacer otro cambio.",
+      "This appointment was rescheduled. Review the updated time before making another change.",
+      "Esta consulta foi remarcada. Confira o horário atualizado antes de fazer outra alteração.",
+    ],
   "To change this appointment, contact the booking business.": [
     "Para cambiar esta cita, contacta al negocio que la reservó.",
     "To change this appointment, contact the booking business.",

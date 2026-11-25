@@ -81,7 +81,9 @@ export function AddWidgetDialog({
   const [tenantApiBasePath, setTenantApiBasePath] = useState("");
   const [collections, setCollections] = useState<WidgetCollection[]>([]);
   const [collection, setCollection] = useState("");
-  const [schema, setSchema] = useState<WidgetCollectionSchema | null>(null);
+  const [loadedSchema, setSchema] = useState<WidgetCollectionSchema | null>(
+    null,
+  );
   const [kind, setKind] = useState<string>("summary");
   const [systemKind, setSystemKind] = useState<string>("agenda");
   const [extensions, setExtensions] = useState<
@@ -187,6 +189,11 @@ export function AddWidgetDialog({
     };
   }, [open, apiClient, tenantApiBasePath, collection, source]);
 
+  const schema =
+    loadedSchema?.apiBasePath === tenantApiBasePath &&
+    loadedSchema.name === collection
+      ? loadedSchema
+      : null;
   const detected = useMemo(
     () => (schema ? autoDetectWidgetConfig(schema) : {}),
     [schema],
@@ -210,16 +217,26 @@ export function AddWidgetDialog({
   const isPluginKind = kind.startsWith("plugin:");
   const needsGroup = kind === "chart";
   const needsDate = kind === "actions";
-  const incompatible =
-    schema !== null &&
-    ((needsGroup && dropdownFields.length === 0) ||
-      (needsDate &&
-        schema.fields.every(
-          (field) =>
-            field.type !== "DateControl" &&
-            field.type !== "DateTime" &&
-            field.type !== "Time",
-        )));
+  let incompatibility: WidgetMessageKey | undefined;
+  if (schema && needsGroup) {
+    if (schema.summarySupported === false)
+      incompatibility = "This source does not support charts by status.";
+    else if (dropdownFields.length === 0)
+      incompatibility =
+        "This collection has no options to group by. Choose another type.";
+  }
+  if (schema && needsDate) {
+    if (!detected.dateField)
+      incompatibility =
+        "This collection has no date fields. Choose another type.";
+    else if (schema.sortSupported === false)
+      incompatibility = "This source cannot sort records by due date.";
+  }
+  const needsSchema = needsGroup || needsDate;
+  const canSaveCollection =
+    Boolean(collection) &&
+    !incompatibility &&
+    (!needsSchema || schema !== null);
 
   async function save() {
     if (source === "system") {
@@ -248,14 +265,7 @@ export function AddWidgetDialog({
       setFeedback("Choose a tenant and a collection.");
       return;
     }
-    if (incompatible) {
-      setFeedback(
-        kind === "chart"
-          ? "This collection has no grouping field for a chart."
-          : "This collection has no date field for due dates.",
-      );
-      return;
-    }
+    if (!canSaveCollection) return;
     const parsedLimit = Number(limit);
     const groupValue =
       statusField !== AUTO ? statusField : detected.statusField;
@@ -482,18 +492,12 @@ export function AddWidgetDialog({
                   </SelectContent>
                 </Select>
               </div>
-              {incompatible ? (
+              {incompatibility ? (
                 <p role="alert" className="text-sm text-destructive">
-                  {kind === "chart"
-                    ? t(
-                        "This collection has no options to group by. Choose another type.",
-                      )
-                    : t(
-                        "This collection has no date fields. Choose another type.",
-                      )}
+                  {t(incompatibility)}
                 </p>
               ) : null}
-              {needsDate && schema && !incompatible ? (
+              {needsDate && schema && !incompatibility ? (
                 <p className="text-sm text-muted-foreground">
                   {t("Date field detected: %{field}.", {
                     field: detected.dateField ?? t("Date field"),
@@ -507,7 +511,10 @@ export function AddWidgetDialog({
                   )}
                 </p>
               ) : null}
-              {schema && !needsDate && !isPluginKind ? (
+              {schema &&
+              !needsDate &&
+              !isPluginKind &&
+              (kind === "items" || schema.summarySupported !== false) ? (
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="widget-status">{t("Group by")}</Label>
@@ -606,9 +613,7 @@ export function AddWidgetDialog({
             onClick={() => void save()}
             disabled={
               saving ||
-              (source === "system"
-                ? !canSaveSystem
-                : !collection || incompatible)
+              (source === "system" ? !canSaveSystem : !canSaveCollection)
             }
           >
             {saving ? <LoaderCircle className="animate-spin" /> : null}

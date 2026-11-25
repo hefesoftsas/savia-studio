@@ -15,6 +15,9 @@ export async function withRequestTimeout<T>(
   timeoutMs = REQUEST_TIMEOUT_MS,
   externalSignal?: AbortSignal | null,
 ): Promise<T> {
+  if (externalSignal?.aborted)
+    throw externalSignal.reason ?? new DOMException("Aborted", "AbortError");
+
   const controller = new AbortController();
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   let removeAbortListener: (() => void) | undefined;
@@ -27,13 +30,9 @@ export async function withRequestTimeout<T>(
           controller.abort(reason);
           reject(reason);
         };
-        if (externalSignal.aborted) {
-          abort();
-        } else {
-          externalSignal.addEventListener("abort", abort, { once: true });
-          removeAbortListener = () =>
-            externalSignal.removeEventListener("abort", abort);
-        }
+        externalSignal.addEventListener("abort", abort, { once: true });
+        removeAbortListener = () =>
+          externalSignal.removeEventListener("abort", abort);
       })
     : undefined;
 

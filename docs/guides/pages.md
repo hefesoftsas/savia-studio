@@ -76,6 +76,14 @@ Page permissions, autosave, conflict protection and revision history apply to th
 
 **Collection view** embeds an existing authorized collection as a table or board, optionally using a saved view's filters and columns. Records remain in their collection. The embed displays 20 records per page; board groups describe only the current page. Open the collection for its full editing capabilities. **Record page** opens or creates a private page bound to the selected record; its properties load from the viewer's collection API, independently of page sharing. The server resolves the binding independently of the page-list limit and enforces one bound page per tenant, domain, collection and record, including concurrent requests. Existing page permissions still apply. The uniqueness migration preserves duplicate notes and their content, retaining the oldest binding and detaching the others.
 
+Embedded CRM collections use the search, filter, and sorting options supported by the connection. Pagination follows the provider's next-page indication when it supplies one, including when the total is unknown. Changing the workspace, collection, or saved view starts the block on page one. If the reported record count shrinks and leaves the current page out of range, the block returns to the last available page.
+
+Embedded tables show the first five available columns selected in the saved view in their configured order, with any saved column names. If the view has no displayable columns, the block lists links to its authorized records by ID.
+
+Links from a page to Studio preserve punctuation in supported record identifiers, including a literal `#`. Record links require an explicit, authorized workspace. A link to an unavailable collection shows **Record unavailable** before opening any record.
+
+If a board's grouping field is hidden or removed, the block uses an available pipeline field or dropdown. It displays a table if no grouping field is available. Empty group values appear under **No group**, independently of named groups.
+
 **Image or file** uploads PNG, JPEG, GIF, WebP, PDF or plain text, up to 10 MB, through the authenticated API into the configured document bucket. Access to attachments follows the page permissions. Browser object URLs are temporary and revoked when unmounted.
 
 ## Saving, sharing and history

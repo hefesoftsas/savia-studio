@@ -208,12 +208,20 @@ async function serviceJson<T>(
   if (!response.ok) {
     if (knownConflict && response.status === 409) {
       const body = (await response.json().catch(() => undefined)) as
-        | { error?: { code?: unknown } }
-        | undefined;
+        { error?: { code?: unknown } } | undefined;
       if (body?.error?.code === knownConflict.code) {
         throw new AuthenticationError(
           "IDENTITY_EMAIL_CONFLICT",
           knownConflict.message,
+        );
+      }
+    } else if (response.status === 503) {
+      const body = (await response.json().catch(() => undefined)) as
+        { error?: { code?: unknown } } | undefined;
+      if (body?.error?.code === "VERIFICATION_EMAIL_UNAVAILABLE") {
+        throw new AuthenticationError(
+          "VERIFICATION_EMAIL_UNAVAILABLE",
+          "Verification email delivery is unavailable",
         );
       }
     } else {
@@ -523,7 +531,17 @@ export function betterAuthUserAdministrator(
           { method: "POST", headers: internalHeaders() },
         ),
       );
-      await response.body?.cancel().catch(() => undefined);
+      if (response.status === 503) {
+        const body = (await response.json().catch(() => undefined)) as
+          { error?: { code?: unknown } } | undefined;
+        if (body?.error?.code === "PASSWORD_RESET_EMAIL_UNAVAILABLE")
+          throw new AuthenticationError(
+            "PASSWORD_RESET_EMAIL_UNAVAILABLE",
+            "Password reset email delivery is unavailable",
+          );
+      } else {
+        await response.body?.cancel().catch(() => undefined);
+      }
       if (!response.ok) {
         throw new AuthenticationError(
           "AUTHENTICATION_UNAVAILABLE",

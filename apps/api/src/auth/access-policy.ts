@@ -13,8 +13,13 @@ export type AgencyCapability =
 
 const agencyRoleCapabilities = {
   tenant_admin: [
-    "documents:read", "agency:update", "crm:manage", "providers:manage",
-    "customers:create", "customers:update", "customers:delete",
+    "documents:read",
+    "agency:update",
+    "crm:manage",
+    "providers:manage",
+    "customers:create",
+    "customers:update",
+    "customers:delete",
   ],
   agency_admin: [
     "documents:read",

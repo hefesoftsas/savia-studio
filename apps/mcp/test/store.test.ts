@@ -98,6 +98,17 @@ describe("store assistant tools", () => {
           }),
         );
       }
+      expect(
+        tools.find(({ name }) => name === "savia_store_execute")?.inputSchema,
+      ).toMatchObject({
+        type: "object",
+        required: ["pluginId", "actionId", "input"],
+        properties: {
+          pluginId: { type: "string", minLength: 1 },
+          actionId: { type: "string", minLength: 1 },
+          input: { type: "object", additionalProperties: {} },
+        },
+      });
       const listed = await client.callTool("savia_store_catalog", {});
       expect(listed.structuredContent).toEqual(catalog);
 

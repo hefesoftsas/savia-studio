@@ -48,7 +48,7 @@ const definitions = [
   [
     "savia_list_studio_records",
     "studio",
-    "Read authorized live collection records. Search, filters and pagination depend on the provider.",
+    "Read authorized live collection records. A null total is unknown. The page size is not the collection total. Search, filters and pagination depend on the provider.",
     z.object({
       object: text,
       page: z.number().int().min(1).optional(),

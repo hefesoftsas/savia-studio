@@ -252,10 +252,13 @@ it("persists records across requests, checks versions, and isolates exports and 
     body: JSON.stringify({ name: "Cambio", _version: 999 }),
   });
   expect(stale.status).toBe(409);
+  const attachmentBytes = Uint8Array.of(0x00, 0x7f, 0x80, 0xff);
   const form = new FormData();
   form.append(
     "file",
-    new File(["contenido de prueba"], "prueba.txt", { type: "text/plain" }),
+    new File([attachmentBytes], "example.bin", {
+      type: "application/octet-stream",
+    }),
   );
   const upload = await app.request(prefix + "/files/account/" + id, {
     method: "POST",
@@ -266,7 +269,9 @@ it("persists records across requests, checks versions, and isolates exports and 
   const download = await app.request(
     prefix + "/file/" + file.data.id + "/download",
   );
-  expect(await download.text()).toBe("contenido de prueba");
+  expect(download.status).toBe(200);
+  expect(download.headers.get("content-type")).toBe("application/octet-stream");
+  expect(new Uint8Array(await download.arrayBuffer())).toEqual(attachmentBytes);
   const other = createApp(
     env.DB,
     env.DOCUMENTS,
@@ -332,6 +337,64 @@ it("encrypts integration credentials using the configured Savia CRM key", async 
   expect(row?.encrypted_secret).not.toContain("test-private-value");
 });
 
+it("preserves an encoded record ID through the Studio detail and mutation routes", async () => {
+  const app = admin();
+  const base = "/v1/studio/101/api";
+  const created = await app.request(base + "/objects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "link_orders",
+      label: "Orders",
+      config: {
+        version: 2,
+        fields: { name: { type: "Textbox", label: "Name" } },
+        fieldOrder: ["name"],
+      },
+    }),
+  });
+  expect(created.status).toBe(201);
+  const id = "order#2026?";
+  await env.DB.prepare(
+    "INSERT INTO studio_records(tenant_id, object_name, id, data) VALUES (?, ?, ?, ?)",
+  )
+    .bind("tenant:101", "link_orders", id, '{"name":"Order from Pages"}')
+    .run();
+
+  const path = "/link_orders/" + encodeURIComponent(id);
+  const record = await app.request(base + "/records" + path);
+  expect(record.status).toBe(200);
+  expect(await record.json()).toMatchObject({ data: { id } });
+  const detail = await app.request(base + "/record-detail" + path + "?page=1");
+  expect(detail.status).toBe(200);
+  expect(await detail.json()).toMatchObject({ data: { record: { id } } });
+  const recordUrl = base + "/records" + path;
+  const headers = { "content-type": "application/json" };
+  const updated = await app.request(recordUrl, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ name: "Edited order", _version: 1 }),
+  });
+  expect(updated.status).toBe(200);
+  expect(await updated.json()).toMatchObject({
+    data: { id, name: "Edited order", _version: 2 },
+  });
+  const deleted = await app.request(recordUrl + "?version=2", {
+    method: "DELETE",
+  });
+  expect(deleted.status).toBe(200);
+  expect(await deleted.json()).toMatchObject({ data: { id, _version: 3 } });
+  const restored = await app.request(recordUrl + "/restore", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ version: 3 }),
+  });
+  expect(restored.status).toBe(200);
+  expect(await restored.json()).toMatchObject({
+    data: { id, name: "Edited order", _version: 4 },
+  });
+});
+
 it("allows members to discover only shared CRM collections and rejects writes and foreign tenants", async () => {
   const manager = admin();
   for (const name of ["shared_contacts", "private_contacts"]) {
@@ -376,9 +439,12 @@ it("allows members to discover only shared CRM collections and rejects writes an
   );
   const response = await member.request(prefix + "/objects");
   expect(response.status).toBe(200);
-  expect(((await response.json()) as any).data.map((x: any) => x.name)).toEqual(
-    ["shared_contacts"],
-  );
+  expect(await response.json()).toMatchObject({
+    data: [{ name: "shared_contacts", exportFields: [] }],
+  });
+  expect(
+    (await member.request(prefix + "/export/shared_contacts")).status,
+  ).toBe(403);
   expect(
     (await member.request(prefix + "/bootstrap", { method: "POST" })).status,
   ).toBe(200);

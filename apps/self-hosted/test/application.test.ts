@@ -165,6 +165,29 @@ async function applicationScenario(postgresUrl?: string, qdrantUrl?: string) {
     await json("/api/auth/two-factor/verify-totp", 200, "POST", {
       code: totp(enrollment.totpURI),
     });
+    const tenantPayload = {
+      name: "Native tenant creation fixture",
+      initialUser: {
+        email: "native-tenant-owner@example.test",
+        firstName: "Tenant",
+        lastName: "Fixture",
+        role: "tenant_admin",
+        temporaryPassword: "Temporary-Fixture-Password-123!",
+      },
+    };
+    const unavailable = await json("/v1/tenants", 503, "POST", tenantPayload);
+    expect(unavailable.error.code).toBe("VERIFICATION_EMAIL_UNAVAILABLE");
+    expect(unavailable.error.message).toBe(
+      "Verification email delivery is unavailable",
+    );
+    const tenant = await json("/v1/tenants", 201, "POST", {
+      ...tenantPayload,
+      initialUser: { ...tenantPayload.initialUser, emailVerified: true },
+    });
+    expect(tenant.data).toMatchObject({
+      id: expect.any(Number),
+      idSlug: "native-tenant-creation-fixture",
+    });
     if (qdrantUrl) {
       // Seed the existing tenant gates; the feature must never grant them itself.
       const database = openSqliteDatabase(join(directory, "core.sqlite"));

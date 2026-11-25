@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readKey } from "./query-keys";
 import { createAdminQueryClient } from "./query-policy";
 
@@ -9,7 +9,7 @@ describe("createAdminQueryClient", () => {
 
     expect(defaults.queries).toMatchObject({
       networkMode: "always",
-      retry: 1,
+      retry: expect.any(Function),
       staleTime: 30_000,
       gcTime: 5 * 60_000,
       refetchOnWindowFocus: false,
@@ -45,8 +45,8 @@ describe("createAdminQueryClient", () => {
   });
 });
 
-it.each([401, 403])(
-  "discards previously loaded protected data after status %s",
+it.each([401, 403, 429])(
+  "stops after status %s without automatically repeating the request",
   async (status) => {
     const client = createAdminQueryClient();
     const queryKey = readKey(
@@ -54,22 +54,43 @@ it.each([401, 403])(
       "records",
     );
     client.setQueryData(queryKey, ["protected row"]);
-    const error = Object.assign(new Error("Access denied"), { status });
+    const error = Object.assign(new Error("Request rejected"), { status });
+    const queryFn = vi.fn().mockRejectedValue(error);
     await expect(
       client.fetchQuery({
         queryKey,
         staleTime: 0,
-        retry: false,
-        queryFn: async () => {
-          throw error;
-        },
+        retryDelay: 0,
+        queryFn,
       }),
     ).rejects.toBe(error);
-    expect(client.getQueryData(queryKey)).toBeUndefined();
+    expect(queryFn).toHaveBeenCalledOnce();
+    expect(client.getQueryData(queryKey)).toEqual(
+      status === 429 ? ["protected row"] : undefined,
+    );
     expect(client.getQueryState(queryKey)?.error).toBe(error);
     client.clear();
   },
 );
+
+it("still retries an ordinary temporary failure once", async () => {
+  const client = createAdminQueryClient();
+  const queryFn = vi
+    .fn()
+    .mockRejectedValueOnce(
+      Object.assign(new Error("Unavailable"), { status: 503 }),
+    )
+    .mockResolvedValueOnce(["recovered"]);
+  await expect(
+    client.fetchQuery({
+      queryKey: ["records", "transient-retry"],
+      retryDelay: 0,
+      queryFn,
+    }),
+  ).resolves.toEqual(["recovered"]);
+  expect(queryFn).toHaveBeenCalledTimes(2);
+  client.clear();
+});
 
 it("retains loaded data on a temporary read failure", async () => {
   const client = createAdminQueryClient();

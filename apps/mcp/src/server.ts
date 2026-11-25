@@ -321,7 +321,7 @@ export function createSaviaMcpServer(
       name: "savia_list_studio_records",
       legacyName: "savia_list_crm_records",
       description:
-        "List live records in a Studio collection. Search, sorting and structured filters depend on the collection provider. For a paginated response, a missing total means unknown.",
+        "List live records in a Studio collection. A null total means unknown. The page size is not the collection total. Search, sorting and structured filters depend on the collection provider.",
       annotations: { readOnlyHint: true },
       input: z.object({
         object: studioObject,
@@ -399,7 +399,7 @@ export function createSaviaMcpServer(
         amountField: nonEmptyString
           .optional()
           .describe(
-            "Optional numeric field name to sum (e.g. premium, amount, total)",
+            "Optional numeric field to sum (e.g. amount or total). HubSpot supports sums without grouping; other collections require groupBy.",
           ),
         filters: z
           .object({

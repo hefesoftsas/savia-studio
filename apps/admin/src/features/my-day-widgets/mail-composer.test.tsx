@@ -9,6 +9,7 @@ import {
 import { render } from "../studio-engine/test/locale-test-render";
 import { afterEach, expect, it, vi } from "vitest";
 import { MailComposer } from "./mail-composer";
+import { MailContextSelector } from "./mail-context-selector";
 import type { PersonalMailLike } from "./use-my-day-mail";
 afterEach(cleanup);
 const connections = [
@@ -135,6 +136,10 @@ it("inserts only selected readable fields and sends their context reference", as
     target: { value: "contacts" },
   });
   await screen.findByRole("option", { name: "Ana" });
+  expect(api.get).toHaveBeenCalledWith(
+    "/v1/studio/1/api/records/contacts?page=1&perPage=25&sort=updated_at&order=DESC",
+    expect.anything(),
+  );
   expect(
     screen.getByRole("button", { name: "Página siguiente" }),
   ).toBeEnabled();
@@ -164,6 +169,84 @@ it("inserts only selected readable fields and sends their context reference", as
       }),
     ),
   );
+});
+it("paginates connected context without requesting unsupported ordering", async () => {
+  const apiBasePath = "/v1/studio/1";
+  const collection = "salesforce_contacts";
+  const recordsPath = `${apiBasePath}/api/records/${collection}`;
+  const apiClient = {
+    get: vi.fn(async (path: string) => {
+      if (path === "/v1/tenant-workspaces")
+        return { data: [{ apiBasePath, label: "Workspace" }] };
+      if (path === `${apiBasePath}/api/objects`)
+        return {
+          data: [
+            {
+              name: collection,
+              label: "Contacts",
+              config: {
+                fields: { name: { type: "Textbox", label: "Name" } },
+                studio: { collection: { kind: "crm", sourceId: "salesforce" } },
+              },
+            },
+          ],
+        };
+      if (path === `${recordsPath}?page=1&perPage=25`)
+        return {
+          data: [{ id: "first", name: "First contact" }],
+          pageInfo: { hasNextPage: true },
+        };
+      if (path === `${recordsPath}?page=2&perPage=25`)
+        return {
+          data: Array.from({ length: 25 }, (_, index) => ({
+            id: `contact-${index}`,
+            name: `Contact ${index}`,
+          })),
+          pageInfo: { hasNextPage: false },
+          meta: { pageLimitReached: true },
+        };
+      if (path === `${recordsPath}/contact-0`)
+        return { data: { id: "contact-0", name: "Contact 0" } };
+      throw new Error(`Unexpected endpoint: ${path}`);
+    }),
+  };
+  const onInsert = vi.fn();
+  render(
+    <MailContextSelector apiClient={apiClient as never} onInsert={onInsert} />,
+  );
+  await screen.findByRole("option", { name: "Workspace" });
+  fireEvent.change(screen.getByLabelText("Espacio de datos"), {
+    target: { value: apiBasePath },
+  });
+  await screen.findByRole("option", { name: "Contacts" });
+  fireEvent.change(screen.getByLabelText("Colección de contexto"), {
+    target: { value: collection },
+  });
+  await screen.findByRole("option", { name: "First contact" });
+  const next = screen.getByRole("button", { name: "Página siguiente" });
+  expect(next).toBeEnabled();
+  fireEvent.click(next);
+  await screen.findByRole("option", { name: "Contact 0" });
+  expect(next).toBeDisabled();
+  expect(
+    screen.getByText("Quedan más registros en el sistema de origen."),
+  ).toBeVisible();
+  expect(screen.getByRole("button", { name: "Página anterior" })).toBeEnabled();
+
+  fireEvent.change(screen.getByLabelText("Registro de contexto"), {
+    target: { value: "contact-0" },
+  });
+  fireEvent.click(await screen.findByLabelText("Name"));
+  fireEvent.click(screen.getByRole("button", { name: "Insertar contexto" }));
+  expect(onInsert).toHaveBeenCalledWith({
+    reference: {
+      apiBasePath,
+      collection,
+      recordId: "contact-0",
+      fields: ["name"],
+    },
+    text: "Contacts\nName: Contact 0",
+  });
 });
 it("clears draft when session changes", () => {
   const input = props();

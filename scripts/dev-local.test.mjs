@@ -12,6 +12,11 @@ async function localDevelopmentCommands({
   mcpEnabled = true,
   adminPort = null,
   port5173Occupied = false,
+  backendPortOccupied = false,
+  flowsEnabled = true,
+  failFlowsBuild = false,
+  delayApiReady = false,
+  apiExitAfterAdminStarts = null,
   devHost = "127.0.0.1",
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "savia-dev-local-"));
@@ -44,6 +49,26 @@ async function localDevelopmentCommands({
     `#!/bin/sh
 printf '%s|%s|%s|%s|%s|%s|%s|auth-secret=%s\\n' "$MCP_TRANSPORT" "$MCP_HOST" "$SAVIA_API_URL" "$SAVIA_MCP_URL" "$OPENROUTER_API_KEY" "$SAVIA_MCP_SHARED_SECRET" "$*" "$BETTER_AUTH_SECRET" >> "$TMPDIR/commands.txt"
 printf 'jira-reporting=%s\\n' "$NANGO_JIRA_REPORTING_CONNECTION_ID" >> "$TMPDIR/commands.txt"
+printf 'bridge=%s|%s\\n' "$SAVIA_INTERNAL_BRIDGE_KEY" "$*" >> "$TMPDIR/commands.txt"
+stay_running() {
+  trap 'exit 0' TERM
+  while :; do sleep 0.05; done
+}
+case "$*" in
+  flows:build) exit ${failFlowsBuild ? 9 : 0} ;;
+  *scripts/dev-api-runtime.mjs*)
+    if [ "${apiExitAfterAdminStarts ?? ""}" = "" ]; then stay_running; fi
+    until [ -f "$TMPDIR/admin-started" ]; do sleep 0.02; done
+    exit ${apiExitAfterAdminStarts ?? 0}
+    ;;
+  *"@savia/admin exec vite"*)
+    trap 'echo admin-stopped >> "$TMPDIR/commands.txt"; exit 0' TERM
+    touch "$TMPDIR/admin-started"
+    echo admin-started
+    while :; do sleep 0.05; done
+    ;;
+  *"exec wrangler dev"*|*"@savia/mcp start"|flows:dev) stay_running ;;
+esac
 `,
   );
   await chmod(pnpm, 0o700);
@@ -51,6 +76,19 @@ printf 'jira-reporting=%s\\n' "$NANGO_JIRA_REPORTING_CONNECTION_ID" >> "$TMPDIR/
     curl,
     `#!/bin/sh
 printf 'curl|%s\\n' "$*" >> "$TMPDIR/commands.txt"
+case "$*" in
+  *":8787/health"*)
+    if [ "${delayApiReady ? "1" : "0"}" = 1 ] && [ ! -f "$TMPDIR/api-probed" ]; then
+      touch "$TMPDIR/api-probed"
+      exit 22
+    elif [ "${delayApiReady ? "1" : "0"}" = 1 ] && [ ! -f "$TMPDIR/api-maintenance" ]; then
+      touch "$TMPDIR/api-maintenance"
+      printf '%s\\n' '{"status":"maintenance"}'
+    else
+      printf '%s\\n' '{"status":"ok","database":"ok"}'
+    fi
+    ;;
+esac
 `,
   );
   await chmod(curl, 0o700);
@@ -59,25 +97,81 @@ printf 'curl|%s\\n' "$*" >> "$TMPDIR/commands.txt"
     `#!/bin/sh
 case "$*" in
   *TCP:5173*) exit ${port5173Occupied ? 0 : 1} ;;
+  *TCP:8788*) exit ${backendPortOccupied ? 0 : 1} ;;
 esac
 exit 1
 `,
   );
   await chmod(lsof, 0o700);
 
-  await executeFile("sh", ["scripts/dev-local.sh"], {
+  const startup = executeFile("sh", ["scripts/dev-local.sh"], {
+    timeout: 5000,
     env: {
       ...process.env,
       PATH: `${directory}:${process.env.PATH}`,
       SAVIA_SECRETS_DIR: secrets,
       SAVIA_DEV_HOST: devHost,
       SAVIA_ADMIN_PORT: adminPort ?? "",
+      SAVIA_FLOWS_ENABLED: flowsEnabled ? "1" : "0",
       NANGO_JIRA_REPORTING_CONNECTION_ID: "jira-owner-local",
       TMPDIR: directory,
     },
   });
+  let stoppedByTest = false;
+  if (apiExitAfterAdminStarts === null) {
+    startup.child.stdout.on("data", (chunk) => {
+      if (chunk.includes("admin-started")) {
+        stoppedByTest = startup.child.kill("SIGTERM");
+      }
+    });
+  }
+  try {
+    await startup;
+  } catch (error) {
+    if (!stoppedByTest || error.code !== 143) {
+      error.startedCommands = await readFile(output, "utf8").catch(() => "");
+      throw error;
+    }
+  }
   return readFile(output, "utf8");
 }
+
+test("finishes local preparation before starting the first service", async () => {
+  const commands = await localDevelopmentCommands();
+  const startAuth = commands.indexOf("--filter @savia/auth exec wrangler dev");
+  assert.ok(startAuth >= 0);
+  for (const preparation of [
+    "--filter @savia/admin run build:downloads",
+    "--filter @savia/api exec wrangler d1 migrations apply",
+    "--filter @savia/request run setup:local",
+    "--filter @savia/request run migrate:local",
+    "flows:build",
+  ]) {
+    const position = commands.indexOf(preparation);
+    assert.ok(position >= 0 && position < startAuth, preparation);
+  }
+});
+
+test("does not start local services when the Flows build fails", async () => {
+  await assert.rejects(
+    localDevelopmentCommands({ failFlowsBuild: true }),
+    (error) => {
+      assert.equal(error.code, 9);
+      assert.match(error.startedCommands, /flows:build/);
+      assert.doesNotMatch(
+        error.startedCommands,
+        /wrangler dev|@savia\/mcp start/,
+      );
+      return true;
+    },
+  );
+});
+
+test("starts Admin with no Flows build or runtime when Flows is disabled", async () => {
+  const commands = await localDevelopmentCommands({ flowsEnabled: false });
+  assert.match(commands, /@savia\/admin exec vite/);
+  assert.doesNotMatch(commands, /flows:(build|dev)|:8796\/health/);
+});
 
 test("starts the application locally with the private Savia request Worker", async () => {
   const commands = await localDevelopmentCommands({ adminPort: "5174" });
@@ -109,7 +203,7 @@ test("starts the application locally with the private Savia request Worker", asy
   );
   assert.match(commands, /exec node scripts\/dev-api-runtime\.mjs/);
   assert.match(commands, /jira-reporting=jira-owner-local/);
-  assert.match(commands, /exec node scripts\/crm-sync-local-scheduler\.mjs/);
+  assert.doesNotMatch(commands, /crm-sync-local-scheduler/);
   assert.doesNotMatch(
     commands,
     /--filter @savia\/legacy-api exec wrangler dev/,
@@ -119,6 +213,57 @@ test("starts the application locally with the private Savia request Worker", asy
   assert.match(
     commands,
     /\|\|\|http:\/\/127\.0\.0\.1:8789\/mcp\|\|\|--filter @savia\/admin exec vite --host 127\.0\.0\.1 --port 5174 --strictPort/,
+  );
+});
+
+test("rejects a second local stack before building against an occupied Auth port", async () => {
+  await assert.rejects(
+    localDevelopmentCommands({ backendPortOccupied: true }),
+    (error) => {
+      assert.match(error.stderr, /port 8788 is already in use/i);
+      assert.equal(error.startedCommands, "");
+      return true;
+    },
+  );
+});
+
+test("stops Admin and reports the API exit after startup", async () => {
+  await assert.rejects(
+    localDevelopmentCommands({ apiExitAfterAdminStarts: 7 }),
+    (error) => {
+      assert.equal(error.code, 7);
+      assert.match(error.stderr, /Local Savia API exited with status 7/);
+      assert.match(error.startedCommands, /admin-stopped/);
+      return true;
+    },
+  );
+});
+
+test("stops Admin when the API exits unexpectedly with status zero", async () => {
+  await assert.rejects(
+    localDevelopmentCommands({ apiExitAfterAdminStarts: 0 }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(
+        error.stderr,
+        /Local Savia API exited unexpectedly with status 0/,
+      );
+      assert.match(error.startedCommands, /admin-stopped/);
+      return true;
+    },
+  );
+});
+
+test("waits for the API to connect to D1 before starting Admin", async () => {
+  const commands = await localDevelopmentCommands({ delayApiReady: true });
+  const apiProbes = [
+    ...commands.matchAll(
+      /^curl\|--fail --silent --max-time 2 http:\/\/127\.0\.0\.1:8787\/health$/gm,
+    ),
+  ];
+  assert.equal(apiProbes.length, 3);
+  assert.ok(
+    commands.indexOf("--filter @savia/admin exec vite") > apiProbes[2].index,
   );
 });
 
@@ -144,6 +289,19 @@ test("runs without MCP when its shared secret is absent", async () => {
   assert.doesNotMatch(commands, /--filter @savia\/mcp dev/);
   assert.doesNotMatch(commands, /--var SAVIA_MCP_URL/);
   assert.doesNotMatch(commands, /--var SAVIA_MCP_SHARED_SECRET/);
+});
+
+test("shares an ephemeral Auth bridge key with the API without MCP", async () => {
+  const commands = await localDevelopmentCommands({ mcpEnabled: false });
+  const authKey = commands.match(
+    /--var SAVIA_INTERNAL_BRIDGE_KEY:([a-f0-9]{64})/,
+  )?.[1];
+  assert.ok(authKey);
+  assert.ok(
+    commands.includes(
+      `bridge=${authKey}|exec node scripts/dev-api-runtime.mjs`,
+    ),
+  );
 });
 
 test("exposes Admin inside a container while preserving browser OAuth URLs", async () => {

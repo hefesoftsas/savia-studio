@@ -6,6 +6,8 @@ import type { AppServices } from "./app-services";
 import { App } from "./app";
 import { rotateSessionScope } from "./auth/session-scope";
 import { createReactAdminAuthProvider } from "./auth/react-admin-auth-provider";
+import { BetterAuthOAuthSession } from "./auth/better-auth-oauth-session";
+import { OAuthCallbackError } from "./auth/auth-session";
 import { clearSharedLink, updateSharedLink } from "./pwa/share-target";
 
 type AgencyListResult = {
@@ -652,6 +654,48 @@ describe("App", () => {
     ).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["bookings", "https://clinic.savia-preview.hefesoft.com"],
+    ["BOOKINGS/", "https://clinic.savia-preview.hefesoft.com"],
+    ["bookings", "https://savia-preview.hefesoft.com"],
+    ["bookings", "http://127.0.0.1:5173"],
+  ])(
+    "carries %s through React Admin's login route at %s",
+    async (route, origin) => {
+      const services = createServices();
+      const redirect = vi.fn();
+      const session = new BetterAuthOAuthSession({
+        apiUrl: "https://savia-preview.hefesoft.com",
+        navigation: {
+          currentUrl: () => `${origin}/${window.location.hash}`,
+          redirect,
+        },
+      });
+      services.authSession.login = session.login.bind(session);
+      services.authProvider.login = createReactAdminAuthProvider(
+        services.authSession,
+      ).login;
+      services.authProvider.checkAuth = vi
+        .fn()
+        .mockRejectedValue(new Error("Session expired"));
+      services.authProvider.logout = vi.fn().mockResolvedValue("/login");
+      window.location.hash = `#/${route}?tab=reservations&date=2026-11-25`;
+
+      render(<App services={services} />);
+
+      await waitFor(() => expect(redirect).toHaveBeenCalledOnce());
+      expect(window.location.hash).toBe("#/login");
+      const authorize = new URL(redirect.mock.calls[0][0]);
+      expect(authorize.searchParams.get("return_to")).toBe(
+        origin.startsWith("https://clinic.") ? origin : null,
+      );
+      expect(authorize.searchParams.get("resume")).toBe("bookings");
+      expect(authorize.searchParams.get("booking_query")).toBe(
+        "tab=reservations&date=2026-11-25",
+      );
+    },
+  );
+
   it("uses the Savia loading screen while the OAuth callback is pending", () => {
     const services = createServices();
     services.authSession.handleCallback = vi.fn(
@@ -681,6 +725,25 @@ describe("App", () => {
     );
     expect(window.location.pathname).toBe("/");
     expect(window.location.hash).toBe("#/my-day");
+  });
+
+  it("resumes the tab and date in Bookings after the OAuth callback", async () => {
+    const services = createServices();
+    services.authSession.handleCallback = vi.fn().mockResolvedValue({
+      returnOrigin: window.location.origin,
+      returnRoute: "bookings",
+      returnBookingQuery: "tab=reservations&date=2026-11-25",
+    });
+    window.history.replaceState({}, "", "/auth/callback?code=code&state=state");
+
+    render(<App services={services} />);
+
+    await waitFor(() =>
+      expect(window.location.hash).toBe(
+        "#/bookings?tab=reservations&date=2026-11-25",
+      ),
+    );
+    expect(window.location.pathname).toBe("/");
   });
 
   it("resumes the shared-link review after the OAuth callback", async () => {
@@ -723,8 +786,30 @@ describe("App", () => {
     );
   });
 
+  it("offers to restart sign-in when a Bookings callback fails with a retry destination", async () => {
+    const services = createServices();
+    const retryHref =
+      "https://savia-preview.hefesoft.com/api/auth/admin/authorize?resume=bookings";
+    services.authSession.handleCallback = vi
+      .fn()
+      .mockRejectedValue(
+        new OAuthCallbackError("Authorization failed", retryHref),
+      );
+    window.history.replaceState({}, "", "/auth/callback?code=code&state=state");
+
+    render(<App services={services} />);
+
+    expect(
+      await screen.findByRole("link", { name: "Volver a iniciar sesión" }),
+    ).toHaveAttribute("href", retryHref);
+  });
+
   it("logs out and redirects to the authorization endpoint when user closes session", async () => {
     const services = createServices();
+    // jsdom supports same-document navigation. Use an absolute URL to
+    // exercise React Admin's browser redirect and assert its destination.
+    const authorizationUrl = new URL("#/login", window.location.href).href;
+    vi.mocked(services.authProvider.logout).mockResolvedValue(authorizationUrl);
     const user = userEvent.setup();
 
     render(<App services={services} />);
@@ -747,6 +832,7 @@ describe("App", () => {
       expect(services.authProvider.logout).toHaveBeenCalledWith({
         logoutFromProvider: true,
       });
+      expect(window.location.href).toBe(authorizationUrl);
     });
   });
 });

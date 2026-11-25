@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { deactivateTenantForDeletion } from "../../api/src/tenant-branding/service";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,7 +43,7 @@ function totp(uri: string) {
 it.skipIf(!postgresTestUrl)(
   "preserves native tenant/relation metadata and nullable API filters",
   async () => {
-    await withPostgresFixture(async (_db, url) => {
+    await withPostgresFixture(async (db, url) => {
       const directory = mkdtempSync(join(tmpdir(), "savia-native-api-"));
       const origin = "http://localhost:8080",
         email = "api-native@example.test",
@@ -301,6 +302,18 @@ it.skipIf(!postgresTestUrl)(
           version: branding.version + 1,
         });
         expect((await json(brandingPath)).data).toEqual(saved);
+        await expect(
+          deactivateTenantForDeletion(db, tenant.id, "Stale name"),
+        ).resolves.toBe(false);
+        expect((await json(`/v1/tenants/${tenant.id}`)).data.isActive).toBe(
+          true,
+        );
+        await expect(
+          deactivateTenantForDeletion(db, tenant.id, tenant.name),
+        ).resolves.toBe(true);
+        expect((await json(`/v1/tenants/${tenant.id}`)).data.isActive).toBe(
+          false,
+        );
       } finally {
         vi.restoreAllMocks();
         await app?.close();

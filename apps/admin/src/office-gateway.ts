@@ -1,4 +1,4 @@
-import manifest from "../office-runtime.json";
+import manifest from "../office-runtime.json" with { type: "json" };
 export const officeDocumentHeaders = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Embedder-Policy": "require-corp",

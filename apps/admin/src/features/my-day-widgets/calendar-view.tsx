@@ -29,6 +29,7 @@ import type {
   CalendarOccurrence,
 } from "@savia/studio-shared/calendar-contracts";
 import type { BookingAgendaEntry } from "@savia/studio-shared/booking-agenda-contracts";
+import { bookingDateInZone } from "../bookings/booking-date";
 import {
   buildTenantOrigin,
   KNOWN_CANONICAL_HOSTS,
@@ -95,6 +96,7 @@ export function tenantBookingsLink(
   slug: string,
   startsAt: string,
   hostname: string,
+  timeZone: string,
 ): string | null {
   const normalizedSlug = normalizeTenantSlug(slug);
   if (!normalizedSlug) return null;
@@ -105,7 +107,9 @@ export function tenantBookingsLink(
         parseTenantSlugFromHostname(hostname, host) !== null),
   );
   const start = new Date(startsAt);
-  const date = Number.isNaN(start.getTime()) ? "" : dateKey(start);
+  const date = Number.isNaN(start.getTime())
+    ? ""
+    : bookingDateInZone(start, timeZone);
   return canonical && date
     ? `${buildTenantOrigin(normalizedSlug, canonical)}/#/bookings?tab=reservations&date=${encodeURIComponent(date)}`
     : null;
@@ -1040,6 +1044,7 @@ function BookingDetails({
           booking.tenantSlug,
           booking.startsAt,
           window.location.hostname,
+          booking.timeZone,
         );
   return (
     <div className="space-y-1 rounded-md bg-muted/50 p-3">

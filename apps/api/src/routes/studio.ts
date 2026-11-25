@@ -624,7 +624,9 @@ export function registerStudioRoutes(
       const body = (await response.json()) as { data: Array<{ name: string }> };
       return Response.json(
         {
-          data: body.data.filter((object) => sharedNames!.has(object.name)),
+          data: body.data
+            .filter((object) => sharedNames!.has(object.name))
+            .map((object) => ({ ...object, exportFields: [] })),
           menuLayout: null,
         },
         { headers: { "cache-control": "no-store" } },

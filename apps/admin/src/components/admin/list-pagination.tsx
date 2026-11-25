@@ -49,15 +49,17 @@ import {
  */
 export const ListPagination = ({
   rowsPerPageOptions = [5, 10, 25, 50],
+  maxPage,
   className,
 }: {
   rowsPerPageOptions?: number[];
+  maxPage?: number;
   className?: string;
 }) => {
   const translate = useTranslate();
   const {
     hasPreviousPage,
-    hasNextPage,
+    hasNextPage: sourceHasNextPage,
     page,
     perPage,
     setPerPage,
@@ -65,6 +67,8 @@ export const ListPagination = ({
     setPage,
   } = useListPaginationContext();
   const { data = [] } = useListContext();
+  const hasNextPage =
+    sourceHasNextPage && (maxPage === undefined || page < maxPage);
 
   const hasKnownTotal = typeof total === "number" && total >= 0;
   const isEmpty = data.length === 0 && (!hasKnownTotal || total === 0);
@@ -84,7 +88,10 @@ export const ListPagination = ({
 
   const boundaryCount = 1;
   const siblingCount = 1;
-  const count = total ? Math.ceil(total / perPage) : 1;
+  const count = Math.min(
+    total ? Math.ceil(total / perPage) : 1,
+    maxPage ?? Infinity,
+  );
 
   const range = (start: number, end: number) => {
     const length = end - start + 1;

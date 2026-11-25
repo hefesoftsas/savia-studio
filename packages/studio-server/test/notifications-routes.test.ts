@@ -13,7 +13,8 @@ const scope = { kind: "workspace", id: "domain:general" } as const;
 
 const policy: NotificationPolicy = {
   async recipients(event, after, limit) {
-    if (event.audience.kind !== "explicit") return { ids: [], nextCursor: null };
+    if (event.audience.kind !== "explicit")
+      return { ids: [], nextCursor: null };
     return { ids: event.audience.principals.slice(0, limit), nextCursor: null };
   },
   async canReadScope() {
@@ -28,7 +29,9 @@ const policy: NotificationPolicy = {
 };
 
 function appFor(principal: string) {
-  const app = new Hono<{ Variables: { tenant: string; principalId: string } }>();
+  const app = new Hono<{
+    Variables: { tenant: string; principalId: string };
+  }>();
   app.use(async (c, next) => {
     c.set("tenant", scope.id);
     c.set("principalId", principal);
@@ -40,16 +43,19 @@ function appFor(principal: string) {
   return { request: call };
 }
 
-async function seed(): Promise<string> {
+async function seed(
+  noticeScope: NoticeEventInput["scope"] = scope,
+  principal = "alice",
+): Promise<string> {
   const repository = new NotificationRepository(fixture.db);
   const input: NoticeEventInput = {
-    scope,
-    key: `route-${Date.now()}`,
+    scope: noticeScope,
+    key: `route-${crypto.randomUUID()}`,
     actor: { kind: "user", id: "admin" },
     source: { kind: "admin-message", id: "m1" },
     title: "Hello",
     body: "World",
-    audience: { kind: "explicit", principals: ["alice"] },
+    audience: { kind: "explicit", principals: [principal] },
     createdAt: Date.now(),
     expiresAt: null,
   };
@@ -58,13 +64,79 @@ async function seed(): Promise<string> {
     .prepare(
       "INSERT INTO notification_deliveries(id,event_id,scope_kind,scope_id,recipient_id,created_at) VALUES (?,?,?,?,?,?)",
     )
-    .bind(`dlv-${id}`, id, "workspace", scope.id, "alice", Date.now())
+    .bind(
+      `dlv-${id}`,
+      id,
+      noticeScope.kind,
+      noticeScope.id,
+      principal,
+      Date.now(),
+    )
     .run();
   return `dlv-${id}`;
 }
 
 beforeAll(async () => {
   fixture = await notificationFixture();
+});
+
+it("marks both account and workspace notifications in the current inbox", async () => {
+  const workspaceId = await seed();
+  const accountId = await seed({ kind: "account", id: "alice" });
+  const otherWorkspaceId = await seed({
+    kind: "workspace",
+    id: "domain:other",
+  });
+  const otherAccountId = await seed({ kind: "account", id: "bob" }, "bob");
+
+  const response = await appFor("alice").request(
+    "/api/notifications/read-all",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    },
+  );
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    data: { updated: 2, nextCursor: null },
+  });
+  const readAt = (id: string) =>
+    fixture.db
+      .prepare("SELECT read_at FROM notification_deliveries WHERE id=?")
+      .bind(id)
+      .first<number>("read_at");
+  expect(await readAt(workspaceId)).toBeGreaterThan(0);
+  expect(await readAt(accountId)).toBeGreaterThan(0);
+  expect(await readAt(otherWorkspaceId)).toBeNull();
+  expect(await readAt(otherAccountId)).toBeNull();
+});
+
+it("resumes a full bulk-read page without skipping the last unread notice", async () => {
+  const principal = "bulk-reader";
+  const account = { kind: "account", id: principal } as const;
+  for (let index = 0; index < 101; index++) {
+    await seed(index % 2 === 0 ? scope : account, principal);
+  }
+  const app = appFor(principal);
+  const readPage = async (cursor?: string) => {
+    const response = await app.request("/api/notifications/read-all", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cursor }),
+    });
+    expect(response.status).toBe(200);
+    return response.json<{
+      data: { updated: number; nextCursor: string | null };
+    }>();
+  };
+  const { data: first } = await readPage();
+  expect(first.updated).toBe(100);
+  expect(first.nextCursor).toBeTruthy();
+  expect(await readPage(first.nextCursor!)).toEqual({
+    data: { updated: 1, nextCursor: null },
+  });
+  expect(await readPage()).toEqual({ data: { updated: 0, nextCursor: null } });
 });
 
 afterAll(async () => {
@@ -76,7 +148,9 @@ it("serves the personal inbox and blocks cross-principal mutations", async () =>
   const alice = appFor("alice");
   const list = await alice.request("/api/notifications");
   expect(list.status).toBe(200);
-  const body = (await list.json()) as { data: { items: { id: string; title: string }[] } };
+  const body = (await list.json()) as {
+    data: { items: { id: string; title: string }[] };
+  };
   expect(body.data.items.map((item) => item.id)).toContain(deliveryId);
   expect(body.data.items[0].title).toBe("Hello");
 
@@ -99,6 +173,16 @@ it("serves the personal inbox and blocks cross-principal mutations", async () =>
     body: JSON.stringify({ read: true }),
   });
   expect(foreign.status).toBe(404);
+
+  const otherWorkspaceNotice = await seed({
+    kind: "workspace",
+    id: "domain:other",
+  });
+  const foreignArchive = await alice.request(
+    `/api/notifications/${otherWorkspaceNotice}/archive`,
+    { method: "POST" },
+  );
+  expect(foreignArchive.status).toBe(404);
 });
 
 it("manages follows and paginates bulk reads", async () => {
@@ -109,7 +193,9 @@ it("manages follows and paginates bulk reads", async () => {
     body: JSON.stringify({ collection: "requests" }),
   });
   expect(follow.status).toBe(200);
-  const follows = (await (await alice.request("/api/notifications/follows")).json()) as {
+  const follows = (await (
+    await alice.request("/api/notifications/follows")
+  ).json()) as {
     data: string[];
   };
   expect(follows.data).toContain("requests");

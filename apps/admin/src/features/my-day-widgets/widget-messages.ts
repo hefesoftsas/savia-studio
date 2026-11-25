@@ -34,15 +34,20 @@ export const widgetMessages = {
     "Choose a tenant and a collection.",
     "Escolha um tenant e uma coleção.",
   ],
-  "This collection has no grouping field for a chart.": [
-    "Esta colección no tiene campo de agrupación para graficar.",
-    "This collection has no grouping field for a chart.",
-    "Esta coleção não tem campo de agrupamento para o gráfico.",
-  ],
   "This collection has no date field for due dates.": [
     "Esta colección no tiene campo de fecha para detectar vencimientos.",
     "This collection has no date field for due dates.",
     "Esta coleção não tem campo de data para identificar vencimentos.",
+  ],
+  "This source does not support charts by status.": [
+    "Esta fuente no admite gráficos por estado.",
+    "This source does not support charts by status.",
+    "Esta fonte não oferece gráficos por status.",
+  ],
+  "This source cannot sort records by due date.": [
+    "Esta fuente no permite ordenar los registros por vencimiento.",
+    "This source cannot sort records by due date.",
+    "Esta fonte não permite ordenar os registros por vencimento.",
   ],
   "Already added": ["ya agregado", "already added", "já adicionado"],
   "Mail inbox": ["Bandeja de correo", "Mail inbox", "Caixa de entrada"],
@@ -211,6 +216,26 @@ export const widgetMessages = {
     "Could not load this summary.",
     "Não foi possível carregar este resumo.",
   ],
+  "HubSpot reached its request limit. Try again later.": [
+    "HubSpot alcanzó el límite de solicitudes. Reintenta más tarde.",
+    "HubSpot reached its request limit. Try again later.",
+    "O HubSpot atingiu o limite de solicitações. Tente novamente mais tarde.",
+  ],
+  "HubSpot reached its request limit. You can retry from %{p0}.": [
+    "HubSpot alcanzó el límite de solicitudes. Puedes reintentar a partir de %{p0}.",
+    "HubSpot reached its request limit. You can retry from %{p0}.",
+    "O HubSpot atingiu o limite de solicitações. Você pode tentar novamente a partir de %{p0}.",
+  ],
+  "The record total is unavailable.": [
+    "El total de registros no está disponible.",
+    "The record total is unavailable.",
+    "O total de registros não está disponível.",
+  ],
+  "The status breakdown is unavailable.": [
+    "El desglose por estado no está disponible.",
+    "The status breakdown is unavailable.",
+    "O detalhamento por status não está disponível.",
+  ],
   records: ["registros", "records", "registros"],
   "No status field: showing the collection total.": [
     "Sin campo de estado: muestra el total de la colección.",
@@ -351,6 +376,11 @@ export const widgetMessages = {
   Previous: ["Anterior", "Previous", "Anterior"],
   Next: ["Siguiente", "Next", "Próxima"],
   "Page %{page}": ["Página %{page}", "Page %{page}", "Página %{page}"],
+  "More records are available in the source system.": [
+    "Quedan más registros en el sistema de origen.",
+    "More records are available in the source system.",
+    "Há mais registros disponíveis no sistema de origem.",
+  ],
   "Open email: %{subject}": [
     "Abrir correo: %{subject}",
     "Open email: %{subject}",

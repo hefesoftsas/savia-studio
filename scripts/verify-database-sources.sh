@@ -19,8 +19,8 @@ for engine in "${engines[@]}"; do
   ready=false
   for attempt in $(seq 1 180); do
     case "$engine" in
-      postgres) docker exec "${run_id}-${engine}" pg_isready -U postgres >/dev/null 2>&1 && ready=true ;;
-      mysql) docker exec "${run_id}-${engine}" mysqladmin ping -h localhost -psavia_test_only >/dev/null 2>&1 && ready=true ;;
+      postgres) docker exec "${run_id}-${engine}" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && ready=true ;;
+      mysql) docker exec "${run_id}-${engine}" mysql --protocol=TCP -h 127.0.0.1 -u root -psavia_test_only -D savia_test -e "SELECT 1" >/dev/null 2>&1 && ready=true ;;
       mongodb) docker exec "${run_id}-${engine}" mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' >/dev/null 2>&1 && ready=true ;;
       mssql) docker exec "${run_id}-${engine}" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Savia_test_Only_2026 -C -l 3 -t 3 -b -Q "SELECT 1" >/dev/null 2>&1 && ready=true ;;
     esac

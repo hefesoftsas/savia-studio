@@ -38,7 +38,7 @@ const ERROR_CATEGORIES = [
     code: "PERMISSION_DENIED",
     remediation: "CHECK_ACCESS",
     pattern:
-      /permission denied|access denied|not authorized|unauthorized|insufficient permissions|forbidden|\bhttp\s+403\b|\b403\s+forbidden\b/,
+      /permission denied|access denied|not authorized|unauthorized|insufficient permissions|forbidden|\bhttp\s+403\b|\b403\s+forbidden\b|d1 query failed \((?:401|403)\)/,
   },
   {
     code: "MISSING_MODULE",

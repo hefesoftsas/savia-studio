@@ -6374,6 +6374,7 @@ export interface paths {
         query: {
           from: string;
           to: string;
+          cursor?: string;
         };
         header?: never;
         path: {
@@ -6422,6 +6423,7 @@ export interface paths {
                   status: "ready" | "pending" | "unsupported" | "failed";
                 } | null;
               }[];
+              nextCursor?: string;
             };
           };
         };
@@ -10516,6 +10518,13 @@ export interface paths {
               };
             };
           };
+        };
+        /** @description Invalid user details or temporary password length */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
         };
         /** @description Platform or tenant administrator role is required */
         403: {
@@ -22770,6 +22779,8 @@ export interface paths {
               error: {
                 code: string;
                 message: string;
+                /** @enum {string} */
+                reason?: "PLATFORM_ADMIN" | "LAST_ACTIVE_MEMBER";
               };
             };
           };

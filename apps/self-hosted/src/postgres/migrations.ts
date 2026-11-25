@@ -121,12 +121,19 @@ export async function migratePostgres(options: {
         if (completed.has(migration.filename)) continue;
         // Source files use statement breakpoints as explicit SQL delimiters.
         // Keep checksums on the original bytes while terminating each chunk.
-        await client.query(
-          migration.sql
-            .split("--> statement-breakpoint")
-            .map((sql) => sql.trim() + "\n;")
-            .join("\n"),
-        );
+        try {
+          await client.query(
+            migration.sql
+              .split("--> statement-breakpoint")
+              .map((sql) => sql.trim() + "\n;")
+              .join("\n"),
+          );
+        } catch (error) {
+          throw new Error(
+            `PostgreSQL migration failed: ${migration.filename}.`,
+            { cause: error },
+          );
+        }
         await client.query(
           "INSERT INTO _savia_postgres_migrations(position,filename,checksum) VALUES($1,$2,$3)",
           [

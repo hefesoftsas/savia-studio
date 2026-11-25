@@ -153,6 +153,11 @@ export const automationMessages = {
     "Select a tenant to manage its screens and plugins.",
     "Selecione um tenant para administrar suas telas e plugins.",
   ],
+  "El espacio de trabajo del enlace no está disponible.": [
+    "El espacio de trabajo del enlace no está disponible.",
+    "The workspace linked here is unavailable.",
+    "O espaço de trabalho deste link está indisponível.",
+  ],
   "No tienes tenants disponibles. Solicita acceso a un administrador.": [
     "No tienes tenants disponibles. Solicita acceso a un administrador.",
     "You have no available tenants. Ask an administrator for access.",
@@ -400,6 +405,11 @@ export const automationMessages = {
     "Registro no disponible",
     "Record unavailable",
     "Registro indisponível",
+  ],
+  "La colección del enlace ya no está disponible.": [
+    "La colección del enlace ya no está disponible.",
+    "The collection linked here is no longer available.",
+    "A coleção deste link não está mais disponível.",
   ],
   "Volver a la lista": ["Volver a la lista", "Back to list", "Voltar à lista"],
   "¿Archivar este registro en HubSpot?": [
@@ -3511,5 +3521,9 @@ export const automationMessages = {
     "Workflows are managed in Savia Flows.",
     "Os fluxos de trabalho são gerenciados no Savia Flows.",
   ],
-  "Open Savia Flows": ["Abrir Savia Flows", "Open Savia Flows", "Abrir Savia Flows"],
+  "Open Savia Flows": [
+    "Abrir Savia Flows",
+    "Open Savia Flows",
+    "Abrir Savia Flows",
+  ],
 } as const;

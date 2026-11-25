@@ -192,6 +192,7 @@ test("routes preview download catalogs through the worker before SPA fallback", 
   assert.ok(
     config.assets.run_worker_first.includes("/companion-downloads.json"),
   );
+  assert.ok(config.assets.run_worker_first.includes("/downloads/*"));
 });
 
 test("routes preview short booking URLs through the API before SPA fallback", () => {

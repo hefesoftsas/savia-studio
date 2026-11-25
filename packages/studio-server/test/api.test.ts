@@ -148,7 +148,8 @@ describe("Hono + real isolated D1", () => {
     await json("/views/opportunity", "POST", {
       name: "Ganadas",
       config: {
-        q: "",
+        q: "Proyecto",
+        searchField: "name",
         stage: "Ganada",
         columnOrder: ["amount", "name"],
         columnAliases: { name: "Oportunidad" },
@@ -157,10 +158,28 @@ describe("Hono + real isolated D1", () => {
     const savedView = (await json("/views/opportunity")).data[0];
     expect(savedView.name).toBe("Ganadas");
     expect(savedView.config).toMatchObject({
+      q: "Proyecto",
+      searchField: "name",
       columnOrder: ["amount", "name"],
       columnAliases: { name: "Oportunidad" },
     });
   });
+  it.each([
+    { searchField: "removed_field" },
+    { group: "removed_field" },
+    { sort: { field: "removed_field", order: "ASC" } },
+    { filters: { conditions: [{ field: "removed_field", op: "empty" }] } },
+    { columns: ["__crm_integration"] },
+  ])(
+    "rejects a saved view with a field outside the collection (%j)",
+    async (config) => {
+      const response = await request("/views/opportunity", "POST", {
+        name: "Invalid field",
+        config,
+      });
+      expect(response.status).toBe(422);
+    },
+  );
   it("persists the default table configuration separately from named views", async () => {
     await json("/views/opportunity/default", "PUT", {
       config: {
