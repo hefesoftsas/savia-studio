@@ -1,10 +1,12 @@
 import { beforeAll, afterAll, it, expect } from "vitest";
 import { Hono } from "hono";
 import type {
+  InboxPage,
   NoticeEventInput,
   NotificationPolicy,
 } from "@savia/studio-shared/notifications";
 import { NotificationRepository } from "../src/notifications/repository";
+import { processNotifications } from "../src/notifications/dispatcher";
 import { registerNotifications } from "../src/notifications/routes";
 import { notificationFixture } from "./notifications-fixture";
 
@@ -23,36 +25,41 @@ const policy: NotificationPolicy = {
   async canReadSource() {
     return true;
   },
-  async canSend() {
-    return true;
+  async canSend(principal) {
+    return principal !== "workspace-member";
   },
 };
 
-function appFor(principal: string) {
+function appFor(
+  principal: string,
+  db = fixture.db,
+  workspace: string = scope.id,
+) {
   const app = new Hono<{
     Variables: { tenant: string; principalId: string };
   }>();
   app.use(async (c, next) => {
-    c.set("tenant", scope.id);
+    c.set("tenant", workspace);
     c.set("principalId", principal);
     await next();
   });
   registerNotifications(app as never, { policy });
   const call = (path: string, init?: RequestInit) =>
-    app.request(path, init, { DB: fixture.db } as never);
+    app.request(path, init, { DB: db } as never);
   return { request: call };
 }
 
 async function seed(
   noticeScope: NoticeEventInput["scope"] = scope,
   principal = "alice",
+  source: NoticeEventInput["source"] = { kind: "admin-message", id: "m1" },
 ): Promise<string> {
   const repository = new NotificationRepository(fixture.db);
   const input: NoticeEventInput = {
     scope: noticeScope,
     key: `route-${crypto.randomUUID()}`,
     actor: { kind: "user", id: "admin" },
-    source: { kind: "admin-message", id: "m1" },
+    source,
     title: "Hello",
     body: "World",
     audience: { kind: "explicit", principals: [principal] },
@@ -78,6 +85,243 @@ async function seed(
 
 beforeAll(async () => {
   fixture = await notificationFixture();
+});
+
+it("authorizes status and retry for administrator notices in the current workspace", async () => {
+  const admin = appFor("notice-sender");
+  const sent = await admin.request("/api/notifications/admin/send", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      scope,
+      key: "scope-test",
+      title: "Current workspace notice",
+      audience: { kind: "explicit", principals: ["status-test-recipient"] },
+    }),
+  });
+  expect(sent.status).toBe(200);
+  const { data } = await sent.json<{ data: { eventId: string } }>();
+  const eventPath = `/api/notifications/admin/${data.eventId}`;
+  const member = appFor("workspace-member");
+  expect((await member.request(`${eventPath}/status`)).status).toBe(403);
+  expect(
+    (await member.request(`${eventPath}/retry`, { method: "POST" })).status,
+  ).toBe(403);
+
+  const otherAdmin = appFor("other-admin", fixture.db, "domain:other");
+  expect((await otherAdmin.request(`${eventPath}/status`)).status).toBe(404);
+  expect(
+    (await otherAdmin.request(`${eventPath}/retry`, { method: "POST" })).status,
+  ).toBe(404);
+  expect((await admin.request(`${eventPath}/status`)).status).toBe(200);
+  expect(
+    (await admin.request(`${eventPath}/retry`, { method: "POST" })).status,
+  ).toBe(200);
+  const taskNotice = await seed(scope, "status-test-recipient", {
+    kind: "workflow-task",
+    id: "test-task",
+  });
+  const taskEventPath = `/api/notifications/admin/${taskNotice.slice("dlv-".length)}`;
+  expect((await admin.request(`${taskEventPath}/status`)).status).toBe(404);
+  expect(
+    (await admin.request(`${taskEventPath}/retry`, { method: "POST" })).status,
+  ).toBe(404);
+  expect(
+    await fixture.db
+      .prepare(
+        "SELECT workspace_id FROM notification_admin_audit WHERE event_id=? AND action='retry'",
+      )
+      .bind(data.eventId)
+      .first("workspace_id"),
+  ).toBe(scope.id);
+});
+
+it("delivers requested acknowledgements and keeps them pending after reading", async () => {
+  const principal = "notice-recipient";
+  const admin = appFor("notice-admin");
+  for (const requireAcknowledgement of [false, true]) {
+    const response = await admin.request("/api/notifications/admin/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scope,
+        key: `ack-${requireAcknowledgement}`,
+        title: requireAcknowledgement ? "Please confirm" : "For information",
+        audience: { kind: "explicit", principals: [principal] },
+        requireAcknowledgement,
+      }),
+    });
+    expect(response.status).toBe(200);
+  }
+  await processNotifications(fixture.db, policy, { workerId: "ack-test" });
+  const app = appFor(principal);
+  const readInbox = async (filter: string) => {
+    const response = await app.request(`/api/notifications?filter=${filter}`);
+    expect(response.status).toBe(200);
+    return (await response.json<{ data: InboxPage }>()).data.items;
+  };
+  const items = await readInbox("all");
+  expect(items).toHaveLength(2);
+  const ordinary = items.find(({ title }) => title === "For information")!;
+  const acknowledgement = items.find(
+    ({ title }) => title === "Please confirm",
+  )!;
+  expect(ordinary.actionState).toBe("none");
+  expect(acknowledgement.actionState).toBe("pending");
+
+  const read = await app.request(
+    `/api/notifications/${acknowledgement.id}/read`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ read: true }),
+    },
+  );
+  expect(read.status).toBe(200);
+  expect((await readInbox("pending")).map(({ id }) => id)).toEqual([
+    acknowledgement.id,
+  ]);
+  const count = () => app.request("/api/notifications/count?filter=pending");
+  expect(await (await count()).json()).toEqual({ data: { count: 1 } });
+
+  const confirm = (id: string) =>
+    app.request(`/api/notifications/${id}/resolve`, { method: "POST" });
+  expect((await confirm(ordinary.id)).status).toBe(409);
+  expect((await confirm(acknowledgement.id)).status).toBe(200);
+  expect((await confirm(acknowledgement.id)).status).toBe(200);
+  expect(await readInbox("pending")).toEqual([]);
+  expect(await (await count()).json()).toEqual({ data: { count: 0 } });
+  expect(
+    (await readInbox("all")).find(({ id }) => id === acknowledgement.id)
+      ?.actionState,
+  ).toBe("done");
+});
+
+it("uses only the notice workspace for task status, counts, and actions", async () => {
+  const principal = "scoped-task-reader";
+  const other = "domain:foreign-tasks";
+  for (const workspace of [other, scope.id]) {
+    const taskIds = ["shared-open", "shared-done"];
+    if (workspace === other) taskIds.push("foreign-only");
+    await fixture.db.batch([
+      fixture.db
+        .prepare(
+          "INSERT INTO workflows(workspace_id,id,name,definition,created_by) VALUES(?,'inbox-workflow','Inbox','{}',?)",
+        )
+        .bind(workspace, principal),
+      fixture.db
+        .prepare(
+          "INSERT INTO workflow_versions(workspace_id,id,workflow_id,definition,owner_id,revision) VALUES(?,'inbox-version','inbox-workflow','{}',?,1)",
+        )
+        .bind(workspace, principal),
+      fixture.db
+        .prepare(
+          "INSERT INTO workflow_executions(workspace_id,id,workflow_id,version_id,owner_id,initiator_id,event_key,context) VALUES(?,'inbox-execution','inbox-workflow','inbox-version',?,?,'inbox','{}')",
+        )
+        .bind(workspace, principal, principal),
+      ...taskIds.map((id) =>
+        fixture.db
+          .prepare(
+            "INSERT INTO workflow_tasks(workspace_id,id,execution_id,node_id,kind,title,assignee,status) VALUES(?,?,'inbox-execution',?,'task','Inbox task',?,?)",
+          )
+          .bind(
+            workspace,
+            id,
+            id,
+            principal,
+            workspace === scope.id && id === "shared-done" ? "done" : "open",
+          ),
+      ),
+    ]);
+  }
+  const doneId = await seed(scope, principal, {
+    kind: "workflow-task",
+    id: "shared-done",
+  });
+  await seed(scope, principal, { kind: "workflow-task", id: "shared-open" });
+  const missingId = await seed(scope, principal, {
+    kind: "workflow-task",
+    id: "foreign-only",
+  });
+  const app = appFor(principal);
+
+  const count = await app.request("/api/notifications/count?filter=pending");
+  expect(await count.json()).toEqual({ data: { count: 1 } });
+  const pending = await app.request("/api/notifications?filter=pending");
+  const { data } = await pending.json<{ data: InboxPage }>();
+  expect(data.items.map(({ source }) => source.id)).toEqual(["shared-open"]);
+  const all = await app.request("/api/notifications");
+  const inbox = await all.json<{ data: InboxPage }>();
+  const actionStates = new Map(
+    inbox.data.items.map(({ id, actionState }) => [id, actionState]),
+  );
+  expect(actionStates.get(doneId)).toBe("done");
+  expect(actionStates.get(missingId)).toBe("unavailable");
+  const action = await app.request(`/api/notifications/action/${missingId}`);
+  expect(await action.json()).toEqual({
+    data: { kind: "task", state: "unavailable", resolved: false },
+  });
+
+  for (let index = 0; index < 101; index++) {
+    await seed(scope, principal);
+  }
+  const sparse = await app.request("/api/notifications?filter=pending&limit=1");
+  const pendingPage = await sparse.json<{ data: InboxPage }>();
+  expect(pendingPage.data.items.map(({ source }) => source.id)).toEqual([
+    "shared-open",
+  ]);
+  expect(pendingPage.data.nextCursor).toBeNull();
+});
+
+it("opens and pages an inbox with more than 100 distinct task notices", async () => {
+  const principal = "task-inbox-reader";
+  for (let index = 0; index < 101; index++) {
+    await seed(scope, principal, {
+      kind: "workflow-task",
+      id: `task-${index}`,
+    });
+  }
+  const returnedRows: number[] = [];
+  const db = new Proxy(fixture.db, {
+    get(target, key, receiver) {
+      if (key !== "prepare") return Reflect.get(target, key, receiver);
+      return (sql: string) => {
+        const prepared = target.prepare(sql);
+        if (!sql.includes("ORDER BY d.created_at DESC, d.id DESC"))
+          return prepared;
+        return {
+          bind: (...values: unknown[]) => ({
+            async all() {
+              const result = await prepared.bind(...values).all();
+              returnedRows.push(result.results.length);
+              return result;
+            },
+          }),
+        };
+      };
+    },
+  });
+  const app = appFor(principal, db);
+  const first = await app.request("/api/notifications?limit=30");
+  expect(first.status).toBe(200);
+  const { data } = await first.json<{ data: InboxPage }>();
+  expect(data.items).toHaveLength(30);
+  expect(returnedRows).toEqual([31]);
+  expect(
+    data.items.every(({ actionState }) => actionState === "unavailable"),
+  ).toBe(true);
+  expect(data.nextCursor).toBeTruthy();
+
+  const query = new URLSearchParams({ limit: "71", cursor: data.nextCursor! });
+  const second = await app.request(`/api/notifications?${query}`);
+  expect(second.status).toBe(200);
+  const next = await second.json<{ data: InboxPage }>();
+  expect(next.data.items).toHaveLength(71);
+  expect(returnedRows).toEqual([31, 71]);
+  expect(
+    new Set([...data.items, ...next.data.items].map(({ id }) => id)).size,
+  ).toBe(101);
+  expect(next.data.nextCursor).toBeNull();
 });
 
 it("marks both account and workspace notifications in the current inbox", async () => {

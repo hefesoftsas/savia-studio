@@ -116,7 +116,10 @@ export async function processNotifications(
     const used = await processEvent(
       db,
       policy,
-      options,
+      Math.min(
+        options.maxRecipients,
+        options.maxRecipientAttempts - recipientAttempts,
+      ),
       now,
       random,
       due,
@@ -132,7 +135,7 @@ export async function processNotifications(
 async function processEvent(
   db: D1Database,
   policy: NotificationPolicy,
-  options: ResolvedDispatchOptions,
+  maxRecipients: number,
   now: () => number,
   random: () => number,
   due: EventRow,
@@ -206,8 +209,14 @@ async function processEvent(
   let exhausted = false;
   let nextRetry: number | null = null;
   for (;;) {
-    if (usedAttempts >= options.maxRecipients) break;
-    const page = await resolveAudienceRecipients(db, policy, event, after, 100);
+    if (usedAttempts >= maxRecipients) break;
+    const page = await resolveAudienceRecipients(
+      db,
+      policy,
+      event,
+      after,
+      Math.min(100, maxRecipients - usedAttempts),
+    );
     if (page.ids.length === 0) {
       exhausted = page.nextCursor === null;
       after = page.nextCursor;
@@ -215,11 +224,17 @@ async function processEvent(
       continue;
     }
     for (const recipient of page.ids) {
-      if (usedAttempts >= options.maxRecipients) break;
       usedAttempts += 1;
       if (delivered.has(recipient)) continue;
       if (event.actor.kind === "user" && event.actor.id === recipient) {
         local.skipped += 1;
+        continue;
+      }
+      const retry = retries.get(recipient);
+      if (retry?.status === "failed") continue;
+      if (retry && retry.next_retry > now()) {
+        const wait = retry.next_retry;
+        nextRetry = nextRetry === null ? wait : Math.min(nextRetry, wait);
         continue;
       }
       let readable = false;
@@ -233,7 +248,7 @@ async function processEvent(
           db,
           due.id,
           recipient,
-          retries.get(recipient),
+          retry,
           now,
           random,
           error,
@@ -244,12 +259,6 @@ async function processEvent(
       }
       if (!readable) {
         local.skipped += 1;
-        continue;
-      }
-      const retry = retries.get(recipient);
-      if (retry && retry.status === "pending" && retry.next_retry > now()) {
-        const wait = retry.next_retry;
-        nextRetry = nextRetry === null ? wait : Math.min(nextRetry, wait);
         continue;
       }
       statements.push(
@@ -267,6 +276,15 @@ async function processEvent(
             now(),
           ),
       );
+      if (retry) {
+        statements.push(
+          db
+            .prepare(
+              "DELETE FROM notification_recipient_retries WHERE event_id=? AND recipient_id=?",
+            )
+            .bind(due.id, recipient),
+        );
+      }
       delivered.add(recipient);
       newDeliveries.push(recipient);
       local.delivered += 1;
@@ -292,7 +310,11 @@ async function processEvent(
       .bind(
         done ? "completed" : "pending",
         after,
-        done ? 0 : pendingWaits.length ? Math.min(...pendingWaits) : now(),
+        done
+          ? 0
+          : exhausted && pendingWaits.length
+            ? Math.min(...pendingWaits)
+            : now(),
         due.id,
       ),
   );

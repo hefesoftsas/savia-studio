@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useSessionGeneration } from "@/auth/session-scope";
 import { useRealtimeQuery } from "@/realtime/use-realtime-query";
 import {
@@ -45,9 +45,11 @@ export function useNotificationInbox(
     topics: ["notifications"],
     queryKeys: [queryKey],
   });
-  return useQuery({
+  return useInfiniteQuery({
     queryKey,
-    queryFn: () => client.inbox(filter),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => client.inbox(filter, pageParam),
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
     staleTime: 30_000,
     gcTime: 5 * 60_000,
     refetchOnWindowFocus: true,

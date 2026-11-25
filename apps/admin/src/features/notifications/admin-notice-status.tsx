@@ -1,8 +1,9 @@
 import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
 import { useSessionGeneration } from "@/auth/session-scope";
 import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
+import { Button } from "@/components/ui/button";
 import { useTranslate } from "ra-core";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notificationClient, type NotificationClient } from "./client";
 import { notificationReadKey } from "./queries";
 
@@ -32,6 +33,19 @@ export function AdminNoticeStatus({
     queryKey: notificationReadKey(sessionGeneration, "admin-status", eventId),
     queryFn: () => client.adminStatus(eventId),
   });
+  const retry = useMutation({
+    mutationFn: (target: { eventId: string; sessionGeneration: number }) =>
+      client.retryAdminNotice(target.eventId),
+    onSuccess: (_result, target) =>
+      cache.invalidateQueries({
+        queryKey: notificationReadKey(
+          target.sessionGeneration,
+          "admin-status",
+          target.eventId,
+        ),
+        exact: true,
+      }),
+  });
 
   if (status.isPending) return <p>{t("loading")}</p>;
   if (status.isError && !status.data)
@@ -54,6 +68,29 @@ export function AdminNoticeStatus({
         <dt>{t("statusRetrying")}</dt>
         <dd>{status.data.pendingRetries}</dd>
       </dl>
+      {(status.data.failed > 0 || status.data.status === "failed") && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="max-sm:min-h-11"
+          disabled={
+            retry.isPending ||
+            status.isFetching ||
+            status.data.status === "processing"
+          }
+          onClick={() => retry.mutate({ eventId, sessionGeneration })}
+        >
+          {t(retry.isPending ? "retryingFailed" : "retryFailed")}
+        </Button>
+      )}
+      {retry.isError &&
+        retry.variables?.eventId === eventId &&
+        retry.variables?.sessionGeneration === sessionGeneration && (
+          <p role="alert" className="text-sm text-destructive">
+            {t("actionError")}
+          </p>
+        )}
     </>
   );
 }

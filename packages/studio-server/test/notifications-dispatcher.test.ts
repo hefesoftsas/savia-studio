@@ -25,13 +25,15 @@ function input(key: string, principals: string[]): NoticeEventInput {
   };
 }
 
-function stubPolicy(overrides: Partial<{
-  members: string[];
-  followers: string[];
-  inactive: Set<string>;
-  failOnce: Set<string>;
-  calls: string[];
-}> = {}): NotificationPolicy {
+function stubPolicy(
+  overrides: Partial<{
+    members: string[];
+    followers: string[];
+    inactive: Set<string>;
+    failOnce: Set<string>;
+    calls: string[];
+  }> = {},
+): NotificationPolicy {
   const calls = overrides.calls ?? [];
   const failOnce = new Set(overrides.failOnce ?? []);
   return {
@@ -63,7 +65,8 @@ function stubPolicy(overrides: Partial<{
       const last = ids[ids.length - 1];
       return {
         ids,
-        nextCursor: last !== undefined && start + limit < ordered.length ? last : null,
+        nextCursor:
+          last !== undefined && start + limit < ordered.length ? last : null,
       };
     },
   };
@@ -110,16 +113,11 @@ it("emits delivery callbacks only after the delivery rows are committed", async 
   const { id } = await repository.accept(input("realtime-delivery", ["alice"]));
   const delivered: string[] = [];
   const statusUpdates: Array<{ principalId: string; eventId: string }> = [];
-  const report = await processNotifications(
-    fixture.db,
-    stubPolicy(),
-    options,
-    {
-      onDelivery: (principalId) => delivered.push(principalId),
-      onEventStatus: (principalId, eventId) =>
-        statusUpdates.push({ principalId, eventId }),
-    },
-  );
+  const report = await processNotifications(fixture.db, stubPolicy(), options, {
+    onDelivery: (principalId) => delivered.push(principalId),
+    onEventStatus: (principalId, eventId) =>
+      statusUpdates.push({ principalId, eventId }),
+  });
   expect(report.delivered).toBe(1);
   expect(delivered).toEqual(["alice"]);
   expect(statusUpdates).toEqual([{ principalId: "admin", eventId: id }]);
@@ -178,15 +176,58 @@ it("bounds work for oversized audiences", async () => {
     ...input("huge", []),
     audience: { kind: "workspace-members" },
   });
-  const report = await processNotifications(fixture.db, stubPolicy({ members }), {
-    ...options,
-    maxRecipients: 5,
-  });
+  const report = await processNotifications(
+    fixture.db,
+    stubPolicy({ members }),
+    {
+      ...options,
+      maxRecipients: 5,
+    },
+  );
   expect(report.delivered).toBe(5);
   const status = await fixture.db
     .prepare("SELECT status FROM notification_events")
     .first<string>("status");
   expect(status).toBe("pending");
+  const next = await processNotifications(fixture.db, stubPolicy({ members }), {
+    ...options,
+    maxRecipients: 5,
+  });
+  expect(next.delivered).toBe(5);
+  const rows = await fixture.db
+    .prepare(
+      "SELECT recipient_id FROM notification_deliveries ORDER BY recipient_id",
+    )
+    .all<{ recipient_id: string }>();
+  expect(rows.results.map(({ recipient_id }) => recipient_id)).toEqual(
+    [...members].sort().slice(0, 10),
+  );
+});
+
+it("respects the tick budget and resumes a partly delivered explicit audience", async () => {
+  const repository = new NotificationRepository(fixture.db);
+  for (const name of ["notice-one", "notice-two"]) {
+    await repository.accept(input(name, ["alice", "bob", "carol"]));
+  }
+  const policy = stubPolicy();
+  const budget = { ...options, maxRecipients: 3, maxRecipientAttempts: 4 };
+  const first = await processNotifications(fixture.db, policy, budget);
+  expect(first.delivered).toBe(4);
+  expect(
+    (await processNotifications(fixture.db, policy, budget)).delivered,
+  ).toBe(2);
+  expect(
+    await fixture.db
+      .prepare("SELECT COUNT(*) AS n FROM notification_deliveries")
+      .first("n"),
+  ).toBe(6);
+  expect(
+    await fixture.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM notification_events WHERE status='completed'",
+      )
+      .first("n"),
+  ).toBe(2);
 });
 
 it("retries transient failures and delivers on the next tick", async () => {
@@ -200,3 +241,58 @@ it("retries transient failures and delivers on the next tick", async () => {
   const second = await processNotifications(fixture.db, policy, options);
   expect(second.delivered).toBe(1);
 });
+
+it.each([1, 3])(
+  "processes ready recipients without retrying others before their schedule with a budget of %i",
+  async (maxRecipients) => {
+    const { id } = await new NotificationRepository(fixture.db).accept(
+      input("recipient-backoff", ["alice", "bob", "carol"]),
+    );
+    await fixture.db.batch([
+      fixture.db
+        .prepare(
+          "INSERT INTO notification_recipient_retries(event_id,recipient_id,attempts,next_retry,error,status) VALUES(?,'alice',5,0,'Terminal failure','failed')",
+        )
+        .bind(id),
+      fixture.db
+        .prepare(
+          "INSERT INTO notification_recipient_retries(event_id,recipient_id,attempts,next_retry,error,status) VALUES(?,'bob',1,?,'Transient failure','pending')",
+        )
+        .bind(id, now + 60_000),
+    ]);
+    const calls: string[] = [];
+    const policy = stubPolicy({ calls });
+    let delivered = 0;
+    for (let tick = 0; tick < Math.ceil(3 / maxRecipients); tick++) {
+      const report = await processNotifications(fixture.db, policy, {
+        ...options,
+        maxRecipients,
+      });
+      delivered += report.delivered;
+    }
+    expect(delivered).toBe(1);
+    expect(calls).toEqual(["scope:carol", "source:carol"]);
+    expect(
+      (await processNotifications(fixture.db, policy, options)).claimed,
+    ).toBe(0);
+
+    now += 60_000;
+    const second = await processNotifications(fixture.db, policy, options);
+    expect(second.delivered).toBe(1);
+    expect(calls).toEqual([
+      "scope:carol",
+      "source:carol",
+      "scope:bob",
+      "source:bob",
+    ]);
+    const retries = await fixture.db
+      .prepare(
+        "SELECT recipient_id,status FROM notification_recipient_retries WHERE event_id=?",
+      )
+      .bind(id)
+      .all();
+    expect(retries.results).toEqual([
+      { recipient_id: "alice", status: "failed" },
+    ]);
+  },
+);

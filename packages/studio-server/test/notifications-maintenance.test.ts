@@ -93,6 +93,63 @@ it("retains unread longer than read and protects open tasks", async () => {
   expect(remaining.map((row) => row.recipient_id)).toEqual(["bob"]);
 });
 
+it("continues past protected deliveries and scopes open task protection to their workspace", async () => {
+  const workspace = "domain:open-task";
+  await fixture.db.batch([
+    fixture.db
+      .prepare(
+        "INSERT INTO workflows(workspace_id,id,name,definition,created_by) VALUES(?,'retention-flow','Retention','{}','owner')",
+      )
+      .bind(workspace),
+    fixture.db
+      .prepare(
+        "INSERT INTO workflow_versions(workspace_id,id,workflow_id,definition,owner_id,revision) VALUES(?,'retention-version','retention-flow','{}','owner',1)",
+      )
+      .bind(workspace),
+    fixture.db
+      .prepare(
+        "INSERT INTO workflow_executions(workspace_id,id,workflow_id,version_id,owner_id,initiator_id,event_key,context) VALUES(?,'retention-run','retention-flow','retention-version','owner','owner','notice','{}')",
+      )
+      .bind(workspace),
+    fixture.db
+      .prepare(
+        "INSERT INTO workflow_tasks(workspace_id,id,execution_id,node_id,kind,title,assignee) VALUES(?,'shared-task','retention-run','task','task','Open task','alice')",
+      )
+      .bind(workspace),
+  ]);
+  const repo = new NotificationRepository(fixture.db);
+  for (const [index, scope] of [workspace, tenant].entries()) {
+    const createdAt = now - (190 - index) * dayMs;
+    const { id } = await repo.accept({
+      scope: { kind: "workspace", id: scope },
+      key: "retention-task-notice",
+      actor: { kind: "system", id: null },
+      source: { kind: "workflow-task", id: "shared-task" },
+      title: "Task notice",
+      body: "",
+      audience: { kind: "explicit", principals: ["alice"] },
+      createdAt,
+      expiresAt: null,
+    });
+    await fixture.db
+      .prepare(
+        "INSERT INTO notification_deliveries(id,event_id,scope_kind,scope_id,recipient_id,created_at) VALUES(?,?,'workspace',?,'alice',?)",
+      )
+      .bind(`delivery-${index}`, id, scope, createdAt)
+      .run();
+  }
+  expect(
+    (await maintainNotifications(fixture.db, now, 1)).cleanedDeliveries,
+  ).toBe(0);
+  expect(
+    (await maintainNotifications(fixture.db, now, 1)).cleanedDeliveries,
+  ).toBe(1);
+  const remaining = await fixture.db
+    .prepare("SELECT id FROM notification_deliveries")
+    .all();
+  expect(remaining.results).toEqual([{ id: "delivery-0" }]);
+});
+
 it("backfills open workflow tasks resumably without duplicating live capture", async () => {
   const repo = new WorkflowRepository(fixture.db, tenant);
   const draft = await repo.create(

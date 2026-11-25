@@ -127,14 +127,18 @@ export function createNotificationPolicy(db: D1Database): NotificationPolicy {
           return row !== null;
         }
         if (source.kind === "workflow-task") {
+          if (scope.kind !== "workspace") return false;
           const row = await db
-            .prepare("SELECT 1 AS ok FROM workflow_tasks WHERE id=?")
-            .bind(source.id)
+            .prepare(
+              "SELECT 1 AS ok FROM workflow_tasks WHERE workspace_id=? AND id=? AND assignee=?",
+            )
+            .bind(scope.id, source.id, principal)
             .first<number>("ok");
           return row !== null;
         }
         return true;
-      } catch {
+      } catch (error) {
+        if (source.kind === "workflow-task") throw error;
         return scopeOk;
       }
     },

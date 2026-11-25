@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslate } from "ra-core";
 import { useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
   getSessionGeneration,
   useSessionGeneration,
@@ -16,6 +17,7 @@ import {
   LoaderCircle,
   Megaphone,
   RefreshCw,
+  ShieldCheck,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
@@ -104,7 +106,8 @@ export function NotificationInbox({
     } while (cursor);
   };
 
-  const items: NoticeItem[] = inbox.data?.items ?? [];
+  const items: NoticeItem[] =
+    inbox.data?.pages.flatMap((page) => page.items) ?? [];
   const showEmpty =
     !inbox.isPending &&
     (!inbox.isError || inbox.data !== undefined) &&
@@ -193,7 +196,7 @@ export function NotificationInbox({
           </div>
         )}
 
-        {inbox.isError && inbox.data !== undefined && (
+        {inbox.isRefetchError && (
           <ReadRefreshStatus
             error={t("loadError")}
             onRetry={() => void refresh()}
@@ -303,6 +306,19 @@ export function NotificationInbox({
                         <Badge variant="secondary">{t("pending")}</Badge>
                       ) : null}
                       <div className="ml-auto flex flex-wrap gap-1">
+                        {item.source.kind === "security-request" && (
+                          <Button
+                            asChild
+                            variant="ghost"
+                            size="sm"
+                            className="max-sm:min-h-11"
+                          >
+                            <Link to="/account">
+                              <ShieldCheck aria-hidden="true" />
+                              {t("openAccount")}
+                            </Link>
+                          </Button>
+                        )}
                         {unread && (
                           <Button
                             type="button"
@@ -349,7 +365,11 @@ export function NotificationInbox({
                               <CircleCheck aria-hidden="true" />
                             )}
                             <span className="sr-only sm:not-sr-only">
-                              {t("resolve")}
+                              {t(
+                                item.source.kind === "admin-message"
+                                  ? "acknowledge"
+                                  : "resolve",
+                              )}
                             </span>
                           </Button>
                         )}
@@ -385,6 +405,31 @@ export function NotificationInbox({
             );
           })}
         </ul>
+        {inbox.hasNextPage && (
+          <div className="flex flex-col items-center gap-2 py-2">
+            {inbox.isFetchNextPageError && (
+              <p role="alert" className="text-sm text-destructive">
+                {t("loadMoreError")}
+              </p>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              disabled={inbox.isFetching}
+              onClick={() => void inbox.fetchNextPage({ cancelRefetch: false })}
+            >
+              {inbox.isFetchingNextPage && (
+                <LoaderCircle className="animate-spin" aria-hidden="true" />
+              )}
+              {inbox.isFetchingNextPage
+                ? t("loading")
+                : inbox.isFetchNextPageError
+                  ? t("retry")
+                  : t("loadMore")}
+            </Button>
+          </div>
+        )}
       </div>
     </main>
   );
