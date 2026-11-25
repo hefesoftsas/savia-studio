@@ -1,6 +1,7 @@
 import { retentionSchema } from "@savia/studio-shared/notifications";
 import { fail } from "../context";
 import { NotificationRepository } from "./repository";
+import { decodeCursor, encodeCursor } from "./types";
 
 export interface MaintenanceReport {
   cleanedDeliveries: number;
@@ -76,19 +77,30 @@ export async function maintainNotifications(
   const pendingTasks = new Set(
     (
       await db
-        .prepare("SELECT id FROM workflow_tasks WHERE status!='done'")
-        .all<{ id: string }>()
-    ).results.map((row) => row.id),
+        .prepare(
+          "SELECT workspace_id,id FROM workflow_tasks WHERE status!='done'",
+        )
+        .all<{ workspace_id: string; id: string }>()
+    ).results.map(({ workspace_id, id }) => JSON.stringify([workspace_id, id])),
   );
+  const savedCursor =
+    (await db
+      .prepare(
+        "SELECT cursor FROM notification_maintenance_checkpoints WHERE name='retention-deliveries'",
+      )
+      .first<string>("cursor")) ?? "";
+  const cursor = savedCursor ? decodeCursor(savedCursor) : null;
+  const cursorWhere = cursor ? "WHERE (d.created_at,d.id) > (?,?)" : "";
   const deliveries = (
     await db
       .prepare(
         `SELECT d.id,d.created_at,d.read_at,d.archived_at,d.scope_kind,d.scope_id,e.payload
          FROM notification_deliveries d
          JOIN notification_events e ON e.id=d.event_id
-         ORDER BY d.created_at LIMIT ?`,
+         ${cursorWhere}
+         ORDER BY d.created_at,d.id LIMIT ?`,
       )
-      .bind(limit)
+      .bind(...(cursor ?? []), limit)
       .all<{
         id: string;
         created_at: number;
@@ -117,8 +129,9 @@ export async function maintainNotifications(
       ).source;
       if (
         source?.kind === "workflow-task" &&
+        row.scope_kind === "workspace" &&
         source.id &&
-        pendingTasks.has(source.id)
+        pendingTasks.has(JSON.stringify([row.scope_id, source.id]))
       )
         protected_ = true;
       if (source?.kind === "security-request") protected_ = true;
@@ -126,11 +139,27 @@ export async function maintainNotifications(
       continue;
     }
     if (protected_) continue;
-    await db
+    const removed = await db
       .prepare("DELETE FROM notification_deliveries WHERE id=?")
       .bind(row.id)
       .run();
-    report.cleanedDeliveries += 1;
+    report.cleanedDeliveries += removed.meta.changes ?? 0;
+  }
+  const lastDelivery = deliveries[deliveries.length - 1];
+  report.cursor =
+    deliveries.length === limit && lastDelivery
+      ? encodeCursor(lastDelivery.created_at, lastDelivery.id)
+      : null;
+  const nextCursor = report.cursor ?? "";
+  if (nextCursor !== savedCursor) {
+    await db
+      .prepare(
+        `INSERT INTO notification_maintenance_checkpoints(name,cursor) VALUES ('retention-deliveries',?)
+       ON CONFLICT(name) DO UPDATE SET cursor=excluded.cursor
+       WHERE notification_maintenance_checkpoints.cursor=?`,
+      )
+      .bind(nextCursor, savedCursor)
+      .run();
   }
   const orphaned = (
     await db

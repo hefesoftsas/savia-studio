@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslate } from "ra-core";
+import { getSessionGeneration } from "@/auth/session-scope";
 import { Button } from "@/components/ui/button";
 import { notificationClient, type NotificationClient } from "./client";
 
@@ -20,9 +21,11 @@ export function AdminNoticeForm({
   const [body, setBody] = useState("");
   const [principals, setPrincipals] = useState("");
   const [allMembers, setAllMembers] = useState(false);
+  const [requireAcknowledgement, setRequireAcknowledgement] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const pendingSend = useRef<{ fingerprint: string; key: string } | null>(null);
 
   if (!canAdminister) return null;
 
@@ -31,21 +34,33 @@ export function AdminNoticeForm({
     setNotice("");
     setError("");
     try {
-      const result = await client.sendAdminNotice({
+      const input = {
         scope,
-        key: `manual-${Date.now()}`,
-        title,
+        title: title.trim(),
         body,
+        requireAcknowledgement,
         audience: allMembers
-          ? { kind: "workspace-members" }
+          ? { kind: "workspace-members" as const }
           : {
-              kind: "explicit",
+              kind: "explicit" as const,
               principals: principals
                 .split(",")
                 .map((entry) => entry.trim())
                 .filter(Boolean),
             },
+      };
+      const fingerprint = JSON.stringify([getSessionGeneration(), input]);
+      if (pendingSend.current?.fingerprint !== fingerprint)
+        pendingSend.current = {
+          fingerprint,
+          key: `manual-${crypto.randomUUID()}`,
+        };
+      const attempt = pendingSend.current;
+      const result = await client.sendAdminNotice({
+        ...input,
+        key: attempt.key,
       });
+      if (pendingSend.current === attempt) pendingSend.current = null;
       setNotice(
         result.duplicate
           ? t("duplicateAccepted")
@@ -113,6 +128,15 @@ export function AdminNoticeForm({
           />
         </label>
       )}
+      <label className="flex min-h-11 items-center gap-2 text-sm">
+        <input
+          className="size-5"
+          type="checkbox"
+          checked={requireAcknowledgement}
+          onChange={(event) => setRequireAcknowledgement(event.target.checked)}
+        />
+        {t("adminRequireAcknowledgement")}
+      </label>
       {notice && <p role="status">{notice}</p>}
       {error && <p role="alert">{error}</p>}
       <Button

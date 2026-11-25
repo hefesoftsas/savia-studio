@@ -93,6 +93,7 @@ export const notificationClient = {
     key: string;
     title: string;
     body: string;
+    requireAcknowledgement?: boolean;
     audience:
       | { kind: "explicit"; principals: string[] }
       | { kind: "workspace-members" };
@@ -107,6 +108,13 @@ export const notificationClient = {
         scope: { kind: "workspace", id: scope },
       }),
     });
+    return data;
+  },
+  async retryAdminNotice(eventId: string): Promise<{ retried: number }> {
+    const { data } = await request<{ data: { retried: number } }>(
+      `/notifications/admin/${encodeURIComponent(eventId)}/retry`,
+      { method: "POST" },
+    );
     return data;
   },
   async adminStatus(eventId: string): Promise<{

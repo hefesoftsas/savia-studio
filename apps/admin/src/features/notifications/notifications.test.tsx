@@ -16,6 +16,115 @@ import { rotateSessionScope } from "@/auth/session-scope";
 
 afterEach(cleanup);
 
+it("lets a recipient confirm receipt of a read administrator notice", async () => {
+  const item: NoticeItem = {
+    id: "acknowledgement",
+    title: "Please confirm receipt",
+    body: "",
+    createdAt: 1,
+    readAt: 2,
+    archivedAt: null,
+    source: { kind: "admin-message" },
+    actionState: "pending",
+  };
+  const resolve = vi.fn(async () => {
+    item.actionState = "done";
+  });
+  setupNoRetry({
+    resolve,
+    inbox: async () => ({ items: [{ ...item }], nextCursor: null, cutoff: "" }),
+  });
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "savia.notificationInbox.acknowledge",
+    }),
+  );
+  expect(resolve).toHaveBeenCalledWith(item.id);
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", {
+        name: "savia.notificationInbox.acknowledge",
+      }),
+    ).toBeNull(),
+  );
+});
+
+it("links account security notices to the account page", async () => {
+  setupNoRetry({
+    inbox: async () => ({
+      items: [
+        {
+          id: "security-notice",
+          title: "Two-factor authentication enabled",
+          body: "",
+          createdAt: 2,
+          readAt: null,
+          archivedAt: null,
+          source: { kind: "security-request" },
+          actionState: "none",
+        },
+      ],
+      nextCursor: null,
+      cutoff: "",
+    }),
+  });
+  const link = await screen.findByRole("link", {
+    name: "savia.notificationInbox.openAccount",
+  });
+  expect(link).toHaveAttribute("href", "/account");
+});
+
+it("appends older notices and retries a failed page without losing the inbox", async () => {
+  const first: NoticeItem = {
+    id: "newer",
+    title: "Newer notice",
+    body: "",
+    createdAt: 2,
+    readAt: null,
+    archivedAt: null,
+    source: { kind: "admin-message" },
+    actionState: "none",
+  };
+  const older = { ...first, id: "older", title: "Older notice", createdAt: 1 };
+  const inbox = vi
+    .fn()
+    .mockResolvedValueOnce({
+      items: [first],
+      nextCursor: "older-cursor",
+      cutoff: "first",
+    })
+    .mockRejectedValueOnce(new Error("Unavailable"))
+    .mockResolvedValueOnce({
+      items: [older],
+      nextCursor: null,
+      cutoff: "last",
+    });
+  setupNoRetry({ inbox });
+
+  await screen.findByText(first.title);
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.loadMore" }),
+  );
+  expect(
+    await screen.findByText("savia.notificationInbox.loadMoreError"),
+  ).toBeVisible();
+  expect(screen.getByText(first.title)).toBeVisible();
+
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.retry" }),
+  );
+  expect(await screen.findByText(older.title)).toBeVisible();
+  expect(screen.getByText(first.title)).toBeVisible();
+  expect(inbox.mock.calls.map(([, cursor]) => cursor)).toEqual([
+    undefined,
+    "older-cursor",
+    "older-cursor",
+  ]);
+  expect(
+    screen.queryByRole("button", { name: "savia.notificationInbox.loadMore" }),
+  ).toBeNull();
+});
+
 it("marks every page of notifications as read from a single action", async () => {
   let unread = 201;
   const readAll = vi.fn(async (cursor?: string) => {
@@ -284,6 +393,11 @@ it.each(["mark-read", "archive", "read-all"] as const)(
         inbox.mock.calls.filter(([filter]) => filter === "all"),
       ).toHaveLength(2),
     );
+    if (mutation === "archive") {
+      await waitFor(() =>
+        expect(screen.queryByText("Review")).not.toBeInTheDocument(),
+      );
+    }
     fireEvent.click(
       screen.getByRole("tab", { name: "savia.notificationInbox.unread" }),
     );

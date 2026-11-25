@@ -149,4 +149,41 @@ describe("notification policy", () => {
       }),
     ).toBe(false);
   });
+
+  it("delivers task notices only for tasks assigned to the recipient in the originating workspace", async () => {
+    const foreign = "tenant:9202";
+    for (const workspaceId of [workspace.id, foreign]) {
+      await env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO workflows(workspace_id,id,name,definition,created_by) VALUES(?,'notice-flow','Notice','{}',?)",
+        ).bind(workspaceId, admin),
+        env.DB.prepare(
+          "INSERT INTO workflow_versions(workspace_id,id,workflow_id,definition,owner_id,revision) VALUES(?,'notice-version','notice-flow','{}',?,1)",
+        ).bind(workspaceId, admin),
+        env.DB.prepare(
+          "INSERT INTO workflow_executions(workspace_id,id,workflow_id,version_id,owner_id,initiator_id,event_key,context) VALUES(?,'notice-execution','notice-flow','notice-version',?,?,'notice','{}')",
+        ).bind(workspaceId, admin, admin),
+        env.DB.prepare(
+          "INSERT INTO workflow_tasks(workspace_id,id,execution_id,node_id,kind,title,assignee) VALUES(?,?,'notice-execution','task','task','Task',?)",
+        ).bind(
+          workspaceId,
+          workspaceId === foreign ? "foreign-task" : "local-task",
+          member,
+        ),
+      ]);
+    }
+    const policy = createNotificationPolicy(env.DB);
+    const task = { kind: "workflow-task", id: "local-task" } as const;
+    expect(await policy.canReadSource(member, workspace, task)).toBe(true);
+    expect(await policy.canReadSource(admin, workspace, task)).toBe(false);
+    expect(
+      await policy.canReadSource(member, workspace, {
+        ...task,
+        id: "foreign-task",
+      }),
+    ).toBe(false);
+    expect(
+      await policy.canReadSource(member, { kind: "account", id: member }, task),
+    ).toBe(false);
+  });
 });

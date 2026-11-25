@@ -3,7 +3,7 @@ import {
   type NoticeEventInput,
   type NotificationPolicy,
 } from "@savia/studio-shared/notifications";
-import { canonicalPayload } from "./types";
+import { canonicalPayload, stableEventId } from "./types";
 import { fail } from "../context";
 import { NotificationRepository } from "./repository";
 
@@ -23,7 +23,6 @@ export interface AdminEventStatus {
 }
 
 const WINDOW_MS = 60_000;
-const WINDOW_LIMIT = 10;
 
 export async function sendAdminNotice(
   db: D1Database,
@@ -46,64 +45,77 @@ export async function sendAdminNotice(
     title: payload.title,
     body: payload.body,
     audience: payload.audience,
+    ...(payload.requireAcknowledgement ? { requireAcknowledgement: true } : {}),
     createdAt: now,
     expiresAt: null,
   };
   const repository = new NotificationRepository(db);
   const windowStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
-  const existing = await repository.find(event);
-  if (existing) {
-    if (existing.payload === canonicalPayload(event))
+  const findRetry = async (): Promise<AdminSendResult | null> => {
+    const existing = await repository.find(event);
+    if (!existing) return null;
+    const original: NoticeEventInput = JSON.parse(existing.payload);
+    if (
+      existing.payload ===
+      canonicalPayload({ ...event, createdAt: original.createdAt })
+    )
       return { eventId: existing.id, status: "accepted", duplicate: true };
     return fail("The message key already exists with different content.", 409);
-  }
-  const spent = await db
-    .prepare(
-      `SELECT count FROM notification_send_limits WHERE workspace_id=? AND actor_id=? AND window_start=?`,
+  };
+  const previous = await findRetry();
+  if (previous) return previous;
+
+  const eventId = stableEventId(event);
+  try {
+    await db.batch([
+      ...repository.eventStatements(event),
+      db
+        .prepare(
+          `INSERT INTO notification_send_limits(workspace_id,actor_id,window_start,count)
+           VALUES (?,?,?,1)
+           ON CONFLICT(workspace_id,actor_id,window_start) DO UPDATE SET count=notification_send_limits.count+1`,
+        )
+        .bind(scope.id, principal, windowStart),
+      db
+        .prepare(
+          `INSERT INTO notification_admin_audit(id,workspace_id,actor_id,event_id,action,created_at)
+           VALUES (?,?,?,?,?,?)`,
+        )
+        .bind(`audit_${eventId}`, scope.id, principal, eventId, "send", now),
+    ]);
+  } catch (error) {
+    const retry = await findRetry();
+    if (retry) return retry;
+    if (
+      /notification_send_limits_count_check|CHECK constraint failed: count BETWEEN 1 AND 10/i.test(
+        String(error),
+      )
     )
-    .bind(scope.id, principal, windowStart)
-    .first<number>("count");
-  if ((spent ?? 0) >= WINDOW_LIMIT)
-    return fail("Administrator send quota exceeded. Retry in a minute.", 429);
-  const accepted = await repository.accept(event);
-  await db.batch([
-    db
-      .prepare(
-        `INSERT INTO notification_send_limits(workspace_id,actor_id,window_start,count)
-         VALUES (?,?,?,1)
-         ON CONFLICT(workspace_id,actor_id,window_start) DO UPDATE SET count=count+1`,
-      )
-      .bind(scope.id, principal, windowStart),
-    db
-      .prepare(
-        `INSERT INTO notification_admin_audit(id,workspace_id,actor_id,event_id,action,created_at)
-         VALUES (?,?,?,?,?,?)`,
-      )
-      .bind(
-        `audit_${accepted.id}`,
-        scope.id,
-        principal,
-        accepted.id,
-        "send",
-        now,
-      ),
-  ]);
-  return { eventId: accepted.id, status: "accepted", duplicate: false };
+      return fail("Administrator send quota exceeded. Retry in a minute.", 429);
+    throw error;
+  }
+  return { eventId, status: "accepted", duplicate: false };
 }
 
 export async function adminEventStatus(
   db: D1Database,
+  policy: NotificationPolicy,
   principal: string,
+  workspace: string,
   eventId: string,
 ): Promise<AdminEventStatus> {
-  const event = await db
-    .prepare("SELECT id,status FROM notification_events WHERE id=?")
-    .bind(eventId)
-    .first<{ id: string; status: string }>();
-  if (!event) return fail("Notification event not found.", 404);
+  const event = await requireAdminEvent(
+    db,
+    policy,
+    principal,
+    workspace,
+    eventId,
+  );
   const delivered =
     (await db
-      .prepare("SELECT COUNT(*) AS n FROM notification_deliveries WHERE event_id=?")
+      .prepare(
+        "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM notification_deliveries WHERE event_id=?",
+      )
       .bind(eventId)
       .first<number>("n")) ?? 0;
   const retries = (
@@ -135,34 +147,77 @@ export async function adminEventStatus(
 
 export async function retryAdminEvent(
   db: D1Database,
+  policy: NotificationPolicy,
   principal: string,
+  workspace: string,
   eventId: string,
   now: number = Date.now(),
 ): Promise<{ retried: number }> {
+  await requireAdminEvent(db, policy, principal, workspace, eventId);
+  const [, result] = await db.batch([
+    db
+      .prepare(
+        `UPDATE notification_events
+         SET status='pending',cursor=NULL,next_retry=?,lease_token=NULL,lease_until=0,error=NULL
+         WHERE id=? AND status<>'processing'
+           AND (status='failed' OR EXISTS (
+             SELECT 1 FROM notification_recipient_retries
+             WHERE event_id=notification_events.id AND status='failed'
+           ))`,
+      )
+      .bind(now, eventId),
+    db
+      .prepare(
+        `UPDATE notification_recipient_retries SET status='pending',attempts=0,next_retry=?
+         WHERE event_id=? AND status='failed' AND EXISTS (
+           SELECT 1 FROM notification_events WHERE id=notification_recipient_retries.event_id
+             AND status='pending' AND next_retry=?
+         )`,
+      )
+      .bind(now, eventId, now),
+    db
+      .prepare(
+        `INSERT INTO notification_admin_audit(id,workspace_id,actor_id,event_id,action,created_at)
+         VALUES (?,?,?,?,?,?)`,
+      )
+      .bind(
+        `audit_retry_${crypto.randomUUID()}`,
+        workspace,
+        principal,
+        eventId,
+        "retry",
+        now,
+      ),
+  ]);
+  return { retried: result!.meta.changes ?? 0 };
+}
+
+async function requireAdminEvent(
+  db: D1Database,
+  policy: NotificationPolicy,
+  principal: string,
+  workspace: string,
+  eventId: string,
+) {
+  if (
+    !workspace ||
+    !(await policy.canSend(principal, { kind: "workspace", id: workspace }))
+  )
+    return fail("Administrator permission required.", 403);
   const event = await db
-    .prepare("SELECT id FROM notification_events WHERE id=?")
-    .bind(eventId)
-    .first<{ id: string }>();
+    .prepare(
+      "SELECT status,payload FROM notification_events WHERE id=? AND scope_kind='workspace' AND scope_id=?",
+    )
+    .bind(eventId, workspace)
+    .first<{ status: string; payload: string }>();
   if (!event) return fail("Notification event not found.", 404);
-  const result = await db
-    .prepare(
-      `UPDATE notification_recipient_retries SET status='pending',next_retry=?
-       WHERE event_id=? AND status='failed'`,
-    )
-    .bind(now, eventId)
-    .run();
-  await db
-    .prepare(
-      `UPDATE notification_events SET status='pending',next_retry=? WHERE id=? AND status='failed'`,
-    )
-    .bind(now, eventId)
-    .run();
-  await db
-    .prepare(
-      `INSERT INTO notification_admin_audit(id,workspace_id,actor_id,event_id,action,created_at)
-       VALUES (?,?,?,?,?,?)`,
-    )
-    .bind(`audit_retry_${eventId}_${now}`, "", principal, eventId, "retry", now)
-    .run();
-  return { retried: result.meta.changes ?? 0 };
+  let payload: { source?: { kind?: unknown } } | null;
+  try {
+    payload = JSON.parse(event.payload);
+  } catch {
+    return fail("Notification event not found.", 404);
+  }
+  if (payload?.source?.kind !== "admin-message")
+    return fail("Notification event not found.", 404);
+  return event;
 }

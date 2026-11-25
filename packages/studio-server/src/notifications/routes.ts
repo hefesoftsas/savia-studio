@@ -75,7 +75,8 @@ function scopes(
   principalId: string,
   only?: string,
 ): NoticeScope[] {
-  if (only === "account") return [{ kind: "account", id: principalId }];
+  if (only === "account" || !tenant)
+    return [{ kind: "account", id: principalId }];
   return [
     { kind: "workspace", id: tenant },
     { kind: "account", id: principalId },
@@ -157,25 +158,23 @@ export function registerNotifications(
     return c.json({ data: { updated: true } });
   });
   app.post("/api/notifications/:id/resolve", async (c) => {
-    const { principalId, tenant, policy } = session(c, options);
+    const { principalId, tenant } = session(c, options);
     await resolveTaskNotice(
       c.env.DB,
-      policy,
       principalId,
-      { kind: "workspace", id: tenant },
+      scopes(tenant, principalId),
       c.req.param("id"),
     );
     return c.json({ data: { resolved: true } });
   });
   app.get("/api/notifications/action/:id", async (c) => {
-    const { principalId, tenant, policy } = session(c, options);
+    const { principalId, tenant } = session(c, options);
     c.header("Cache-Control", "no-store");
     return c.json({
       data: await resolveNoticeAction(
         c.env.DB,
-        policy,
         principalId,
-        { kind: "workspace", id: tenant },
+        scopes(tenant, principalId),
         c.req.param("id"),
       ),
     });
@@ -204,22 +203,26 @@ export function registerNotifications(
     });
   });
   app.get("/api/notifications/admin/:eventId/status", async (c) => {
-    const { principalId } = session(c, options);
+    const { principalId, tenant, policy } = session(c, options);
     c.header("Cache-Control", "no-store");
     return c.json({
       data: await adminEventStatus(
         c.env.DB,
+        policy,
         principalId,
+        tenant,
         c.req.param("eventId"),
       ),
     });
   });
   app.post("/api/notifications/admin/:eventId/retry", async (c) => {
-    const { principalId } = session(c, options);
+    const { principalId, tenant, policy } = session(c, options);
     return c.json({
       data: await retryAdminEvent(
         c.env.DB,
+        policy,
         principalId,
+        tenant,
         c.req.param("eventId"),
       ),
     });

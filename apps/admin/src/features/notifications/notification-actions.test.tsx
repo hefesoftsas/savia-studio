@@ -23,6 +23,7 @@ function baseClient(overrides: Partial<NotificationClient> = {}): NotificationCl
     follow: async () => {},
     unfollow: async () => {},
     sendAdminNotice: async () => ({ eventId: "e1", status: "accepted", duplicate: false }),
+    retryAdminNotice: async () => ({ retried: 0 }),
     adminStatus: async () => ({ status: "accepted", delivered: 0, failed: 0, pendingRetries: 0 }),
     ...overrides,
   } as NotificationClient;
@@ -73,8 +74,16 @@ it("hides the administrator form without permission and reports 429", async () =
   fireEvent.change(screen.getByLabelText("savia.notificationInbox.adminRecipients"), {
     target: { value: "alice" },
   });
+  fireEvent.click(
+    screen.getByRole("checkbox", {
+      name: "savia.notificationInbox.adminRequireAcknowledgement",
+    }),
+  );
   fireEvent.click(screen.getByRole("button", { name: "savia.notificationInbox.adminSend" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("savia.notificationInbox.quotaExceeded");
+  expect(sendAdminNotice).toHaveBeenCalledWith(
+    expect.objectContaining({ requireAcknowledgement: true }),
+  );
 });
 
 it("shows accepted delivery status for administrators", async () => {
@@ -91,6 +100,45 @@ it("shows accepted delivery status for administrators", async () => {
   );
   expect(await screen.findByText("processing")).toBeVisible();
   expect(await screen.findByText("4")).toBeVisible();
+});
+
+it("reuses the same notice key after a failed request and releases it after success", async () => {
+  const sendAdminNotice = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("Connection interrupted"))
+    .mockResolvedValue({
+      eventId: "retry-event",
+      status: "accepted",
+      duplicate: false,
+    });
+  const client = baseClient({ sendAdminNotice });
+  renderWith(
+    client,
+    <AdminNoticeForm scope="tenant:1" canAdminister client={client} />,
+  );
+  fireEvent.change(
+    screen.getByLabelText("savia.notificationInbox.adminSubject"),
+    { target: { value: "Notice" } },
+  );
+  fireEvent.change(
+    screen.getByLabelText("savia.notificationInbox.adminRecipients"),
+    { target: { value: "alice" } },
+  );
+  const send = screen.getByRole("button", {
+    name: "savia.notificationInbox.adminSend",
+  });
+  fireEvent.click(send);
+  await screen.findByRole("alert");
+  fireEvent.click(send);
+  await screen.findByRole("status");
+  expect(sendAdminNotice.mock.calls[1][0]).toEqual(
+    sendAdminNotice.mock.calls[0][0],
+  );
+  fireEvent.click(send);
+  await screen.findByRole("status");
+  expect(sendAdminNotice.mock.calls[2][0].key).not.toBe(
+    sendAdminNotice.mock.calls[0][0].key,
+  );
 });
 
 it("does not poll administrative notice status", async () => {
@@ -111,4 +159,18 @@ it("does not poll administrative notice status", async () => {
     await vi.advanceTimersByTimeAsync(300_000);
   });
   expect(adminStatus).toHaveBeenCalledTimes(1);
+});
+
+it("retries failed deliveries and refreshes the displayed status", async () => {
+  const adminStatus = vi.fn()
+    .mockResolvedValueOnce({ status: "completed", delivered: 1, failed: 1, pendingRetries: 0 })
+    .mockResolvedValue({ status: "accepted", delivered: 1, failed: 0, pendingRetries: 1 });
+  const retryAdminNotice = vi.fn().mockResolvedValue({ retried: 1 });
+  const client = baseClient({ adminStatus, retryAdminNotice });
+  renderWith(client, <AdminNoticeStatus eventId="evt-retry" client={client} />);
+  const retry = await screen.findByRole("button", { name: "savia.notificationInbox.retryFailed" });
+  fireEvent.click(retry);
+  expect(await screen.findByText("accepted")).toBeVisible();
+  expect(retryAdminNotice).toHaveBeenCalledWith("evt-retry");
+  expect(screen.queryByRole("button", { name: "savia.notificationInbox.retryFailed" })).toBeNull();
 });

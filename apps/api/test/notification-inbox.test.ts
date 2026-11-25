@@ -82,13 +82,17 @@ function request(
   return app.request(path, init, { DB: env.DB } as never);
 }
 
-async function seedDelivery(principalId: string, title: string) {
+async function seedDelivery(
+  principalId: string,
+  title: string,
+  kind: "admin-message" | "security-request" = "admin-message",
+) {
   const repository = new NotificationRepository(env.DB);
   const { id: eventId } = await repository.accept({
     scope: { kind: "account", id: principalId },
     key: `inbox-${principalId}-${title}`,
     actor: { kind: "user", id: "admin" },
-    source: { kind: "admin-message", id: "m1" },
+    source: { kind, id: "m1" },
     title,
     body: "World",
     audience: { kind: "explicit", principals: [principalId] },
@@ -176,16 +180,38 @@ describe("notification inbox routes", () => {
     expect(response.status).toBe(401);
   });
 
+  it("returns account navigation for the owner of a security notice", async () => {
+    const principal = "principal-inbox";
+    await seedDelivery(principal, "MFA enabled", "security-request");
+    const id = encodeURIComponent(`delivery-${principal}-MFA enabled`);
+    const path = `https://savia.test/api/notifications/action/${id}`;
+    expect((await request(appFor("principal-other"), path)).status).toBe(404);
+
+    const owner = appFor(principal);
+    const response = await request(owner, path);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: { kind: "navigate", route: "/account" },
+    });
+    const resolve = await request(
+      owner,
+      `https://savia.test/api/notifications/${id}/resolve`,
+      { method: "POST" },
+    );
+    expect(resolve.status).toBe(409);
+  });
+
   it.each([
-    ["read", "readAt", { read: true }],
-    ["archive", "archivedAt", undefined],
+    ["read", "read_at", { read: true }],
+    ["archive", "archived_at", undefined],
   ] as const)(
     "lets the account owner %s an individual notice",
     async (action, field, body) => {
       await seedDelivery("principal-inbox", "Account notice");
+      const deliveryId = "delivery-principal-inbox-Account notice";
       const path =
         "https://savia.test/api/notifications/" +
-        `${encodeURIComponent("delivery-principal-inbox-Account notice")}/${action}`;
+        `${encodeURIComponent(deliveryId)}/${action}`;
       const init = {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -197,15 +223,40 @@ describe("notification inbox routes", () => {
 
       const owner = appFor("principal-inbox");
       expect((await request(owner, path, init)).status).toBe(200);
-      const response = await request(
-        owner,
-        "https://savia.test/api/notifications",
-      );
-      expect(await response.json()).toMatchObject({
-        data: {
-          items: [{ title: "Account notice", [field]: expect.any(Number) }],
-        },
-      });
+      const timestamp = await env.DB.prepare(
+        `SELECT ${field} AS stamp FROM notification_deliveries WHERE id=?`,
+      )
+        .bind(deliveryId)
+        .first<number>("stamp");
+      expect(timestamp).toBeGreaterThan(0);
     },
   );
+
+  it("removes archived notices from the inbox, counts, and bulk reads", async () => {
+    const principal = "principal-inbox";
+    await seedDelivery(principal, "Keep in archive");
+    const owner = appFor(principal);
+    const inboxUrl = "https://savia.test/api/notifications";
+    const archivedId = encodeURIComponent(
+      `delivery-${principal}-Keep in archive`,
+    );
+    expect(
+      (
+        await request(owner, `${inboxUrl}/${archivedId}/archive`, {
+          method: "POST",
+        })
+      ).status,
+    ).toBe(200);
+
+    const [inbox, count, readAll] = await Promise.all([
+      request(owner, `${inboxUrl}?filter=all`),
+      request(owner, `${inboxUrl}/count?filter=all`),
+      request(owner, `${inboxUrl}/read-all`, { method: "POST" }),
+    ]);
+    expect(await inbox.json()).toMatchObject({ data: { items: [] } });
+    expect(await count.json()).toEqual({ data: { count: 0 } });
+    expect(await readAll.json()).toEqual({
+      data: { updated: 0, nextCursor: null },
+    });
+  });
 });

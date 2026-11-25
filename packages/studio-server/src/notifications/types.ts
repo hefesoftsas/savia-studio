@@ -19,6 +19,7 @@ export interface DeliveryRow {
   created_at: number;
   read_at: number | null;
   archived_at: number | null;
+  resolved_at: number | null;
 }
 
 export function stableEventId(input: NoticeEventInput): string {
