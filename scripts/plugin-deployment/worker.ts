@@ -1,0 +1,73 @@
+import { createStudioApp } from "../../packages/studio-server/src/index";
+
+/** Private, short-lived Wrangler session. Never publish as a public Worker. */
+export async function deploymentTenants(
+  db: D1Database,
+  excludedScopes = "",
+): Promise<string[]> {
+  const excluded = new Set(excludedScopes.split(","));
+  const tenants = await db
+    .prepare("SELECT 'tenant:'||id AS scope FROM tenants ORDER BY scope")
+    .all<{ scope: string }>();
+  return tenants.results
+    .map((row) => row.scope)
+    .filter((scope) => !excluded.has(scope));
+}
+
+export default {
+  async fetch(
+    request: Request,
+    env: {
+      DB: D1Database;
+      DEPLOYMENT_SESSION: string;
+      EXCLUDED_TENANTS?: string;
+    },
+  ) {
+    if (
+      !env.DEPLOYMENT_SESSION ||
+      request.headers.get("authorization") !==
+        `Bearer ${env.DEPLOYMENT_SESSION}`
+    )
+      return new Response("Unauthorized", { status: 401 });
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/health")
+      return Response.json({ status: "ok" });
+    const tenants = await deploymentTenants(env.DB, env.EXCLUDED_TENANTS);
+    if (request.method === "GET" && url.pathname === "/tenants")
+      return Response.json({ tenants });
+    const tenant = url.searchParams.get("tenant");
+    if (!tenant || !tenants.includes(tenant))
+      return new Response("Unknown deployment workspace", { status: 404 });
+    const studio = createStudioApp(tenant, { seedObjects: [] });
+    if (request.method === "GET" && url.pathname === "/catalog") {
+      return studio.request(
+        "https://deployment.internal/api/plugin-store",
+        {},
+        env,
+      );
+    }
+    if (request.method === "POST" && url.pathname === "/upload") {
+      return studio.request(
+        "https://deployment.internal/api/plugin-store/upload",
+        {
+          method: "POST",
+          headers: {
+            "content-type": request.headers.get("content-type") ?? "",
+          },
+          body: await request.arrayBuffer(),
+        },
+        env,
+      );
+    }
+    if (request.method === "POST" && url.pathname === "/install") {
+      const id = url.searchParams.get("id");
+      if (!id) return new Response("Missing plugin id", { status: 400 });
+      return studio.request(
+        `https://deployment.internal/api/extensions/${encodeURIComponent(id)}/install`,
+        { method: "POST" },
+        env,
+      );
+    }
+    return new Response("Not found", { status: 404 });
+  },
+};

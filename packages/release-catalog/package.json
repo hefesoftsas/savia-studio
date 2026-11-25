@@ -1,0 +1,30 @@
+{
+  "name": "@savia/release-catalog",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./runtime": "./src/runtime.ts",
+    "./assistant-contracts": "./src/assistant-contracts.ts",
+    "./public-forms": "./src/public-forms.ts",
+    "./whatsapp": "./src/whatsapp.ts",
+    "./public-ui": "./src/public-ui.ts",
+    "./assistant-api-client": "./src/assistant-api-client.ts",
+    "./assistant-operations": "./src/assistant-operations.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@savia/studio-shared": "workspace:*",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

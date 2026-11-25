@@ -1,0 +1,64 @@
+name: Clean the reviewed Preview writer permits
+
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_set:
+        description: Exact approved historical permit set
+        required: true
+        type: choice
+        options: [preview-533]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: savia-preview
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: ${{ github.ref == 'refs/heads/main' && inputs.reviewed_set == 'preview-533' }}
+    runs-on: ubuntu-24.04
+    environment: preview
+    timeout-minutes: 10
+    env:
+      SAVIA_DEPLOY_ENVIRONMENT: preview
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @savia/api...
+        env:
+          PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
+      - name: Confirm Preview and archive the reviewed permits
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SAVIA_BACKUP_CONTROL_SECRET: ${{ secrets.SAVIA_BACKUP_CONTROL_SECRET }}
+          SAVIA_BACKUP_KEY: ${{ secrets.SAVIA_BACKUP_KEY }}
+        run: |
+          umask 077
+          bash scripts/preview-permit-cleanup/session.sh archive
+          node scripts/encrypt-flows-backup.mjs --action encrypt --input "$RUNNER_TEMP/preview-permits.json" --output "$RUNNER_TEMP/preview-permits.enc"
+      - name: Preserve the encrypted permit archive before deletion
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-533-permit-recovery
+          path: ${{ runner.temp }}/preview-permits.enc
+          retention-days: 7
+          if-no-files-found: error
+      - name: Close only the archived Preview permits
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SAVIA_BACKUP_CONTROL_SECRET: ${{ secrets.SAVIA_BACKUP_CONTROL_SECRET }}
+        run: bash scripts/preview-permit-cleanup/session.sh apply
+      - name: Remove private runner files
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/preview-permits.json" "$RUNNER_TEMP/preview-permits.enc"

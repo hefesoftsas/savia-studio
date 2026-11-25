@@ -1,0 +1,427 @@
+import { execFileSync, spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { packageStorePlugin } from "./pack-store-plugin.mjs";
+
+const root = resolve(import.meta.dirname, "..");
+
+const PORT_NAME_PATTERN = /^[a-z0-9-]+$/;
+const STRICT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+function comparePluginVersions(left, right) {
+  const a = left.match(STRICT_SEMVER);
+  const b = right.match(STRICT_SEMVER);
+  if (!a || !b) throw new Error("Plugin catalog contains an invalid version.");
+  for (let index = 1; index <= 3; index += 1) {
+    const leftPart = BigInt(a[index]);
+    const rightPart = BigInt(b[index]);
+    if (leftPart < rightPart) return -1;
+    if (leftPart > rightPart) return 1;
+  }
+  return 0;
+}
+
+export function assertPluginPreservationPolicy(env) {
+  if (
+    env.SAVIA_PLUGIN_PRESERVE_NEWER_OPTIONAL === "true" &&
+    env.SAVIA_DEPLOY_ENVIRONMENT !== "preview"
+  )
+    throw new Error(
+      "SAVIA_PLUGIN_PRESERVE_NEWER_OPTIONAL is only allowed in Preview.",
+    );
+}
+
+function normalizePortList(value, field) {
+  if (!Array.isArray(value))
+    throw new Error(
+      `Plugin sources.json requires a ${field} array of directory names.`,
+    );
+  for (const port of value) {
+    if (typeof port !== "string" || !PORT_NAME_PATTERN.test(port))
+      throw new Error(
+        `Plugin sources.json requires a ${field} array of directory names.`,
+      );
+  }
+  return value;
+}
+
+export function releaseArtifacts(directory = join(root, "deployment/plugins")) {
+  mkdirSync(directory, { recursive: true });
+  const sourcePath = join(directory, "sources.json");
+  // Ports listed under `optional` are packaged and uploaded to every
+  // workspace catalog, but never auto-installed: tenants enable them on
+  // demand from their own plugin store. Ports under `ports` keep the
+  // historical behavior (upload + install and activate everywhere).
+  let optionalPorts = new Set();
+  if (existsSync(sourcePath)) {
+    const sources = JSON.parse(readFileSync(sourcePath, "utf8"));
+    const ports = normalizePortList(sources.ports ?? [], "ports");
+    const optional = normalizePortList(sources.optional ?? [], "optional");
+    const overlap = ports.filter((port) => optional.includes(port));
+    if (overlap.length)
+      throw new Error(
+        `Plugin sources.json lists ${overlap[0]} as required and optional.`,
+      );
+    optionalPorts = new Set(optional);
+    for (const port of [...ports, ...optional])
+      packageStorePlugin({
+        portDir: `store-ports/${port}`,
+        outputPath: join(directory, `${port}.store.zip`),
+      });
+  }
+  const artifacts = readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".zip"))
+    .map((entry) => {
+      const path = join(directory, entry.name);
+      const manifest = JSON.parse(
+        execFileSync("unzip", ["-p", path, "savia-extension.json"], {
+          encoding: "utf8",
+          maxBuffer: 1024 * 1024,
+        }),
+      );
+      if (typeof manifest.id !== "string" || !Array.isArray(manifest.requires))
+        throw new Error(`Invalid plugin manifest in ${entry.name}.`);
+      // Only ports generated from sources.json carry the `.store.zip`
+      // suffix with their directory name; hand-placed ZIPs keep the
+      // historical behavior and are always auto-installed.
+      const portName = entry.name.endsWith(".store.zip")
+        ? entry.name.slice(0, -".store.zip".length)
+        : null;
+      return {
+        path,
+        manifest,
+        optional: portName !== null && optionalPorts.has(portName),
+      };
+    });
+  const byId = new Map();
+  for (const artifact of artifacts) {
+    if (byId.has(artifact.manifest.id))
+      throw new Error(
+        `Multiple deployment ZIPs for ${artifact.manifest.id}. Keep one version per release.`,
+      );
+    byId.set(artifact.manifest.id, artifact);
+  }
+  const ordered = [],
+    visiting = new Set(),
+    visited = new Set();
+  function visit(id) {
+    if (visited.has(id) || !byId.has(id)) return;
+    if (visiting.has(id)) throw new Error(`Circular plugin dependency: ${id}.`);
+    visiting.add(id);
+    const artifact = byId.get(id);
+    for (const dependency of artifact.manifest.requires) visit(dependency);
+    visiting.delete(id);
+    visited.add(id);
+    ordered.push(artifact);
+  }
+  for (const id of [...byId.keys()].sort()) visit(id);
+  return ordered;
+}
+
+export function deploymentConfig(env, session) {
+  for (const name of [
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_DATABASE_ID",
+  ])
+    if (!env[name]?.trim())
+      throw new Error(`${name} is required for plugin deployment.`);
+  if (!["preview", "production"].includes(env.SAVIA_DEPLOY_ENVIRONMENT))
+    throw new Error("SAVIA_DEPLOY_ENVIRONMENT must be preview or production.");
+  const excludedTenants =
+    env.SAVIA_DEPLOY_ENVIRONMENT === "preview"
+      ? (env.SAVIA_PREVIEW_STORE_EXCLUDED_TENANTS ?? "")
+          .split(",")
+          .map((scope) => scope.trim())
+          .filter(Boolean)
+      : [];
+  if (excludedTenants.some((scope) => !/^tenant:[1-9]\d*$/.test(scope)))
+    throw new Error(
+      "SAVIA_PREVIEW_STORE_EXCLUDED_TENANTS must contain tenant:<id> scopes.",
+    );
+  return {
+    name: `savia-${env.SAVIA_DEPLOY_ENVIRONMENT}-plugin-deployment-session`,
+    main: join(root, "scripts/plugin-deployment/worker.ts"),
+    compatibility_date: "2026-09-01",
+    compatibility_flags: ["nodejs_compat"],
+    workers_dev: false,
+    preview_urls: false,
+    vars: {
+      DEPLOYMENT_SESSION: session,
+      ...(excludedTenants.length
+        ? { EXCLUDED_TENANTS: excludedTenants.join(",") }
+        : {}),
+    },
+    d1_databases: [
+      {
+        binding: "DB",
+        database_name: `savia-${env.SAVIA_DEPLOY_ENVIRONMENT}-deployment`,
+        database_id: env.CLOUDFLARE_DATABASE_ID,
+        preview_database_id: env.CLOUDFLARE_DATABASE_ID,
+      },
+    ],
+  };
+}
+
+export async function deployArtifacts(artifacts, baseUrl, session, io = {}) {
+  const request = io.fetch ?? fetch,
+    log = io.log ?? console.log,
+    preserveNewerOptional = io.preserveNewerOptional === true;
+  async function call(path, init = {}) {
+    const response = await request(`${baseUrl}${path}`, {
+      ...init,
+      redirect: "error",
+      signal: AbortSignal.timeout(120_000),
+      headers: { ...init.headers, authorization: `Bearer ${session}` },
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok)
+      throw new Error(
+        `Plugin deployment ${path} failed (HTTP ${response.status}): ${JSON.stringify(payload?.error ?? "unavailable")}`,
+      );
+    return payload;
+  }
+  const { tenants } = await call("/tenants");
+  if (!Array.isArray(tenants))
+    throw new Error("Deployment worker returned an invalid tenant list.");
+  const preservedByTenant = new Map();
+  const reusedByTenant = new Map();
+  if (preserveNewerOptional) {
+    const localSha256ById = new Map(
+      artifacts.map((artifact) => [
+        artifact.manifest.id,
+        createHash("sha256")
+          .update(readFileSync(artifact.path))
+          .digest("hex"),
+      ]),
+    );
+    // Inspect every workspace before the first upload. A required-plugin
+    // conflict in a later workspace must not leave earlier workspaces changed.
+    for (const tenant of tenants) {
+      const catalog = await call(
+        `/catalog?tenant=${encodeURIComponent(tenant)}`,
+      );
+      if (!Array.isArray(catalog?.data))
+        throw new Error(
+          `Plugin deployment worker returned an invalid catalog for ${tenant}.`,
+        );
+      const latestById = new Map();
+      const rowsById = new Map();
+      for (const row of catalog.data) {
+        const id = row?.manifest?.id,
+          version = row?.version ?? row?.manifest?.version;
+        if (typeof id !== "string" || typeof version !== "string")
+          throw new Error(
+            `Plugin deployment worker returned an invalid catalog for ${tenant}.`,
+          );
+        const latest = latestById.get(id);
+        if (!latest || comparePluginVersions(version, latest) > 0)
+          latestById.set(id, version);
+        const rows = rowsById.get(id) ?? [];
+        rows.push({
+          version,
+          manifestVersion: row?.manifest?.version,
+          sha256:
+            typeof row.sha256 === "string" && /^[a-f0-9]{64}$/.test(row.sha256)
+              ? row.sha256
+              : null,
+        });
+        rowsById.set(id, rows);
+      }
+      const preserved = new Set(),
+        reused = new Set();
+      for (const artifact of artifacts) {
+        const current = latestById.get(artifact.manifest.id);
+        if (
+          !current ||
+          comparePluginVersions(current, artifact.manifest.version) <= 0
+        )
+          continue;
+        if (!artifact.optional)
+          throw new Error(
+            `Newer required plugin ${artifact.manifest.id}@${current} is already available in ${tenant}; refusing to deploy ${artifact.manifest.version}.`,
+          );
+        preserved.add(artifact.manifest.id);
+        log(
+          `Preserving newer optional plugin ${artifact.manifest.id}@${current} in ${tenant}; release ${artifact.manifest.version} was not uploaded.`,
+        );
+      }
+      for (const artifact of artifacts) {
+        if (preserved.has(artifact.manifest.id)) continue;
+        const exact = rowsById
+          .get(artifact.manifest.id)
+          ?.find((row) => row.version === artifact.manifest.version);
+        if (
+          !exact?.sha256 ||
+          exact.manifestVersion !== exact.version ||
+          exact.sha256 !== localSha256ById.get(artifact.manifest.id)
+        )
+          continue;
+        reused.add(artifact.manifest.id);
+        log(
+          `Reusing identical plugin ${artifact.manifest.id}@${artifact.manifest.version} already in ${tenant}.`,
+        );
+      }
+      preservedByTenant.set(tenant, preserved);
+      reusedByTenant.set(tenant, reused);
+    }
+  }
+  for (const tenant of tenants) {
+    // Upload every dependency before installing in topological order.
+    // Optional plugins are uploaded so they show up as installable in
+    // the workspace catalog, but they are never auto-installed.
+    for (const artifact of artifacts) {
+      if (
+        preservedByTenant.get(tenant)?.has(artifact.manifest.id) ||
+        reusedByTenant.get(tenant)?.has(artifact.manifest.id)
+      )
+        continue;
+      const form = new FormData();
+      form.set(
+        "file",
+        new File([readFileSync(artifact.path)], basename(artifact.path), {
+          type: "application/zip",
+        }),
+      );
+      try {
+        await call(`/upload?tenant=${encodeURIComponent(tenant)}`, {
+          method: "POST",
+          body: form,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Plugin ${artifact.manifest.id}@${artifact.manifest.version} upload to ${tenant} failed: ${detail}`,
+          { cause: error },
+        );
+      }
+    }
+    for (const artifact of artifacts) {
+      if (artifact.optional) {
+        log(
+          `Available ${artifact.manifest.id}@${artifact.manifest.version} in ${tenant} (optional, not installed)`,
+        );
+        continue;
+      }
+      const installed = await call(
+        `/install?tenant=${encodeURIComponent(tenant)}&id=${encodeURIComponent(artifact.manifest.id)}`,
+        { method: "POST" },
+      );
+      log(
+        `Activated ${artifact.manifest.id}@${installed?.data?.version ?? artifact.manifest.version} in ${tenant}`,
+      );
+    }
+  }
+  const installed = artifacts.filter((artifact) => !artifact.optional).length;
+  const optional = artifacts.length - installed;
+  log(
+    `Deployed ${artifacts.length} release plugins to ${tenants.length} workspaces (${installed} installed, ${optional} optional).`,
+  );
+  return {
+    plugins: artifacts.length,
+    tenants: tenants.length,
+    installed,
+    optional,
+  };
+}
+
+export async function deployStorePlugins(env = process.env) {
+  assertPluginPreservationPolicy(env);
+  const artifacts = releaseArtifacts(env.SAVIA_PLUGIN_DIRECTORY);
+  if (!artifacts.length) {
+    console.log("No deployment plugin ZIPs found.");
+    return;
+  }
+  const session = randomBytes(32).toString("hex");
+  const config = deploymentConfig(env, session);
+  const temporary = mkdtempSync(join(tmpdir(), "savia-plugin-deployment-"));
+  const configPath = join(temporary, "wrangler.json");
+  writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+  const port = 18877;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const child = spawn(
+    "pnpm",
+    [
+      "--dir",
+      "apps/api",
+      "exec",
+      "wrangler",
+      "dev",
+      "--remote",
+      "--config",
+      configPath,
+      "--ip",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--inspector-port",
+      "0",
+      "--show-interactive-dev-session=false",
+    ],
+    { cwd: root, env, detached: true, stdio: "ignore" },
+  );
+  let exited = false;
+  child.on("exit", () => {
+    exited = true;
+  });
+  child.on("error", () => {
+    exited = true;
+  });
+  try {
+    let ready = false;
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline && !exited) {
+      try {
+        const response = await fetch(`${baseUrl}/health`, {
+          headers: { authorization: `Bearer ${session}` },
+          signal: AbortSignal.timeout(5_000),
+          redirect: "error",
+        });
+        if (response.ok && (await response.json()).status === "ok") {
+          ready = true;
+          break;
+        }
+      } catch {
+        /* Wrangler remote session is starting. */
+      }
+      await delay(2_000);
+    }
+    if (!ready || exited)
+      throw new Error("Authenticated plugin deployment session did not start.");
+    return await deployArtifacts(artifacts, baseUrl, session, {
+      preserveNewerOptional:
+        env.SAVIA_DEPLOY_ENVIRONMENT === "preview" &&
+        env.SAVIA_PLUGIN_PRESERVE_NEWER_OPTIONAL === "true",
+    });
+  } finally {
+    if (child.pid) {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        /* Already stopped. */
+      }
+    }
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    await deployStorePlugins();
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
+}
