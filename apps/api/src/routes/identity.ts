@@ -42,10 +42,8 @@ import {
   areCustomRolesAssignable,
   replaceAccessAssignments,
 } from "../auth/access-repository";
-import {
-  MAX_CUSTOM_ROLES_PER_USER,
-  type AccessScope,
-} from "@savia/studio-shared/access-control";
+import type { AccessScope } from "@savia/studio-shared/access-control";
+import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/user-access-limits";
 import { AccessControlError } from "../auth/access-registry";
 import { assertTenantUserCapacity } from "../auth/tenant-user-capacity";
 

@@ -1,0 +1,1 @@
+export const MAX_CUSTOM_ROLES_PER_USER = 100;
