@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { renderProductionConfigs } from "../infra/pulumi/worker-config.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const requireApi = createRequire(
@@ -16,20 +17,33 @@ const requireAdmin = createRequire(
 );
 
 test("the Preview Worker serves extension downloads without the navigation fallback", async () => {
-  const config = JSON.parse(
-    await readFile(join(root, "apps/admin/wrangler.preview.jsonc"), "utf8"),
-  );
   const directory = await mkdtemp(join(tmpdir(), "savia-vscode-download-"));
   const filename = "savia-plugin-authoring-0.1.0.vsix";
   const bytes = Uint8Array.of(0x50, 0x4b, 0x03, 0x04);
   const hash = createHash("sha256").update(bytes).digest("hex");
   let runtime;
   try {
-    await mkdir(join(directory, "downloads"));
-    await writeFile(join(directory, "index.html"), "<html>Savia Admin</html>");
-    await writeFile(join(directory, "downloads", filename), bytes);
+    const outputRoot = join(directory, "config");
+    await renderProductionConfigs({
+      deploymentEnvironment: "preview",
+      authD1Id: "preview-auth-test",
+      domainD1Id: "preview-domain-test",
+      documentsBucket: "savia-documents-preview",
+      publicOrigin: "https://savia-preview.hefesoft.com",
+      outputRoot,
+    });
+    const config = JSON.parse(
+      await readFile(
+        join(outputRoot, "apps/admin/wrangler.preview.jsonc"),
+        "utf8",
+      ),
+    );
+    const assets = join(directory, "assets");
+    await mkdir(join(assets, "downloads"), { recursive: true });
+    await writeFile(join(assets, "index.html"), "<html>Savia Admin</html>");
+    await writeFile(join(assets, "downloads", filename), bytes);
     await writeFile(
-      join(directory, "downloads", `${filename}.sha256`),
+      join(assets, "downloads", `${filename}.sha256`),
       `${hash}  ${filename}\n`,
     );
     const { outputFiles } = await requireAdmin("esbuild").build({
@@ -50,7 +64,7 @@ test("the Preview Worker serves extension downloads without the navigation fallb
         compatibilityDate: config.compatibility_date,
         bindings: config.vars,
         assets: {
-          directory,
+          directory: assets,
           binding: config.assets.binding,
           run_worker_first: config.assets.run_worker_first,
           routerConfig: { has_user_worker: true },
