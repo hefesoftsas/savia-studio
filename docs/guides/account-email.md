@@ -6,7 +6,7 @@ New password accounts require email verification by default. Creating an account
 
 The administrator can explicitly enable **Email verified** when creating or editing a user, including the initial user of a new tenant, after confirming ownership through another channel. The bootstrap administrator remains verified to preserve initial access. Existing ordinary accounts retain their stored verification state; they are not silently marked verified.
 
-Password recovery uses Better Auth's request/reset endpoints. Links expire after 15 minutes, can be used once, and lead to `/auth/reset-password`. Passwords require at least 12 characters. A completed reset revokes existing sessions. Accounts created without a temporary password receive a password setup link as well as their verification message. Provisioning fails and removes the newly created account when the required verification message cannot be sent.
+Password recovery uses Better Auth's request/reset endpoints. Links expire after 15 minutes, can be used once, and lead to `/auth/reset-password`. Passwords require at least 12 characters. A completed reset revokes existing sessions. When creating a tenant and its first administrator, the optional temporary password must contain 12 to 128 characters. Accounts created without a temporary password receive a password setup link as well as their verification message. Provisioning fails and removes the newly created account when the required verification message cannot be sent.
 
 ## Tenant SMTP
 

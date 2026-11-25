@@ -32,7 +32,7 @@ export function PluginVscodeGuide({ tenantId }: { tenantId?: number }) {
           </p>
         </div>
         <div className="flex max-w-full flex-col items-start gap-2">
-          <Button asChild>
+          <Button asChild className="hover:bg-primary/95">
             <a href={vscodeExtensionDownloadPath} download>
               <Download aria-hidden="true" />
               {t("download")}

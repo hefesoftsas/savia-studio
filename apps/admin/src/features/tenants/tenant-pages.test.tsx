@@ -238,6 +238,36 @@ describe("generic tenant pages", () => {
     expect(action).toHaveAttribute("href", "#/tenants/create");
   });
 
+  it("validates the temporary password length before creating a tenant", async () => {
+    open("/tenants/create");
+    const appServices = services();
+    const user = userEvent.setup();
+    await renderApp(appServices);
+    await screen.findByText("Nuevo tenant");
+
+    const typeField = (name: string, value: string) =>
+      user.type(document.querySelector(`input[name="${name}"]`)!, value);
+    await typeField("name", "Demo tenant");
+    await typeField("initialUser.email", "demo-admin@example.test");
+    await typeField("initialUser.firstName", "Demo");
+    await typeField("initialUser.lastName", "Admin");
+    await typeField("initialUser.temporaryPassword", "Example123!");
+    const save = screen.getByRole("button", { name: "Guardar" });
+    await user.click(save);
+    await waitFor(() =>
+      expect(
+        document.querySelector('input[name="initialUser.temporaryPassword"]'),
+      ).toHaveAttribute("aria-invalid", "true"),
+    );
+    expect(appServices.dataProvider.create).not.toHaveBeenCalled();
+
+    await typeField("initialUser.temporaryPassword", "a");
+    await user.click(save);
+    await waitFor(() =>
+      expect(appServices.dataProvider.create).toHaveBeenCalledTimes(1),
+    );
+  });
+
   it("creates a tenant by transferring an existing user", async () => {
     open("/tenants/create");
     const appServices = services(),

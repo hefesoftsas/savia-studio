@@ -11,6 +11,8 @@ import { ResourceEditSync } from "@/realtime/resource-realtime";
 import type { ResourceProps } from "ra-core";
 import { EmailVerificationField } from "@/features/users/email-verification-field";
 import {
+  maxLength,
+  minLength,
   required,
   useCreatePath,
   useRecordContext,
@@ -189,10 +191,11 @@ function InitialTenantUserFields() {
               _: "Contraseña temporal",
             })}
             type="password"
+            validate={[minLength(12), maxLength(128)]}
             helperText={translate(
               "savia.tenants.fields.temporaryPasswordHelper",
               {
-                _: "Opcional. Si se deja vacía, se enviará un enlace para definirla.",
+                _: "Si la ingresas, usa de 12 a 128 caracteres. Si la dejas vacía, se enviará un enlace para definirla.",
               },
             )}
           />

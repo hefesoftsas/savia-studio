@@ -228,7 +228,7 @@ const saviaEnglish = {
         initialAdminLastName: "First administrator last name",
         temporaryPassword: "Temporary password",
         temporaryPasswordHelper:
-          "Optional. If left blank, a link will be sent to set it up.",
+          "Use 12 to 128 characters. If left blank, a setup link will be sent.",
         memberMode: "First administrator",
         memberModeNew: "Create new user",
         memberModeExisting: "Transfer existing user",
@@ -789,7 +789,7 @@ const saviaSpanish = {
         initialAdminLastName: "Apellidos del primer administrador",
         temporaryPassword: "Contraseña temporal",
         temporaryPasswordHelper:
-          "Opcional. Si se deja vacía, se enviará un enlace para definirla.",
+          "Si la ingresas, usa de 12 a 128 caracteres. Si la dejas vacía, se enviará un enlace para definirla.",
         memberMode: "Primer administrador",
         memberModeNew: "Crear usuario nuevo",
         memberModeExisting: "Transferir usuario existente",
@@ -1348,7 +1348,7 @@ const saviaPortuguese = {
         initialAdminLastName: "Sobrenome do primeiro administrador",
         temporaryPassword: "Senha temporária",
         temporaryPasswordHelper:
-          "Opcional. Se deixada em branco, um link de definição será enviado.",
+          "Use de 12 a 128 caracteres. Se deixada em branco, um link de definição será enviado.",
         memberMode: "Primeiro administrador",
         memberModeNew: "Criar novo usuário",
         memberModeExisting: "Transferir usuário existente",
