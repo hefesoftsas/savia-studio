@@ -9,7 +9,7 @@ import { createAccessControlClient } from "@/api/access-control-client";
 import { useMessages } from "@/i18n/core";
 import { accessMessages } from "@/i18n/locales/access";
 import { Button } from "@/components/ui/button";
-import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/access-control";
+import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/user-access-limits";
 
 export function UserAccessRoles() {
   const { apiClient } = useAppServices();

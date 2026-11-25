@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 import { Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useOnlineStatus } from "@/offline/use-online-status";
-import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/access-control";
+import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/user-access-limits";
 import type {
   AccessControlClient,
   AccessRole,

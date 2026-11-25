@@ -3,11 +3,11 @@ import { z } from "@hono/zod-openapi";
 import {
   accessGrantSchema,
   accessScopeSchema,
-  MAX_CUSTOM_ROLES_PER_USER,
   type AccessScope,
   type AccessGrant,
   type AccessPolicy,
 } from "@savia/studio-shared/access-control";
+import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/user-access-limits";
 import type { AppActor } from "./types";
 import { accessAuthority } from "./access-context";
 import {
