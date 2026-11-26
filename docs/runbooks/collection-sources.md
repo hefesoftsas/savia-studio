@@ -113,8 +113,11 @@ because those counts describe Savia's local records. Use the record list for a
 provider-reported total where available.
 Record lists and summaries reject malformed pages and repeated cursors, so an
 invalid provider response cannot appear as an empty collection or an exact
-count. Search retains the provider's reported total when the requested page
-is beyond the last available cursor.
+count. A HubSpot record list leaves the total unknown when it matches the
+number of scanned records and HubSpot still supplies a next cursor. The
+summary follows that cursor before returning a total. Search retains the
+provider's reported total when the requested page is beyond the last
+available cursor.
 
 Connected CRM record lists expose at most 100 pages. Salesforce also limits
 the starting offset to 2,000 records. Studio and the mail context picker stop

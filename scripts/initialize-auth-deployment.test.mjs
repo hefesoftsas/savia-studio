@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, writeFile, rm, access } from "node:fs/promises";
+import {
+  mkdtemp,
+  writeFile,
+  rm,
+  access,
+  readdir,
+  readFile,
+} from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +16,7 @@ import {
   initializeAuthDeployment,
   validateAuthDeployment,
 } from "./initialize-auth-deployment.mjs";
+import { readRuntimeTimings } from "../infra/pulumi/runtime-timing.mjs";
 
 const revision = "a".repeat(40);
 const config = {
@@ -73,7 +81,7 @@ test("deployment initializes only its bound revision, validates readiness and re
   const configPath = join(directory, "auth.json");
   await writeFile(configPath, JSON.stringify(config));
   try {
-    for (const outcome of ["ready", "mismatch", "forged"]) {
+    for (const outcome of ["ready", "mismatch", "forged", "transport"]) {
       const valid = outcome === "ready";
       let probeConfig, probePath;
       const requests = [];
@@ -108,6 +116,7 @@ test("deployment initializes only its bound revision, validates readiness and re
               options.headers["x-savia-bridge-key"],
               /^[a-f\d]{64}$/,
             );
+            if (outcome === "transport") throw new TypeError("fetch failed");
             return outcome === "forged"
               ? Response.json(
                   {
@@ -127,6 +136,9 @@ test("deployment initializes only its bound revision, validates readiness and re
       else if (outcome === "mismatch") {
         await assert.rejects(result, /readiness mismatch/);
         assert.match(stages.join("\n"), /READINESS_MISMATCH/);
+      } else if (outcome === "transport") {
+        await assert.rejects(result, /initialization transport failed/);
+        assert.match(stages.join("\n"), /TRANSPORT_FAILED/);
       } else {
         await assert.rejects(result, /Auth preparation failed/);
         assert.match(stages.join("\n"), /INITIALIZATION_FAILED/);
@@ -138,6 +150,66 @@ test("deployment initializes only its bound revision, validates readiness and re
       assert.equal(requests.length, 2);
       await assert.rejects(access(probePath), /ENOENT/);
     }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("restarts a remote session that exits by signal before initializing the bound revision once", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "auth-session-retry-"));
+  const configPath = join(directory, "auth.json");
+  await writeFile(configPath, JSON.stringify(config));
+  const probes = [];
+  let initializationRequests = 0;
+  try {
+    const result = await initializeAuthDeployment(
+      { environment: "preview", configPath },
+      {
+        env: { ...env, SAVIA_RUNTIME_OPERATION_DIRECTORY: directory },
+        report: () => {},
+        start: (_binary, args) => {
+          const path = args[args.indexOf("--config") + 1];
+          const nonce = JSON.parse(readFileSync(path, "utf8")).vars.PROBE_NONCE;
+          probes.push({ path, nonce });
+          const child = new EventEmitter();
+          if (probes.length === 1)
+            queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
+          return child;
+        },
+        request: async (url, options) => {
+          const probe = probes.at(-1);
+          if (url.endsWith("/ready"))
+            return probes.length === 1
+              ? new Response(null, { status: 503 })
+              : Response.json({ nonce: probe.nonce });
+          initializationRequests += 1;
+          assert.equal(options.headers["x-savia-probe-nonce"], probe.nonce);
+          return Response.json({ status: "ready", revision });
+        },
+      },
+    );
+    assert.deepEqual(result, { status: "ready", revision });
+    assert.equal(initializationRequests, 1);
+    assert.equal(probes.length, 2);
+    assert.notEqual(probes[0].nonce, probes[1].nonce);
+    for (const { path } of probes) await assert.rejects(access(path), /ENOENT/);
+    const diagnosticDirectory = join(directory, "command-errors");
+    const [diagnosticFile] = await readdir(diagnosticDirectory);
+    const diagnostic = JSON.parse(
+      await readFile(join(diagnosticDirectory, diagnosticFile), "utf8"),
+    );
+    assert.equal(diagnostic.exitcode, null);
+    assert.equal(diagnostic.signal, "SIGTERM");
+    assert.deepEqual(
+      (await readRuntimeTimings(directory)).map(({ label, outcome }) => ({
+        label,
+        outcome,
+      })),
+      [
+        { label: "auth-init:session", outcome: "failure" },
+        { label: "auth-init:session", outcome: "success" },
+      ],
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -170,14 +242,15 @@ test("failed remote session preserves private diagnostics and reports a safe sta
       ),
       /session unavailable/,
     );
-    const { readdir, readFile } = await import("node:fs/promises");
     const records = await readdir(join(directory, "command-errors"));
-    assert.equal(records.length, 1);
-    const record = JSON.parse(
-      await readFile(join(directory, "command-errors", records[0]), "utf8"),
-    );
-    assert.match(record.stderr, /PRIVATE_SESSION_FAILURE/);
-    assert.equal(record.exitcode, 1);
+    assert.equal(records.length, 2);
+    for (const name of records) {
+      const record = JSON.parse(
+        await readFile(join(directory, "command-errors", name), "utf8"),
+      );
+      assert.match(record.stderr, /PRIVATE_SESSION_FAILURE/);
+      assert.equal(record.exitcode, 1);
+    }
     assert.match(stages.join("\n"), /session/);
     assert.doesNotMatch(
       stages.join("\n"),
