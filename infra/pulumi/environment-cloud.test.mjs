@@ -72,6 +72,7 @@ test("Preview inventory takes dependencies from serving versions without setting
   assert.deepEqual(snapshotOptions, {
     allowUndeployed: true,
     includeDependencies: true,
+    observeFlowsPolicy: false,
   });
   assert.equal(clientOptions.readConcurrency, 4);
   assert.deepEqual(worker.dependencies, ["savia-request-preview"]);

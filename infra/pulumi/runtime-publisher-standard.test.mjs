@@ -875,17 +875,29 @@ test("a verified code-only artifact does not repeat bootstrap for existing Worke
   try {
     let snapshots = 0;
     const operations = createRuntimeOperations(
-      { ...fixture.inputs, mode: "release" },
+      {
+        ...fixture.inputs,
+        mode: "release",
+        workers: [
+          ...fixture.inputs.workers,
+          { name: "savia-flows-preview", cloudId: "f".repeat(32) },
+        ],
+      },
       {
         root: fixture.root,
         env: {
           ...fixture.env,
+          SAVIA_CI_FLOWS_ENABLED: "false",
           SAVIA_RUNTIME_OPERATION_DIRECTORY: join(fixture.root, "operations"),
         },
         client: {
-          readSnapshot: async () => {
+          readSnapshot: async (options) => {
             snapshots++;
-            return { maintenanceWorkerNames: [], workerVersions: [] };
+            assert.deepEqual(options, { observeFlowsPolicy: false });
+            return {
+              maintenanceWorkerNames: ["savia-flows-preview"],
+              workerVersions: [],
+            };
           },
           api: async () =>
             assert.fail(

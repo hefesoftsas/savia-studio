@@ -100,6 +100,7 @@ export function resolveReleaseWorkerProfile(
   workerNames,
   releaseSource,
   environment,
+  { skipPreviewFlows = false } = {},
 ) {
   const names = workerNames.slice(),
     selected = expectedPreviewCodeOnlyWorkers(releaseSource);
@@ -115,6 +116,14 @@ export function resolveReleaseWorkerProfile(
       );
     return profile;
   }
+  const flowsWorker = "savia-flows-preview";
+  if (
+    environment === "preview" &&
+    skipPreviewFlows &&
+    profile.enabledWorkers?.includes(flowsWorker) &&
+    !names.includes(flowsWorker)
+  )
+    names.push(flowsWorker);
   return {
     ...profile,
     enabledWorkers: names.sort(),
@@ -839,6 +848,7 @@ export function createEnvironmentDependencies({
           names,
           release.releaseSource,
           descriptor.environment,
+          { skipPreviewFlows: env.SAVIA_CI_FLOWS_ENABLED === "false" },
         ),
       );
     }
