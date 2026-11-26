@@ -16,6 +16,21 @@ const reusablePaths = [
   authInitializerPath,
   docsPath,
 ];
+const adminBuildPaths = new Set([
+  "apps/admin/build/flows-plugin.ts",
+  "apps/admin/build/offline-shell-assets.test.ts",
+  "apps/admin/build/offline-shell-assets.ts",
+  "apps/admin/build/preview-build.test.ts",
+  "apps/admin/vite.config.ts",
+  "apps/admin/vite.plugin-editor.config.ts",
+]);
+const adminBuildJobs = [
+  ...Array.from(
+    { length: 6 },
+    (_, index) => `Admin unit tests (shard ${index + 1}/6)`,
+  ),
+  "Type-check (Core & Apps)",
+];
 
 export function previewMergeProofName(pull, base, tree, flowsDisabled = false) {
   return `Preview CI proof ${pull} ${base} ${tree}${flowsDisabled ? " (Flows skipped)" : ""}`;
@@ -55,7 +70,11 @@ export async function canReusePreviewCi({
       .filter(Boolean);
     if (
       !paths.length ||
-      !paths.every((path) => reusablePaths.some((scope) => scope.test(path)))
+      !paths.every(
+        (path) =>
+          adminBuildPaths.has(path) ||
+          reusablePaths.some((scope) => scope.test(path)),
+      )
     )
       return false;
     const tree = (await git(["rev-parse", `${commit}^{tree}`])).trim();
@@ -101,7 +120,10 @@ export async function canReusePreviewCi({
     const { jobs } = await request(
       `${prefix}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
     );
-    for (const name of ["Contract suite", "Contract tests"]) {
+    const requiredJobs = ["Contract suite", "Contract tests"];
+    if (paths.some((path) => adminBuildPaths.has(path)))
+      requiredJobs.push(...adminBuildJobs);
+    for (const name of requiredJobs) {
       const matches = jobs.filter((job) => job.name === name);
       if (
         matches.length !== 1 ||

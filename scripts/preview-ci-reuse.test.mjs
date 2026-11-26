@@ -39,6 +39,13 @@ const contractJobs = ["Contract suite", "Contract tests"].map((name) => ({
   status: "completed",
   conclusion: "success",
 }));
+const adminBuildJobs = [
+  ...Array.from(
+    { length: 6 },
+    (_, index) => `Admin unit tests (shard ${index + 1}/6)`,
+  ),
+  "Type-check (Core & Apps)",
+].map((name) => ({ name, status: "completed", conclusion: "success" }));
 
 function check({
   parents = commit + " " + base,
@@ -112,10 +119,58 @@ test("reuses successful PR validation for mixed application and release tooling 
   );
 });
 
+test("reuses exact CI proof for named Admin build paths after all Admin checks pass", async () => {
+  const paths = [
+    "apps/admin/vite.config.ts",
+    "apps/admin/vite.plugin-editor.config.ts",
+    "apps/admin/build/flows-plugin.ts",
+    "apps/admin/build/offline-shell-assets.ts",
+    "apps/admin/build/offline-shell-assets.test.ts",
+    "apps/admin/build/preview-build.test.ts",
+    "apps/admin/src/components/admin/layout.tsx",
+    "docs/guides/preview-release-lanes.md",
+  ].join("\0");
+  assert.equal(
+    await check({ paths, jobs: [classifier(), ...adminBuildJobs] }),
+    true,
+  );
+
+  for (const required of adminBuildJobs) {
+    const jobs = [
+      classifier(),
+      ...adminBuildJobs.filter((job) => job !== required),
+    ];
+    assert.equal(await check({ paths, jobs }), false, required.name);
+  }
+  assert.equal(
+    await check({
+      paths,
+      jobs: [
+        classifier(),
+        ...adminBuildJobs.slice(0, -1),
+        { ...adminBuildJobs.at(-1), conclusion: "skipped" },
+      ],
+    }),
+    false,
+  );
+});
+
 test("falls back when the push, PR, or tested tree cannot be proved", async () => {
   for (const scenario of [
     { parents: commit + " " + "e".repeat(40) },
     { paths: ".github/workflows/ci.yml\0" },
+    {
+      paths: "apps/admin/vite.config.ts\0apps/admin/package.json\0",
+      jobs: [classifier(), ...adminBuildJobs],
+    },
+    {
+      paths: "apps/admin/vite.config.ts\0apps/admin/vitest.config.ts\0",
+      jobs: [classifier(), ...adminBuildJobs],
+    },
+    {
+      paths: "apps/admin/build/unreviewed-build.ts\0",
+      jobs: [classifier(), ...adminBuildJobs],
+    },
     { paths: "packages/db/migrations/0099_new.sql\0" },
     { paths: "infra/pulumi/backup.mjs\0infra/pulumi/Pulumi.preview.yaml\0" },
     { paths: "infra/pulumi/backup.mjs\0infra/pulumi/package-lock.json\0" },
