@@ -813,6 +813,12 @@ export const bookingMessages = {
     "Appointment confirmed",
     "Agendamento confirmado",
   ],
+  "Appointment cancelled": [
+    "Cita cancelada",
+    "Appointment cancelled",
+    "Agendamento cancelado",
+  ],
+  "View appointment": ["Ver cita", "View appointment", "Ver agendamento"],
   "Manage or cancel this appointment": [
     "Administrar o cancelar esta cita",
     "Manage or cancel this appointment",

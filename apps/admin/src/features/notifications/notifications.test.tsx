@@ -11,8 +11,14 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { NotificationBell } from "./notification-bell";
 import { NotificationInbox } from "./notification-inbox";
-import type { InboxFilter, NoticeItem, NotificationClient } from "./client";
-import { rotateSessionScope } from "@/auth/session-scope";
+import {
+  notificationClient,
+  type InboxFilter,
+  type NoticeItem,
+  type NotificationClient,
+} from "./client";
+import { getSessionGeneration, rotateSessionScope } from "@/auth/session-scope";
+import { notificationReadKey } from "./queries";
 
 afterEach(cleanup);
 
@@ -47,6 +53,36 @@ it("lets a recipient confirm receipt of a read administrator notice", async () =
       }),
     ).toBeNull(),
   );
+});
+
+it("provides an archive action for an unavailable notice", async () => {
+  const archive = vi.fn(async () => {});
+  setupNoRetry({
+    archive,
+    inbox: async () => ({
+      items: [
+        {
+          id: "damaged",
+          title: "Notification unavailable",
+          body: "",
+          createdAt: 1,
+          readAt: null,
+          archivedAt: null,
+          source: { kind: "unavailable" },
+          actionState: "unavailable",
+        },
+      ],
+      nextCursor: null,
+      cutoff: "",
+    }),
+  });
+  expect(
+    await screen.findByText("savia.notificationInbox.unavailableNotice"),
+  ).toBeVisible();
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.archive" }),
+  );
+  expect(archive).toHaveBeenCalledWith("damaged");
 });
 
 it("links account security notices to the account page", async () => {
@@ -157,13 +193,20 @@ it("marks every page of notifications as read from a single action", async () =>
   ).toBeVisible();
 });
 
-it("refreshes unread counts when a later bulk-read page fails", async () => {
+it("refreshes counts and resumes the failed bulk-read page without including newer notices", async () => {
   let unread = 101;
-  const readAll = vi.fn(async (cursor?: string) => {
-    if (cursor) throw new Error("Unavailable");
-    unread = 1;
-    return { updated: 100, nextCursor: "after-100" };
-  });
+  const readAll = vi
+    .fn<(cursor?: string) => ReturnType<NotificationClient["readAll"]>>()
+    .mockImplementationOnce(async () => {
+      unread = 1;
+      return { updated: 100, nextCursor: "after-100" };
+    })
+    .mockRejectedValueOnce(new Error("Unavailable"))
+    .mockImplementation(async (cursor) => {
+      const updated = cursor ? 1 : unread;
+      unread -= updated;
+      return { updated, nextCursor: null };
+    });
   setup({ readAll, unreadCount: async () => unread });
   await screen.findByLabelText("savia.notificationInbox.title (101)");
   fireEvent.click(
@@ -176,6 +219,18 @@ it("refreshes unread counts when a later bulk-read page fails", async () => {
   expect(
     await screen.findByLabelText("savia.notificationInbox.title (1)"),
   ).toBeVisible();
+  unread += 1;
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.markAllRead" }),
+  );
+  await waitFor(() =>
+    expect(readAll.mock.calls).toEqual([
+      [undefined],
+      ["after-100"],
+      ["after-100"],
+    ]),
+  );
+  expect(unread).toBe(1);
 });
 
 function setupNoRetry(client: Partial<NotificationClient>) {
@@ -234,6 +289,72 @@ it("shows the unread badge and opens the inbox dialog", async () => {
     screen.getByRole("button", { name: "savia.notificationInbox.title (3)" }),
   );
   expect(await screen.findByRole("dialog")).toBeVisible();
+});
+
+it("checks a stale notification count when the bell opens and reuses a fresh count", async () => {
+  const unreadCount = vi.fn(async () => 1);
+  const cache = new QueryClient();
+  cache.setQueryData(
+    notificationReadKey(getSessionGeneration(), "unread-count"),
+    3,
+    { updatedAt: Date.now() - 31_000 },
+  );
+  render(
+    <QueryClientProvider client={cache}>
+      <MemoryRouter>
+        <NotificationBell client={{ ...notificationClient, unreadCount }} />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  const oldCount = screen.getByRole("button", {
+    name: "savia.notificationInbox.title (3)",
+  });
+  expect(unreadCount).not.toHaveBeenCalled();
+  fireEvent.click(oldCount);
+  const updatedCount = await screen.findByRole("button", {
+    name: "savia.notificationInbox.title (1)",
+  });
+  fireEvent.click(updatedCount);
+  fireEvent.click(updatedCount);
+  expect(unreadCount).toHaveBeenCalledTimes(1);
+});
+
+it("shows loading and retries when the notification count is unavailable", async () => {
+  let failCount!: (reason: Error) => void;
+  const initialCount = new Promise<number>((_resolve, reject) => {
+    failCount = reject;
+  });
+  const unreadCount = vi
+    .fn<NotificationClient["unreadCount"]>()
+    .mockReturnValueOnce(initialCount)
+    .mockResolvedValue(2);
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={cache}>
+      <MemoryRouter>
+        <NotificationBell client={{ ...notificationClient, unreadCount }} />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.title" }),
+  );
+  expect(screen.getByText("savia.notificationInbox.loading")).toBeVisible();
+  expect(screen.queryByText("savia.notificationInbox.noNew")).toBeNull();
+  await act(async () => failCount(new Error("Offline")));
+  expect(
+    await screen.findByText("savia.notificationInbox.countLoadError"),
+  ).toBeVisible();
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.retry" }),
+  );
+  expect(
+    await screen.findByRole("button", {
+      name: "savia.notificationInbox.title (2)",
+    }),
+  ).toBeVisible();
 });
 
 it("reads a fresh notification count after the authenticated principal changes", async () => {

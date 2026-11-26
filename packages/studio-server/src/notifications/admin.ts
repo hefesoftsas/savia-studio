@@ -24,6 +24,20 @@ export interface AdminEventStatus {
 
 const WINDOW_MS = 60_000;
 
+async function adminNoticeEventKey(
+  principal: string,
+  key: string,
+): Promise<string> {
+  const legacyKey = `admin:${principal}:${key}`;
+  if (legacyKey.length <= 200) return legacyKey;
+  const bytes = new TextEncoder().encode(JSON.stringify([principal, key]));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `admin-sha256:${hex}`;
+}
+
 export async function sendAdminNotice(
   db: D1Database,
   policy: NotificationPolicy,
@@ -39,7 +53,7 @@ export async function sendAdminNotice(
   if (!key || key.length > 200) return fail("Invalid message key.", 400);
   const event: NoticeEventInput = {
     scope,
-    key: `admin:${principal}:${key}`,
+    key: await adminNoticeEventKey(principal, key),
     actor: { kind: "user", id: principal },
     source: { kind: "admin-message", id: key },
     title: payload.title,
@@ -50,6 +64,8 @@ export async function sendAdminNotice(
     expiresAt: null,
   };
   const repository = new NotificationRepository(db);
+  const eventId = stableEventId(event);
+  const auditId = `audit_${eventId}`;
   const windowStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
   const findRetry = async (): Promise<AdminSendResult | null> => {
     const existing = await repository.find(event);
@@ -65,7 +81,6 @@ export async function sendAdminNotice(
   const previous = await findRetry();
   if (previous) return previous;
 
-  const eventId = stableEventId(event);
   try {
     await db.batch([
       ...repository.eventStatements(event),
@@ -81,11 +96,22 @@ export async function sendAdminNotice(
           `INSERT INTO notification_admin_audit(id,workspace_id,actor_id,event_id,action,created_at)
            VALUES (?,?,?,?,?,?)`,
         )
-        .bind(`audit_${eventId}`, scope.id, principal, eventId, "send", now),
+        .bind(auditId, scope.id, principal, eventId, "send", now),
     ]);
   } catch (error) {
     const retry = await findRetry();
     if (retry) return retry;
+    const previousSend = await db
+      .prepare(
+        "SELECT id FROM notification_admin_audit WHERE id=? AND workspace_id=? AND actor_id=? AND action='send'",
+      )
+      .bind(auditId, scope.id, principal)
+      .first("id");
+    if (previousSend)
+      return fail(
+        "This message key belongs to a notice whose retention period ended.",
+        409,
+      );
     if (
       /notification_send_limits_count_check|CHECK constraint failed: count BETWEEN 1 AND 10/i.test(
         String(error),

@@ -4,6 +4,37 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { sqliteBaseline } from "./sqlite-baseline.mjs";
 
+test("uses the retention cursor index for notification delivery batches", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    const files = readdirSync("packages/db/migrations")
+      .filter((file) => file.endsWith(".sql"))
+      .sort();
+    for (const file of files)
+      db.exec(readFileSync(`packages/db/migrations/${file}`, "utf8"));
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT id,event_id,created_at,read_at,archived_at,scope_kind,scope_id
+         FROM notification_deliveries
+         WHERE (created_at,id) > (?,?)
+         ORDER BY created_at,id LIMIT ?`,
+      )
+      .all(1000, "previous", 100)
+      .map(({ detail }) => detail);
+    assert.ok(
+      plan.some((detail) =>
+        detail.includes(
+          "SEARCH notification_deliveries USING INDEX notification_deliveries_retention",
+        ),
+      ),
+    );
+    assert.ok(plan.every((detail) => !detail.includes("TEMP B-TREE")));
+  } finally {
+    db.close();
+  }
+});
+
 test("GitHub connection migration preserves existing connections and audits", () => {
   const db = new DatabaseSync(":memory:");
   try {

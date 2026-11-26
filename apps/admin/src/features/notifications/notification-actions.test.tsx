@@ -51,6 +51,39 @@ it("toggles collection follows and surfaces failures", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent("savia.notificationInbox.actionError");
 });
 
+it("keeps follow actions unavailable until the initial following state is known", async () => {
+  const follows = vi
+    .fn<NotificationClient["follows"]>()
+    .mockRejectedValueOnce(new Error("Connection interrupted"))
+    .mockResolvedValue(["requests"]);
+  const follow = vi.fn(async () => {});
+  const client = baseClient({ follows, follow });
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={cache}>
+      <CollectionFollow collection="requests" client={client} />
+    </QueryClientProvider>,
+  );
+  expect(
+    await screen.findByText("savia.notificationInbox.followLoadError"),
+  ).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "savia.notificationInbox.follow" }),
+  ).toBeNull();
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.retry" }),
+  );
+  expect(
+    await screen.findByRole("button", {
+      name: "savia.notificationInbox.unfollow",
+      pressed: true,
+    }),
+  ).toBeEnabled();
+  expect(follow).not.toHaveBeenCalled();
+});
+
 it("hides the administrator form without permission and reports 429", async () => {
   const { container } = (() => {
     const result = render(
@@ -100,6 +133,33 @@ it("shows accepted delivery status for administrators", async () => {
   );
   expect(await screen.findByText("processing")).toBeVisible();
   expect(await screen.findByText("4")).toBeVisible();
+});
+
+it("lets administrators retry the initial delivery status lookup", async () => {
+  const adminStatus = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("Connection interrupted"))
+    .mockResolvedValue({
+      status: "completed",
+      delivered: 3,
+      failed: 0,
+      pendingRetries: 0,
+    });
+  const client = baseClient({ adminStatus });
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={cache}>
+      <AdminNoticeStatus eventId="evt-offline" client={client} />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("alert");
+  fireEvent.click(
+    screen.getByRole("button", { name: "savia.notificationInbox.retry" }),
+  );
+  expect(await screen.findByText("completed")).toBeVisible();
+  expect(adminStatus.mock.calls).toEqual([["evt-offline"], ["evt-offline"]]);
 });
 
 it("reuses the same notice key after a failed request and releases it after success", async () => {

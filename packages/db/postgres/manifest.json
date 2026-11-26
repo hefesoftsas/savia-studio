@@ -273,6 +273,14 @@
     {
       "filename": "0062_realtime_event_outbox.sql",
       "sha256": "a75fc126b6806d68c6fda8e36c65454880b94a12372e77be6ccc69e65cdc7634"
+    },
+    {
+      "filename": "0064_notification_delivery_retention.sql",
+      "sha256": "1bc4c3cef5a7e163e0c139b5a699a60f850015cd3bc2f64b5b6a14415bddec0a"
+    },
+    {
+      "filename": "0065_notification_collection_follow_cleanup.sql",
+      "sha256": "2f9c4f72b4c30603ac88ef5c780431a5addafc67b8b2bcf66baa5a880e15bc1e"
     }
   ],
   "sqliteOnlyDerivedTables": [
@@ -442,6 +450,11 @@
       "type": "index",
       "name": "notification_audit_scope",
       "table": "notification_admin_audit"
+    },
+    {
+      "type": "index",
+      "name": "notification_deliveries_retention",
+      "table": "notification_deliveries"
     },
     {
       "type": "index",
@@ -1567,6 +1580,11 @@
       "type": "trigger",
       "name": "identity_principal_active_email_update",
       "table": "identity_principal"
+    },
+    {
+      "type": "trigger",
+      "name": "notification_collection_follows_deleted",
+      "table": "studio_objects"
     },
     {
       "type": "trigger",

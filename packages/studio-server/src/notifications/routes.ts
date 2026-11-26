@@ -124,14 +124,22 @@ export function registerNotifications(
   });
   app.post("/api/notifications/read-all", async (c) => {
     const { principalId, tenant, repository } = session(c, options);
-    const body = notificationRequests.readAllBody.parse(
-      await c.req.json().catch(() => ({})),
-    );
+    const text = await c.req.text();
+    let input: unknown = {};
+    if (text !== "") {
+      try {
+        input = JSON.parse(text);
+      } catch {
+        return fail("Invalid JSON body.", 400);
+      }
+    }
+    const body = notificationRequests.readAllBody.safeParse(input);
+    if (!body.success) return fail("Invalid read-all request body.", 400);
     return c.json({
       data: await repository.markAllRead(
         principalId,
         scopes(tenant, principalId),
-        body.cursor,
+        body.data.cursor,
       ),
     });
   });

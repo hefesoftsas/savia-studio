@@ -6,6 +6,7 @@ import {
   retryAdminEvent,
 } from "../src/notifications/admin";
 import { processNotifications } from "../src/notifications/dispatcher";
+import { maintainNotifications } from "../src/notifications/maintenance";
 import { notificationFixture } from "./notifications-fixture";
 
 let fixture: Awaited<ReturnType<typeof notificationFixture>>;
@@ -92,6 +93,74 @@ it("accepts admin notices idempotently and rejects unauthorized senders", async 
       now,
     ),
   ).rejects.toMatchObject({ status: 403 });
+});
+
+it("accepts and deduplicates an administrator key at the API length limit", async () => {
+  const workspace = {
+    kind: "workspace",
+    id: "domain:long-notice-key",
+  } as const;
+  const key = "x".repeat(200);
+  const send = (title: string, sentAt: number) =>
+    sendAdminNotice(
+      fixture.db,
+      policy,
+      "admin",
+      workspace,
+      key,
+      payload(title),
+      sentAt,
+    );
+  const first = await send("Long key", now);
+  expect(first).toMatchObject({ status: "accepted", duplicate: false });
+  expect(await send("Long key", now + 1)).toEqual({
+    ...first,
+    duplicate: true,
+  });
+  await expect(send("Changed title", now + 2)).rejects.toMatchObject({
+    status: 409,
+  });
+});
+
+it("keeps zero-delivery administrator status during retention", async () => {
+  const workspace = { kind: "workspace", id: "domain:no-deliveries" } as const;
+  const send = (sentAt: number) =>
+    sendAdminNotice(
+      fixture.db,
+      policy,
+      "admin",
+      workspace,
+      "zero-deliveries",
+      payload(),
+      sentAt,
+    );
+  const { eventId } = await send(now);
+  await processNotifications(
+    fixture.db,
+    {
+      ...policy,
+      async canReadScope(_principal, candidate) {
+        return candidate.id !== workspace.id;
+      },
+    },
+    { now: () => now, workerId: "no-deliveries" },
+  );
+  await maintainNotifications(fixture.db, now);
+  expect(
+    await adminEventStatus(fixture.db, policy, "admin", workspace.id, eventId),
+  ).toMatchObject({ status: "completed", delivered: 0 });
+  expect(await send(now + 1)).toMatchObject({ eventId, duplicate: true });
+
+  const afterRetention = now + 91 * 86_400_000;
+  await maintainNotifications(fixture.db, afterRetention);
+  await expect(
+    adminEventStatus(fixture.db, policy, "admin", workspace.id, eventId),
+  ).rejects.toMatchObject({ status: 404 });
+  await expect(send(afterRetention)).rejects.toMatchObject({
+    status: 409,
+    message:
+      "This message key belongs to a notice whose retention period ended.",
+  });
 });
 
 it("enforces the per-minute send quota", async () => {

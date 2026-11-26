@@ -1,7 +1,15 @@
-import { retentionSchema } from "@savia/studio-shared/notifications";
+import {
+  notificationDefaults,
+  retentionSchema,
+} from "@savia/studio-shared/notifications";
 import { fail } from "../context";
-import { NotificationRepository } from "./repository";
-import { decodeCursor, encodeCursor } from "./types";
+import { workflowTaskNotice, workflowTaskNoticeKey } from "./collection-events";
+import {
+  boundTextArrayRows,
+  decodeCursor,
+  encodeCursor,
+  noticeActionSql,
+} from "./types";
 
 export interface MaintenanceReport {
   cleanedDeliveries: number;
@@ -60,29 +68,6 @@ export async function maintainNotifications(
     backfilled: 0,
     cursor: null,
   };
-  const scopes = (
-    await db
-      .prepare("SELECT workspace_id FROM notification_scope_settings")
-      .all<{
-        workspace_id: string;
-      }>()
-  ).results;
-  const settings = new Map<string, { readDays: number; unreadDays: number }>();
-  for (const row of scopes) {
-    settings.set(
-      row.workspace_id,
-      await getRetentionSettings(db, row.workspace_id),
-    );
-  }
-  const pendingTasks = new Set(
-    (
-      await db
-        .prepare(
-          "SELECT workspace_id,id FROM workflow_tasks WHERE status!='done'",
-        )
-        .all<{ workspace_id: string; id: string }>()
-    ).results.map(({ workspace_id, id }) => JSON.stringify([workspace_id, id])),
-  );
   const savedCursor =
     (await db
       .prepare(
@@ -90,15 +75,26 @@ export async function maintainNotifications(
       )
       .first<string>("cursor")) ?? "";
   const cursor = savedCursor ? decodeCursor(savedCursor) : null;
-  const cursorWhere = cursor ? "WHERE (d.created_at,d.id) > (?,?)" : "";
+  const cursorWhere = cursor ? "WHERE (created_at,id) > (?,?)" : "";
+  const { sourceKind, sourceId } = noticeActionSql(db);
   const deliveries = (
     await db
       .prepare(
-        `SELECT d.id,d.created_at,d.read_at,d.archived_at,d.scope_kind,d.scope_id,e.payload
-         FROM notification_deliveries d
+        `SELECT d.id,d.created_at,d.read_at,d.archived_at,e.payload,
+                s.read_days,s.unread_days,t.id AS open_task
+         FROM (
+           SELECT id,event_id,created_at,read_at,archived_at,scope_kind,scope_id
+           FROM notification_deliveries
+           ${cursorWhere}
+           ORDER BY created_at,id LIMIT ?
+         ) d
          JOIN notification_events e ON e.id=d.event_id
-         ${cursorWhere}
-         ORDER BY d.created_at,d.id LIMIT ?`,
+         LEFT JOIN notification_scope_settings s
+           ON d.scope_kind='workspace' AND s.workspace_id=d.scope_id
+         LEFT JOIN workflow_tasks t
+           ON d.scope_kind='workspace' AND t.workspace_id=d.scope_id
+             AND (${sourceKind})='workflow-task' AND t.id=(${sourceId}) AND t.status!='done'
+         ORDER BY d.created_at,d.id`,
       )
       .bind(...(cursor ?? []), limit)
       .all<{
@@ -106,44 +102,44 @@ export async function maintainNotifications(
         created_at: number;
         read_at: number | null;
         archived_at: number | null;
-        scope_kind: string;
-        scope_id: string;
+        read_days: number | null;
+        unread_days: number | null;
+        open_task: string | null;
         payload: string;
       }>()
   ).results;
   const dayMs = 86_400_000;
+  const expiredReadIds: string[] = [];
+  const expiredUnreadIds: string[] = [];
   for (const row of deliveries) {
-    const retention =
-      row.scope_kind === "workspace"
-        ? (settings.get(row.scope_id) ?? { readDays: 90, unreadDays: 180 })
-        : { readDays: 90, unreadDays: 180 };
     const read = row.read_at !== null || row.archived_at !== null;
+    const retentionDays = read
+      ? (row.read_days ?? notificationDefaults.readDays)
+      : (row.unread_days ?? notificationDefaults.unreadDays);
     const age = now - row.created_at;
-    const expired =
-      age > (read ? retention.readDays : retention.unreadDays) * dayMs;
-    if (!expired) continue;
-    let protected_ = false;
+    if (age <= retentionDays * dayMs || row.open_task !== null) continue;
     try {
-      const source = (
-        JSON.parse(row.payload) as { source?: { kind?: string; id?: string } }
-      ).source;
-      if (
-        source?.kind === "workflow-task" &&
-        row.scope_kind === "workspace" &&
-        source.id &&
-        pendingTasks.has(JSON.stringify([row.scope_id, source.id]))
-      )
-        protected_ = true;
-      if (source?.kind === "security-request") protected_ = true;
+      const source = (JSON.parse(row.payload) as { source?: { kind?: string } })
+        .source;
+      if (source?.kind === "security-request") continue;
     } catch {
       continue;
     }
-    if (protected_) continue;
+    (read ? expiredReadIds : expiredUnreadIds).push(row.id);
+  }
+  if (expiredReadIds.length || expiredUnreadIds.length) {
+    const inputIds = boundTextArrayRows(db);
     const removed = await db
-      .prepare("DELETE FROM notification_deliveries WHERE id=?")
-      .bind(row.id)
+      .prepare(
+        `DELETE FROM notification_deliveries
+         WHERE ((read_at IS NOT NULL OR archived_at IS NOT NULL)
+                 AND id IN (SELECT value FROM ${inputIds}))
+            OR (read_at IS NULL AND archived_at IS NULL
+                 AND id IN (SELECT value FROM ${inputIds}))`,
+      )
+      .bind(JSON.stringify(expiredReadIds), JSON.stringify(expiredUnreadIds))
       .run();
-    report.cleanedDeliveries += removed.meta.changes ?? 0;
+    report.cleanedDeliveries = removed.meta.changes ?? 0;
   }
   const lastDelivery = deliveries[deliveries.length - 1];
   report.cursor =
@@ -161,23 +157,27 @@ export async function maintainNotifications(
       .bind(nextCursor, savedCursor)
       .run();
   }
-  const orphaned = (
-    await db
-      .prepare(
-        `SELECT e.id FROM notification_events e
-         LEFT JOIN notification_deliveries d ON d.event_id=e.id
-         WHERE d.id IS NULL AND e.status IN ('completed','failed') LIMIT ?`,
-      )
-      .bind(limit)
-      .all<{ id: string }>()
-  ).results;
-  for (const row of orphaned) {
-    await db
-      .prepare("DELETE FROM notification_events WHERE id=?")
-      .bind(row.id)
-      .run();
-    report.cleanedEvents += 1;
-  }
+  const removedEvents = await db
+    .prepare(
+      `DELETE FROM notification_events
+       WHERE status IN ('completed','failed') AND id IN (
+         SELECT e.id FROM notification_events e
+         WHERE e.status IN ('completed','failed')
+           AND NOT EXISTS (SELECT 1 FROM notification_deliveries d WHERE d.event_id=e.id)
+           AND NOT EXISTS (SELECT 1 FROM notification_recipient_retries r WHERE r.event_id=e.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM notification_admin_audit a
+             LEFT JOIN notification_scope_settings s ON s.workspace_id=a.workspace_id
+             WHERE e.scope_kind='workspace' AND a.workspace_id=e.scope_id
+               AND a.id='audit_'||e.id AND a.action='send'
+               AND e.created_at >= ? - COALESCE(s.read_days, ?) * CAST(? AS BIGINT)
+           )
+         ORDER BY e.created_at,e.id LIMIT ?
+       )`,
+    )
+    .bind(now, notificationDefaults.readDays, dayMs, limit)
+    .run();
+  report.cleanedEvents = removedEvents.meta.changes ?? 0;
   return report;
 }
 
@@ -186,62 +186,84 @@ export async function backfillWorkflowNotices(
   after: string | null,
   limit = 100,
 ): Promise<{ backfilled: number; cursor: string | null }> {
+  const resume = decodeTaskBackfillCursor(after);
   const tasks = (
     await db
       .prepare(
-        after
-          ? `SELECT workspace_id,id,title,assignee FROM workflow_tasks
-             WHERE status!='done' AND id>? ORDER BY id LIMIT ?`
-          : `SELECT workspace_id,id,title,assignee FROM workflow_tasks
-             WHERE status!='done' ORDER BY id LIMIT ?`,
+        `SELECT workspace_id,id,execution_id,node_id,title,assignee FROM workflow_tasks
+         WHERE status!='done' ${resume ? "AND (id,workspace_id) > (?,?)" : ""}
+         ORDER BY id,workspace_id LIMIT ?`,
       )
-      .bind(...(after ? [after, limit] : [limit]))
+      .bind(...(resume ?? []), limit)
       .all<{
         workspace_id: string;
         id: string;
+        execution_id: string;
+        node_id: string;
         title: string;
         assignee: string;
       }>()
   ).results;
-  const repository = new NotificationRepository(db);
   let backfilled = 0;
   let cursor: string | null = after;
   for (const task of tasks) {
-    const statements = repository.eventStatements({
-      scope: { kind: "workspace", id: task.workspace_id },
-      key: `workflow:backfill:${task.id}`,
-      actor: { kind: "system", id: null },
-      source: { kind: "workflow-task", id: task.id },
-      title: task.title,
-      body: "",
-      audience: { kind: "explicit", principals: [task.assignee] },
-      createdAt: Date.now(),
-      expiresAt: null,
-    });
+    cursor = JSON.stringify([task.id, task.workspace_id]);
+    const existingNotice = db
+      .prepare(
+        `SELECT id FROM notification_events
+         WHERE scope_kind='workspace' AND scope_id=? AND event_key IN (?,?)`,
+      )
+      .bind(
+        task.workspace_id,
+        workflowTaskNoticeKey(task.execution_id, task.node_id),
+        `workflow:backfill:${task.id}`,
+      );
+    if (await existingNotice.first("id")) continue;
     try {
-      await db.batch(statements);
+      await db.batch(
+        workflowTaskNotice(
+          db,
+          task.workspace_id,
+          task.execution_id,
+          task.node_id,
+          task.id,
+          task.title,
+          "",
+          task.assignee,
+          Date.now(),
+        ),
+      );
       backfilled += 1;
     } catch (error) {
-      if (!String(error).includes("UNIQUE")) throw error;
+      // Another backfill can create the same notice between the read and insert.
+      if (!(await existingNotice.first("id"))) throw error;
     }
-    cursor = task.id;
   }
-  const checkpoint = await db
-    .prepare(
-      "SELECT cursor FROM notification_maintenance_checkpoints WHERE name='backfill'",
-    )
-    .bind()
-    .first<{ cursor: string }>();
-  if (cursor && cursor !== checkpoint?.cursor) {
+  if (cursor && cursor !== after) {
     await db
       .prepare(
         `INSERT INTO notification_maintenance_checkpoints(name,cursor) VALUES ('backfill',?)
-         ON CONFLICT(name) DO UPDATE SET cursor=?`,
+         ON CONFLICT(name) DO UPDATE SET cursor=excluded.cursor
+         WHERE notification_maintenance_checkpoints.cursor=?`,
       )
-      .bind(cursor, cursor)
+      .bind(cursor, after ?? "")
       .run();
   }
   return { backfilled, cursor };
+}
+
+function decodeTaskBackfillCursor(
+  after: string | null,
+): [string, string] | null {
+  if (!after?.startsWith("[")) return null;
+  try {
+    const [id, workspace] = JSON.parse(after);
+    if (typeof id === "string" && typeof workspace === "string")
+      return [id, workspace];
+  } catch {
+    // Rescan safely when the saved cursor predates workspace-aware pagination.
+  }
+  return null;
 }
 
 export async function notificationSettingsRoute(

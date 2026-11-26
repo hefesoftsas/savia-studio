@@ -1,4 +1,6 @@
 import { env } from "cloudflare:workers";
+import { processNotifications } from "@savia/studio-server/notifications/dispatcher";
+import { NotificationRepository } from "@savia/studio-server/notifications/repository";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   grantMembership,
@@ -58,7 +60,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await env.DB.exec(
-    "DELETE FROM notification_subscriptions; DELETE FROM notification_deliveries; DELETE FROM notification_events;",
+    "DELETE FROM notification_recipient_retries; DELETE FROM notification_subscriptions; DELETE FROM notification_deliveries; DELETE FROM notification_events;",
   );
 });
 
@@ -131,6 +133,62 @@ describe("notification policy", () => {
     expect(followers.ids).toEqual([member]);
   });
 
+  it("reads only the requested follower page plus one continuation row", async () => {
+    const principals = ["one", "two", "three", "four"];
+    for (const principal of principals) {
+      await env.DB.prepare(
+        "INSERT INTO notification_subscriptions(workspace_id,principal_id,collection,created_at) VALUES (?,?,?,?)",
+      )
+        .bind(workspace.id, principal, "paginated-requests", 1000)
+        .run();
+    }
+    const sizes: number[] = [];
+    const db = new Proxy(env.DB, {
+      get(target, key, receiver) {
+        if (key !== "prepare") return Reflect.get(target, key, receiver);
+        return (sql: string) => ({
+          bind: (...values: unknown[]) => ({
+            async all() {
+              const result = await target
+                .prepare(sql)
+                .bind(...values)
+                .all();
+              sizes.push(result.results.length);
+              return result;
+            },
+          }),
+        });
+      },
+    });
+    const policy = createNotificationPolicy(db);
+    const event = {
+      scope: workspace,
+      key: "paged-followers",
+      actor: { kind: "system", id: null },
+      source: {
+        kind: "record",
+        collection: "paginated-requests",
+        id: "record",
+        operation: "updated",
+      },
+      title: "Changed",
+      body: "",
+      audience: {
+        kind: "collection-followers",
+        collection: "paginated-requests",
+      },
+      createdAt: 1000,
+      expiresAt: null,
+    } as const;
+    const first = await policy.recipients(event, null, 2);
+    expect(first).toEqual({ ids: ["four", "one"], nextCursor: "one" });
+    expect(await policy.recipients(event, first.nextCursor, 2)).toEqual({
+      ids: ["three", "two"],
+      nextCursor: null,
+    });
+    expect(sizes).toEqual([3, 2]);
+  });
+
   it("scopes reads and sends to membership and fails closed", async () => {
     const policy = createNotificationPolicy(env.DB);
     expect(await policy.canReadScope(member, workspace)).toBe(true);
@@ -148,6 +206,107 @@ describe("notification policy", () => {
         operation: "updated",
       }),
     ).toBe(false);
+  });
+
+  it.each(["identity_principal", "studio_objects"])(
+    "retries delivery after a temporary %s lookup failure",
+    async (table) => {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO studio_objects(tenant_id,name,label,config) VALUES (?,'retry-requests','Requests','{}')",
+      )
+        .bind(workspace.id)
+        .run();
+      let shouldFail = true;
+      const db = new Proxy(env.DB, {
+        get(target, key) {
+          if (key === "prepare") {
+            return (sql: string) => {
+              if (shouldFail && sql.includes(table)) {
+                shouldFail = false;
+                throw new Error("Temporary lookup failure");
+              }
+              return target.prepare(sql);
+            };
+          }
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      let now = 1_000;
+      const { id } = await new NotificationRepository(env.DB).accept({
+        scope: workspace,
+        key: "temporary-lookup-failure",
+        actor: { kind: "system", id: null },
+        source: {
+          kind: "record",
+          collection: "retry-requests",
+          id: "request",
+          operation: "updated",
+        },
+        title: "Updated request",
+        body: "",
+        audience: { kind: "explicit", principals: [member] },
+        createdAt: now,
+        expiresAt: null,
+      });
+      const policy = createNotificationPolicy(db);
+      const options = { now: () => now, random: () => 0, workerId: "policy" };
+      expect(await processNotifications(env.DB, policy, options)).toMatchObject(
+        {
+          retried: 1,
+          delivered: 0,
+          skipped: 0,
+        },
+      );
+      expect(
+        await env.DB.prepare(
+          "SELECT recipient_id FROM notification_recipient_retries WHERE event_id=?",
+        )
+          .bind(id)
+          .first("recipient_id"),
+      ).toBe(member);
+      now += 60_000;
+      expect(await processNotifications(env.DB, policy, options)).toMatchObject(
+        {
+          delivered: 1,
+        },
+      );
+    },
+  );
+
+  it("checks each recipient's identity once while enforcing workspace access", async () => {
+    await new NotificationRepository(env.DB).accept({
+      scope: workspace,
+      key: "single-identity-read",
+      actor: { kind: "system", id: null },
+      source: { kind: "admin-message", id: "single-identity-read" },
+      title: "Update",
+      body: "",
+      audience: { kind: "explicit", principals: [member, outsider] },
+      createdAt: 1000,
+      expiresAt: null,
+    });
+    let reads = 0;
+    const db = new Proxy(env.DB, {
+      get(target, key, receiver) {
+        if (key !== "prepare") return Reflect.get(target, key, receiver);
+        return (sql: string) => {
+          if (sql.includes('from "identity_principal"')) reads += 1;
+          return target.prepare(sql);
+        };
+      },
+    });
+    const report = await processNotifications(
+      env.DB,
+      createNotificationPolicy(db),
+      { now: () => 1000, workerId: "identity-read-count" },
+    );
+    expect(report).toMatchObject({ delivered: 1, skipped: 1 });
+    expect(reads).toBe(2);
+    const { results } = await env.DB.prepare(
+      "SELECT recipient_id FROM notification_deliveries",
+    ).all();
+    expect(results).toEqual([{ recipient_id: member }]);
   });
 
   it("delivers task notices only for tasks assigned to the recipient in the originating workspace", async () => {

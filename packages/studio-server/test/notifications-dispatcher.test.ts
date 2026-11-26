@@ -142,6 +142,88 @@ it("recovers a stale lease after a crash", async () => {
   expect(report.delivered).toBe(1);
 });
 
+it("marks an incomplete event failed and continues delivering the queue", async () => {
+  const repo = new NotificationRepository(fixture.db);
+  const { id } = await repo.accept(input("incomplete", ["alice"]));
+  await fixture.db
+    .prepare("UPDATE notification_events SET payload='{}' WHERE id=?")
+    .bind(id)
+    .run();
+  now += 1;
+  const nextEvent = input("next-valid", ["bob"]);
+  const next = await repo.accept(nextEvent);
+  // Database producers can compose a key longer than the API input limit.
+  const storedKey = `record:${"x".repeat(200)}:requests:entry:1`;
+  await fixture.db
+    .prepare("UPDATE notification_events SET event_key=?,payload=? WHERE id=?")
+    .bind(storedKey, JSON.stringify({ ...nextEvent, key: storedKey }), next.id)
+    .run();
+
+  expect(
+    await processNotifications(fixture.db, stubPolicy(), options),
+  ).toMatchObject({
+    failed: 1,
+    delivered: 1,
+  });
+  const failed = await fixture.db
+    .prepare(
+      "SELECT status,lease_token,lease_until FROM notification_events WHERE id=?",
+    )
+    .bind(id)
+    .first();
+  expect(failed).toEqual({
+    status: "failed",
+    lease_token: null,
+    lease_until: 0,
+  });
+  expect(
+    await fixture.db
+      .prepare("SELECT event_id FROM notification_deliveries")
+      .first("event_id"),
+  ).toBe(next.id);
+});
+
+it("continues the queue and resumes an audience lookup from the last saved recipient", async () => {
+  const repo = new NotificationRepository(fixture.db);
+  const { id } = await repo.accept({
+    ...input("partial-audience", []),
+    audience: { kind: "workspace-members" },
+  });
+  now += 1;
+  await repo.accept(input("available-audience", ["carol"]));
+  const policy = stubPolicy({ members: ["alice", "bob"] });
+  const recipients = policy.recipients;
+  let shouldFail = true;
+  const cursors: Array<string | null> = [];
+  policy.recipients = async (event, after) => {
+    cursors.push(after);
+    if (after === "alice" && shouldFail) {
+      shouldFail = false;
+      throw new Error("Temporary audience lookup failure");
+    }
+    return recipients(event, after, 1);
+  };
+
+  const first = await processNotifications(fixture.db, policy, options);
+  expect(first).toMatchObject({ claimed: 2, delivered: 2, retried: 1 });
+  expect(
+    await fixture.db
+      .prepare(
+        "SELECT status,cursor,lease_token FROM notification_events WHERE id=?",
+      )
+      .bind(id)
+      .first(),
+  ).toEqual({ status: "pending", cursor: "alice", lease_token: null });
+  expect(
+    (await processNotifications(fixture.db, policy, options)).claimed,
+  ).toBe(0);
+  now += 60_000;
+  expect(
+    (await processNotifications(fixture.db, policy, options)).delivered,
+  ).toBe(1);
+  expect(cursors).toEqual([null, "alice", "alice"]);
+});
+
 it("skips inactive members, removed followers, and self-notifications", async () => {
   const repository = new NotificationRepository(fixture.db);
   await repository.accept(input("skip", ["alice", "mallory", "admin"]));
@@ -230,6 +312,43 @@ it("respects the tick budget and resumes a partly delivered explicit audience", 
   ).toBe(2);
 });
 
+it("saves recipient progress when a single event uses the tick time budget", async () => {
+  const { id } = await new NotificationRepository(fixture.db).accept(
+    input("slow-audience", ["alice", "bob", "carol"]),
+  );
+  const calls: string[] = [];
+  const policy = stubPolicy({ calls });
+  const canReadSource = policy.canReadSource;
+  policy.canReadSource = async (...args) => {
+    now += 30;
+    return canReadSource(...args);
+  };
+  const first = await processNotifications(fixture.db, policy, {
+    ...options,
+    softBudgetMs: 25,
+  });
+  expect(first.delivered).toBe(1);
+  expect(calls).toEqual(["scope:alice", "source:alice"]);
+  expect(
+    await fixture.db
+      .prepare("SELECT status,cursor FROM notification_events WHERE id=?")
+      .bind(id)
+      .first(),
+  ).toEqual({ status: "pending", cursor: "alice" });
+  expect(
+    (await processNotifications(fixture.db, stubPolicy({ calls }), options))
+      .delivered,
+  ).toBe(2);
+  expect(calls).toEqual([
+    "scope:alice",
+    "source:alice",
+    "scope:bob",
+    "source:bob",
+    "scope:carol",
+    "source:carol",
+  ]);
+});
+
 it("retries transient failures and delivers on the next tick", async () => {
   const repository = new NotificationRepository(fixture.db);
   await repository.accept(input("flaky", ["alice"]));
@@ -240,6 +359,104 @@ it("retries transient failures and delivers on the next tick", async () => {
   now += 61_000;
   const second = await processNotifications(fixture.db, policy, options);
   expect(second.delivered).toBe(1);
+});
+
+it("clears a retry when its recipient no longer has permission", async () => {
+  const repository = new NotificationRepository(fixture.db);
+  const { id } = await repository.accept(input("revoked-retry", ["alice"]));
+  const inactive = new Set<string>();
+  const policy = stubPolicy({ failOnce: new Set(["alice"]), inactive });
+  expect(
+    (await processNotifications(fixture.db, policy, options)).retried,
+  ).toBe(1);
+  inactive.add("alice");
+  now += 61_000;
+  const report = await processNotifications(fixture.db, policy, options);
+  expect(report).toMatchObject({ skipped: 1, delivered: 0 });
+  expect(
+    await fixture.db
+      .prepare("SELECT status FROM notification_events WHERE id=?")
+      .bind(id)
+      .first("status"),
+  ).toBe("completed");
+  expect(
+    await fixture.db
+      .prepare(
+        "SELECT status FROM notification_recipient_retries WHERE event_id=?",
+      )
+      .bind(id)
+      .first("status"),
+  ).toBeNull();
+});
+
+it("revisits a due retry behind the saved audience cursor", async () => {
+  const { id } = await new NotificationRepository(fixture.db).accept(
+    input("retry-behind-cursor", ["alice", "bob"]),
+  );
+  const policy = stubPolicy({ failOnce: new Set(["alice"]) });
+  const budget = { ...options, maxRecipients: 1 };
+  expect((await processNotifications(fixture.db, policy, budget)).retried).toBe(
+    1,
+  );
+  now += 61_000;
+  expect(
+    (await processNotifications(fixture.db, policy, budget)).delivered,
+  ).toBe(1);
+  expect(
+    await fixture.db
+      .prepare("SELECT status FROM notification_events WHERE id=?")
+      .bind(id)
+      .first("status"),
+  ).toBe("pending");
+  expect(
+    (await processNotifications(fixture.db, policy, options)).delivered,
+  ).toBe(1);
+  const deliveries = await fixture.db
+    .prepare(
+      "SELECT recipient_id FROM notification_deliveries ORDER BY recipient_id",
+    )
+    .all();
+  expect(deliveries.results).toEqual([
+    { recipient_id: "alice" },
+    { recipient_id: "bob" },
+  ]);
+});
+
+it("clears a retry when a recipient leaves a paginated audience", async () => {
+  const { id } = await new NotificationRepository(fixture.db).accept({
+    ...input("departed-retry", []),
+    audience: { kind: "workspace-members" },
+  });
+  const members = ["alice", "bob", "carol"];
+  const policy = stubPolicy({ members, failOnce: new Set(["bob"]) });
+  const budget = { ...options, maxRecipients: 1 };
+  expect(
+    (await processNotifications(fixture.db, policy, budget)).delivered,
+  ).toBe(1);
+  expect((await processNotifications(fixture.db, policy, budget)).retried).toBe(
+    1,
+  );
+  members.splice(1, 1);
+  now += 61_000;
+  expect(
+    (await processNotifications(fixture.db, policy, budget)).delivered,
+  ).toBe(1);
+  await processNotifications(fixture.db, policy, budget);
+  await processNotifications(fixture.db, policy, budget);
+  expect(
+    await fixture.db
+      .prepare("SELECT status FROM notification_events WHERE id=?")
+      .bind(id)
+      .first("status"),
+  ).toBe("completed");
+  expect(
+    await fixture.db
+      .prepare(
+        "SELECT status FROM notification_recipient_retries WHERE event_id=?",
+      )
+      .bind(id)
+      .first("status"),
+  ).toBeNull();
 });
 
 it.each([1, 3])(

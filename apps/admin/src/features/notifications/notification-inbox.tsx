@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslate } from "ra-core";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -65,6 +65,10 @@ export function NotificationInbox({
   const [filter, setFilter] = useState<InboxFilter>("all");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const bulkReadProgress = useRef<{
+    sessionGeneration: number;
+    cursor: string;
+  } | null>(null);
   const translate = useTranslate();
   const t = (key: string) => translate(`savia.notificationInbox.${key}`);
   const queryClient = useQueryClient();
@@ -98,11 +102,15 @@ export function NotificationInbox({
   };
 
   const markAllRead = async () => {
-    let cursor: string | undefined;
+    const saved = bulkReadProgress.current;
+    let cursor =
+      saved?.sessionGeneration === sessionGeneration ? saved.cursor : undefined;
     do {
       if (sessionGeneration !== getSessionGeneration()) return;
       const page = await client.readAll(cursor);
+      if (sessionGeneration !== getSessionGeneration()) return;
       cursor = page.nextCursor ?? undefined;
+      bulkReadProgress.current = cursor ? { sessionGeneration, cursor } : null;
     } while (cursor);
   };
 
@@ -284,7 +292,11 @@ export function NotificationInbox({
                             className="mt-2 size-2 shrink-0 rounded-full bg-primary"
                           />
                         ) : null}
-                        <span className="break-words">{item.title}</span>
+                        <span className="break-words">
+                          {item.source.kind === "unavailable"
+                            ? t("unavailableNotice")
+                            : item.title}
+                        </span>
                       </p>
                       <time
                         dateTime={isoTime(item.createdAt)}

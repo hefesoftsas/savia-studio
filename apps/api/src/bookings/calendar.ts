@@ -1,7 +1,7 @@
 import { createPersonalIntegrationRepository } from "../personal-integrations/repository";
 import type { PersonalIntegrationNangoClient } from "../personal-integrations/contracts";
 import type { ActivePersonalIntegrationConnection } from "../personal-integrations/contracts";
-import { localInstant } from "./domain";
+import { localDayStart } from "./domain";
 
 type BookingProvider = "google_calendar" | "outlook";
 type BookingCalendarInput = {
@@ -462,7 +462,7 @@ export function createBookingCalendarAdapter(
                   return undefined;
                 const zone = date.timeZone ?? payload.timeZone;
                 if (typeof zone !== "string") return undefined;
-                const time = localInstant(date.date, "00:00", zone);
+                const time = localDayStart(date.date, zone);
                 return time === null ? undefined : new Date(time).toISOString();
               };
               const start = instant(event.start),
@@ -536,13 +536,13 @@ export function createBookingCalendarAdapter(
             typeof event.showAs !== "string"
           )
             throw unavailable();
+          if (event.isCancelled || event.showAs === "free") continue;
           if (input.excludeExternalId) {
             if (typeof event.id !== "string") throw unavailable();
             if (event.id === input.excludeExternalId) continue;
           }
           const period = outlookPeriod(event);
-          if (!event || !period) throw unavailable();
-          if (event.isCancelled === true || event.showAs === "free") continue;
+          if (!period) throw unavailable();
           periods.push(period);
         }
         path = nextGraphPath(payload["@odata.nextLink"]) ?? "";

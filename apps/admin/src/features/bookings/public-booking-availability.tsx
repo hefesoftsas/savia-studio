@@ -32,7 +32,7 @@ type Props = {
   onReadyChange?(ready: boolean): void;
   refreshKey?: number;
   hideHeading?: boolean;
-  excludedStartsAt?: string[];
+  excludedStartAt?: string;
 };
 
 const dayString = (date: Date) =>
@@ -43,19 +43,7 @@ function fromDayString(value: string) {
   return new Date(year, month - 1, day, 12);
 }
 
-function todayInZone(zone: string) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: zone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-  const get = (type: string) =>
-    parts.find((part) => part.type === type)?.value ?? "";
-  return `${get("year")}-${get("month")}-${get("day")}`;
-}
-
-function dayForInstant(instant: string, zone: string) {
+function dayForInstant(instant: string | number, zone: string) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: zone,
     year: "numeric",
@@ -106,12 +94,6 @@ function monthStart(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), 1, 12);
 }
 
-function addDays(value: string, amount: number) {
-  const date = fromDayString(value);
-  date.setDate(date.getDate() + amount);
-  return dayString(date);
-}
-
 function addMonths(date: Date, amount: number) {
   return new Date(date.getFullYear(), date.getMonth() + amount, 1, 12);
 }
@@ -136,19 +118,31 @@ export function PublicBookingAvailability({
   onReadyChange,
   refreshKey = 0,
   hideHeading = false,
-  excludedStartsAt = [],
+  excludedStartAt,
 }: Props) {
   const t = useMessages(bookingMessages);
   const wt = useMessages(publicBookingWizardMessages);
   const locale = useAppLocale();
-  const today = todayInZone(displayTimeZone);
-  const horizonEnd = addDays(today, Math.max(0, catalog.horizonDays));
+  const now = Date.now();
+  const today = dayForInstant(now, displayTimeZone);
+  const horizonEnd = dayForInstant(
+    now + Math.max(0, catalog.horizonDays) * 86_400_000,
+    displayTimeZone,
+  );
+  const firstMonth = monthStart(fromDayString(today));
+  const lastMonth = monthStart(fromDayString(horizonEnd));
   const initialDay = value
     ? dayForInstant(value.slot.startsAt, displayTimeZone)
     : today;
-  const [visibleMonth, setVisibleMonth] = useState(() =>
+  const [requestedMonth, setVisibleMonth] = useState(() =>
     monthStart(fromDayString(initialDay)),
   );
+  const visibleMonth =
+    requestedMonth < firstMonth
+      ? firstMonth
+      : requestedMonth > lastMonth
+        ? lastMonth
+        : requestedMonth;
   const [selectedDay, setSelectedDay] = useState(
     value ? dayForInstant(value.slot.startsAt, displayTimeZone) : "",
   );
@@ -157,6 +151,7 @@ export function PublicBookingAvailability({
   const [requestError, setRequestError] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const requestId = useRef(0);
+  const excludedStart = excludedStartAt ? Date.parse(excludedStartAt) : null;
 
   const firstOfMonth = dayString(visibleMonth);
   const lastOfMonth = dayString(
@@ -193,18 +188,31 @@ export function PublicBookingAvailability({
     })
       .then((result) => {
         if (controller.signal.aborted || requestId.current !== id) return;
-        setDays(result.days);
+        const bookableDays =
+          excludedStart === null
+            ? result.days
+            : result.days.map((day) => ({
+                ...day,
+                slots: day.slots.filter(
+                  (slot) => Date.parse(slot.startsAt) !== excludedStart,
+                ),
+              }));
+        setDays(bookableDays);
         setRequestError(false);
-        if (!selectedDay) {
-          const firstAvailable = result.days.find(
-            (day) => day.slots.length,
-          )?.date;
-          if (firstAvailable) setSelectedDay(firstAvailable);
+        if (
+          !bookableDays.some(
+            ({ date, slots }) => date === selectedDay && slots.length,
+          )
+        ) {
+          setSelectedDay(
+            bookableDays.find((day) => day.slots.length)?.date ?? "",
+          );
         }
         if (value) {
-          const matching = result.days
+          const previousStart = Date.parse(value.slot.startsAt);
+          const matching = bookableDays
             .flatMap((day) => day.slots)
-            .find((slot) => slot.startsAt === value.slot.startsAt);
+            .find((slot) => Date.parse(slot.startsAt) === previousStart);
           if (matching) {
             const nextDay = dayForInstant(matching.startsAt, displayTimeZone);
             setSelectedDay(nextDay);
@@ -238,6 +246,7 @@ export function PublicBookingAvailability({
     attempt,
     refreshKey,
     onReadyChange,
+    excludedStart,
   ]);
 
   useEffect(() => {
@@ -350,8 +359,9 @@ export function PublicBookingAvailability({
               const day = dayString(date);
               return day < today || day > horizonEnd || !availableDays.has(day);
             }}
-            startMonth={monthStart(fromDayString(today))}
-            endMonth={monthStart(fromDayString(horizonEnd))}
+            today={fromDayString(today)}
+            startMonth={firstMonth}
+            endMonth={lastMonth}
             className="mx-auto w-full max-w-[21rem]"
             classNames={{
               root: "relative w-full",
@@ -472,14 +482,12 @@ export function PublicBookingAvailability({
             >
               {selectedSlots.map((slot) => {
                 const chosen = value?.slot.startsAt === slot.startsAt;
-                const excluded = excludedStartsAt.includes(slot.startsAt);
                 return (
                   <Button
                     key={slot.startsAt}
                     type="button"
                     variant={chosen ? "default" : "outline"}
                     aria-pressed={chosen}
-                    disabled={excluded}
                     className="min-h-11 px-2 tabular-nums"
                     onClick={() =>
                       onChange({

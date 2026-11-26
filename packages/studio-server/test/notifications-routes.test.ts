@@ -136,7 +136,7 @@ it("authorizes status and retry for administrator notices in the current workspa
   ).toBe(scope.id);
 });
 
-it("delivers requested acknowledgements and keeps them pending after reading", async () => {
+it("keeps requested acknowledgements pending after reading and archiving", async () => {
   const principal = "notice-recipient";
   const admin = appFor("notice-admin");
   for (const requireAcknowledgement of [false, true]) {
@@ -184,6 +184,17 @@ it("delivers requested acknowledgements and keeps them pending after reading", a
   const count = () => app.request("/api/notifications/count?filter=pending");
   expect(await (await count()).json()).toEqual({ data: { count: 1 } });
 
+  const archive = await app.request(
+    `/api/notifications/${acknowledgement.id}/archive`,
+    { method: "POST" },
+  );
+  expect(archive.status).toBe(200);
+  expect((await readInbox("all")).map(({ id }) => id)).toEqual([ordinary.id]);
+  expect((await readInbox("pending")).map(({ id }) => id)).toEqual([
+    acknowledgement.id,
+  ]);
+  expect(await (await count()).json()).toEqual({ data: { count: 1 } });
+
   const confirm = (id: string) =>
     app.request(`/api/notifications/${id}/resolve`, { method: "POST" });
   expect((await confirm(ordinary.id)).status).toBe(409);
@@ -191,10 +202,7 @@ it("delivers requested acknowledgements and keeps them pending after reading", a
   expect((await confirm(acknowledgement.id)).status).toBe(200);
   expect(await readInbox("pending")).toEqual([]);
   expect(await (await count()).json()).toEqual({ data: { count: 0 } });
-  expect(
-    (await readInbox("all")).find(({ id }) => id === acknowledgement.id)
-      ?.actionState,
-  ).toBe("done");
+  expect((await readInbox("all")).map(({ id }) => id)).toEqual([ordinary.id]);
 });
 
 it("uses only the notice workspace for task status, counts, and actions", async () => {
@@ -238,7 +246,10 @@ it("uses only the notice workspace for task status, counts, and actions", async 
     kind: "workflow-task",
     id: "shared-done",
   });
-  await seed(scope, principal, { kind: "workflow-task", id: "shared-open" });
+  const openId = await seed(scope, principal, {
+    kind: "workflow-task",
+    id: "shared-open",
+  });
   const missingId = await seed(scope, principal, {
     kind: "workflow-task",
     id: "foreign-only",
@@ -262,6 +273,34 @@ it("uses only the notice workspace for task status, counts, and actions", async 
     data: { kind: "task", state: "unavailable", resolved: false },
   });
 
+  const complete = (id: string) =>
+    app.request(`/api/notifications/${id}/resolve`, { method: "POST" });
+  const reassign = (assignee: string) =>
+    fixture.db
+      .prepare(
+        "UPDATE workflow_tasks SET assignee=? WHERE workspace_id=? AND id='shared-open'",
+      )
+      .bind(assignee, scope.id)
+      .run();
+  await reassign("new-assignee");
+  const reassignedInbox = await app.request("/api/notifications");
+  const reassignedItems = (await reassignedInbox.json<{ data: InboxPage }>())
+    .data.items;
+  expect(reassignedItems.find(({ id }) => id === openId)?.actionState).toBe(
+    "unavailable",
+  );
+  expect(
+    (
+      await (
+        await app.request("/api/notifications?filter=pending")
+      ).json<{ data: InboxPage }>()
+    ).data.items,
+  ).toEqual([]);
+  expect(
+    await (await app.request("/api/notifications/count?filter=pending")).json(),
+  ).toEqual({ data: { count: 0 } });
+  expect((await complete(openId)).status).toBe(404);
+  await reassign(principal);
   for (let index = 0; index < 101; index++) {
     await seed(scope, principal);
   }
@@ -271,6 +310,17 @@ it("uses only the notice workspace for task status, counts, and actions", async 
     "shared-open",
   ]);
   expect(pendingPage.data.nextCursor).toBeNull();
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await complete(openId);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ data: { resolved: true } });
+  }
+  expect((await complete(missingId)).status).toBe(409);
+  const completed = await app.request(`/api/notifications/action/${openId}`);
+  expect(await completed.json()).toEqual({
+    data: { kind: "task", state: "done", resolved: true },
+  });
 });
 
 it("opens and pages an inbox with more than 100 distinct task notices", async () => {
@@ -322,6 +372,136 @@ it("opens and pages an inbox with more than 100 distinct task notices", async ()
     new Set([...data.items, ...next.data.items].map(({ id }) => id)).size,
   ).toBe(101);
   expect(next.data.nextCursor).toBeNull();
+});
+
+it("keeps incomplete notices safe to display and archive", async () => {
+  const principal = "incomplete-notice-reader";
+  const damaged = await seed(scope, principal);
+  const valid = await seed(scope, principal);
+  await fixture.db
+    .prepare(
+      "UPDATE notification_events SET payload='{}' WHERE id=(SELECT event_id FROM notification_deliveries WHERE id=?)",
+    )
+    .bind(damaged)
+    .run();
+  const app = appFor(principal);
+  const response = await app.request("/api/notifications?filter=unread");
+  expect(response.status).toBe(200);
+  const { data } = await response.json<{ data: InboxPage }>();
+  expect(data.items).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: valid, title: "Hello" }),
+      expect.objectContaining({
+        id: damaged,
+        source: { kind: "unavailable" },
+        actionState: "unavailable",
+      }),
+    ]),
+  );
+  const archive = await app.request(`/api/notifications/${damaged}/archive`, {
+    method: "POST",
+  });
+  expect(archive.status).toBe(200);
+  const count = await app.request("/api/notifications/count?filter=unread");
+  expect(await count.json()).toEqual({ data: { count: 1 } });
+});
+
+it("paginates deliveries with Unicode IDs and accepts older Latin-1 cursors", async () => {
+  const principal = "unicode-recipient";
+  const deliveries = [
+    { id: "aviso-á", at: 100 },
+    { id: "aviso-例-📝", at: 200 },
+    { id: "aviso-nuevo", at: 300 },
+  ];
+  for (const delivery of deliveries) {
+    const id = await seed(scope, principal);
+    await fixture.db
+      .prepare(
+        "UPDATE notification_deliveries SET id=?,created_at=? WHERE id=?",
+      )
+      .bind(delivery.id, delivery.at, id)
+      .run();
+  }
+  const app = appFor(principal);
+  const list = async (cursor: string) => {
+    const response = await app.request(
+      `/api/notifications?limit=1&cursor=${encodeURIComponent(cursor)}`,
+    );
+    expect(response.status).toBe(200);
+    return (await response.json<{ data: InboxPage }>()).data;
+  };
+  const previous = btoa(JSON.stringify([300, "aviso-nuevo"]))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+  const page = await list(previous);
+  expect(page.items.map(({ id }) => id)).toEqual(["aviso-例-📝"]);
+  const next = await list(page.nextCursor!);
+  expect(next.items.map(({ id }) => id)).toEqual(["aviso-á"]);
+  expect(next.nextCursor).toBeNull();
+  const legacyLatin1 = btoa(JSON.stringify([100, "aviso-á"]))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+  expect((await list(legacyLatin1)).items).toEqual([]);
+});
+
+it("rejects invalid cursor contents in both inbox reads and bulk updates", async () => {
+  const principal = "invalid-cursor-user";
+  const id = await seed(scope, principal);
+  const app = appFor(principal);
+  for (const payload of [
+    '[1e999,"delivery"]',
+    '[1.5,"delivery"]',
+    '[9007199254740992,"delivery"]',
+    '[1,""]',
+    '[1,"delivery","extra"]',
+  ]) {
+    const cursor = btoa(payload);
+    const inbox = await app.request(
+      `/api/notifications?cursor=${encodeURIComponent(cursor)}`,
+    );
+    expect(inbox.status, payload).toBe(400);
+    const readAll = await app.request("/api/notifications/read-all", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cursor }),
+    });
+    expect(readAll.status, payload).toBe(400);
+  }
+  expect(
+    await fixture.db
+      .prepare("SELECT read_at FROM notification_deliveries WHERE id=?")
+      .bind(id)
+      .first("read_at"),
+  ).toBeNull();
+});
+
+it("rejects invalid read-all bodies without changing the inbox", async () => {
+  const principal = "invalid-read-all";
+  const id = await seed(scope, principal);
+  const app = appFor(principal);
+  for (const body of ['{"cursor":', '{"cursor":42}']) {
+    const response = await app.request("/api/notifications/read-all", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(response.status).toBe(400);
+  }
+  expect(
+    await fixture.db
+      .prepare("SELECT read_at FROM notification_deliveries WHERE id=?")
+      .bind(id)
+      .first("read_at"),
+  ).toBeNull();
+  const response = await app.request("/api/notifications/read-all", {
+    method: "POST",
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    data: { updated: 1, nextCursor: null },
+  });
 });
 
 it("marks both account and workspace notifications in the current inbox", async () => {
@@ -430,13 +610,21 @@ it("serves the personal inbox and blocks cross-principal mutations", async () =>
 });
 
 it("manages follows and paginates bulk reads", async () => {
+  await fixture.db
+    .prepare(
+      "INSERT INTO studio_objects(tenant_id,name,label,config) VALUES (?,'requests','Requests','{}')",
+    )
+    .bind(scope.id)
+    .run();
   const alice = appFor("alice");
-  const follow = await alice.request("/api/notifications/follow", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ collection: "requests" }),
-  });
-  expect(follow.status).toBe(200);
+  const follow = () =>
+    alice.request("/api/notifications/follow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ collection: "requests" }),
+    });
+  expect((await follow()).status).toBe(200);
+  expect((await follow()).status).toBe(200);
   const follows = (await (
     await alice.request("/api/notifications/follows")
   ).json()) as {
@@ -456,4 +644,50 @@ it("manages follows and paginates bulk reads", async () => {
     })
   ).json()) as { data: { updated: number; nextCursor: string | null } };
   expect(readAll.data.updated).toBeGreaterThanOrEqual(0);
+});
+
+it("rejects follow requests for missing collections and hides old follows after deletion", async () => {
+  const collection = "deleted-requests";
+  const foreign = "domain:foreign-follows";
+  const principal = "retired-collection-follower";
+  const create = (workspace: string) =>
+    fixture.db
+      .prepare(
+        "INSERT INTO studio_objects(tenant_id,name,label,config) VALUES (?,?,'Requests','{}')",
+      )
+      .bind(workspace, collection)
+      .run();
+  await create(foreign);
+  await new NotificationRepository(fixture.db).follow(
+    principal,
+    foreign,
+    collection,
+  );
+  const app = appFor(principal);
+  const follow = () =>
+    app.request("/api/notifications/follow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ collection }),
+    });
+  expect((await follow()).status).toBe(404);
+  await create(scope.id);
+  expect((await follow()).status).toBe(200);
+  await fixture.db
+    .prepare("DELETE FROM studio_objects WHERE tenant_id=? AND name=?")
+    .bind(scope.id, collection)
+    .run();
+  expect((await follow()).status).toBe(404);
+  const follows = await app.request("/api/notifications/follows");
+  expect(await follows.json()).toEqual({ data: [] });
+  expect(
+    await new NotificationRepository(fixture.db).follows(principal, foreign),
+  ).toEqual([collection]);
+  await create(scope.id);
+  expect(
+    await (await app.request("/api/notifications/follows")).json(),
+  ).toEqual({
+    data: [],
+  });
+  expect((await follow()).status).toBe(200);
 });

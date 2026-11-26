@@ -88,6 +88,75 @@ it("shows an inline month and the selected day's explicit time buttons together"
   await waitFor(() => expect(onChange).not.toHaveBeenCalled());
 });
 
+it.each([
+  {
+    name: "includes the last bookable date after the spring clock change",
+    now: "2026-03-07T04:45:00Z",
+    initialZone: "America/New_York",
+    nextZone: undefined,
+    from: "2026-03-06",
+    to: "2026-03-09",
+  },
+  {
+    name: "opens the available month when the display zone crosses a month boundary",
+    now: "2026-10-01T04:00:00Z",
+    initialZone: "America/Los_Angeles",
+    nextZone: "Asia/Tokyo",
+    from: "2026-10-01",
+    to: "2026-10-03",
+  },
+])("$name", async ({ now, initialZone, nextZone, from, to }) => {
+  vi.setSystemTime(new Date(now));
+  const loadAvailability = vi.fn(async (_url: string) =>
+    Response.json({ data: { days: [] } }),
+  );
+  vi.stubGlobal("fetch", loadAvailability);
+  function Calendar() {
+    const [zone, setZone] = useState(initialZone);
+    return (
+      <PublicBookingAvailability
+        token="personal-token"
+        catalog={{
+          id: "page-id",
+          timeZone: initialZone,
+          horizonDays: 2,
+          leadMinutes: 0,
+        }}
+        serviceId="consult"
+        professionalId="pro-1"
+        displayTimeZone={zone}
+        onTimeZoneChange={setZone}
+        value={undefined}
+        onChange={vi.fn()}
+      />
+    );
+  }
+  render(
+    <StoreContextProvider value={memoryStore({ locale: "en" })}>
+      <AppLocaleProvider>
+        <Calendar />
+      </AppLocaleProvider>
+    </StoreContextProvider>,
+  );
+  await waitFor(() => expect(loadAvailability).toHaveBeenCalledTimes(1));
+  if (nextZone) {
+    fireEvent.change(screen.getByLabelText("Time zone"), {
+      target: { value: nextZone },
+    });
+  }
+  await waitFor(() => {
+    const latestUrl = new URL(
+      loadAvailability.mock.lastCall![0],
+      "https://booking.test",
+    );
+    expect(latestUrl.searchParams.get("displayTimeZone")).toBe(
+      nextZone ?? initialZone,
+    );
+    expect(latestUrl.searchParams.get("from")).toBe(from);
+    expect(latestUrl.searchParams.get("to")).toBe(to);
+  });
+});
+
 it("keeps the selection pending when availability cannot be verified", async () => {
   vi.stubGlobal(
     "fetch",

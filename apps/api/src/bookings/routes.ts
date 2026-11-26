@@ -1862,9 +1862,10 @@ export function registerBookingRoutes(
         throw new HTTPException(404, {
           message: "Service or professional unavailable.",
         });
-      const startsAt = new Date(input.startsAt).toISOString();
-      if (startsAt === row.starts_at)
+      const requestedStart = Date.parse(input.startsAt);
+      if (requestedStart === Date.parse(row.starts_at))
         return c.json({ data: await reservationView(db, row) });
+      const startsAt = new Date(requestedStart).toISOString();
       const result = await slots(
           { tenantId: row.tenant_id, settings: state.settings },
           {

@@ -89,19 +89,21 @@ export function slotsForDate(
   for (const period of periods) {
     const last = localInstant(date, period.end, settings.timeZone);
     if (last === null) continue;
+    const endMinute = minute(period.end);
     for (
       let m = Math.ceil(minute(period.start) / 15) * 15;
-      m + service.durationMinutes + service.bufferMinutes <= minute(period.end);
+      m < endMinute;
       m += 15
     ) {
       const start = localInstant(date, clock(m), settings.timeZone);
       if (start === null) continue;
       const end = start + service.durationMinutes * 60000,
         occupiedEnd = end + service.bufferMinutes * 60000;
+      // Appointment length is elapsed time, including across clock changes.
+      if (occupiedEnd > last) break;
       if (
         start < now + settings.leadMinutes * 60000 ||
-        start > now + settings.horizonDays * 86400000 ||
-        occupiedEnd > last
+        start > now + settings.horizonDays * 86400000
       )
         continue;
       if (

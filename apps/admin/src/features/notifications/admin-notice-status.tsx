@@ -1,7 +1,9 @@
 import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
 import { useSessionGeneration } from "@/auth/session-scope";
 import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { CircleAlert, RefreshCw } from "lucide-react";
 import { useTranslate } from "ra-core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notificationClient, type NotificationClient } from "./client";
@@ -48,14 +50,33 @@ export function AdminNoticeStatus({
   });
 
   if (status.isPending) return <p>{t("loading")}</p>;
-  if (status.isError && !status.data)
-    return <p role="alert">{t("loadError")}</p>;
+  if (status.isError && !status.data) {
+    return (
+      <Alert variant="destructive">
+        <CircleAlert aria-hidden="true" />
+        <AlertTitle>{t("statusLoadError")}</AlertTitle>
+        <AlertDescription>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-2 max-sm:min-h-11"
+            disabled={status.isFetching}
+            onClick={() => void status.refetch()}
+          >
+            <RefreshCw aria-hidden="true" />
+            {t("retry")}
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  }
   if (!status.data) return <p>{t("loading")}</p>;
   return (
     <>
       <ReadRefreshStatus
         refreshing={status.isFetching && !status.isPending}
-        error={status.isError ? t("loadError") : undefined}
+        error={status.isError ? t("statusLoadError") : undefined}
         onRetry={() => void status.refetch()}
       />
       <dl className="grid grid-cols-2 gap-1 text-sm">

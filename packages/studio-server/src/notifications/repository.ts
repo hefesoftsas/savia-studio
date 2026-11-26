@@ -11,18 +11,15 @@ import {
 import { fail } from "../context";
 import { dialectFor } from "@savia/db/dialect";
 import {
+  boundTextArrayRows,
   canonicalPayload,
   decodeCursor,
   encodeCursor,
+  noticeActionSql,
+  parseStoredNotice,
   stableEventId,
   type DeliveryRow,
 } from "./types";
-
-function boundTextArrayRows(db: D1Database): string {
-  return dialectFor(db).name === "postgres"
-    ? "jsonb_array_elements_text(?::jsonb) AS input_ids(value)"
-    : "json_each(?)";
-}
 
 export class NotificationRepository {
   constructor(private readonly db: D1Database) {}
@@ -102,6 +99,10 @@ export class NotificationRepository {
       .join(" OR ");
     const scopeArgs = scopes.flatMap(({ kind, id }) => [kind, id]);
     const unreadWhere = query.filter === "unread" ? "AND d.read_at IS NULL" : "";
+    const archiveWhere =
+      query.filter === "pending"
+        ? `(d.archived_at IS NULL OR ${noticeActionSql(this.db).pendingAcknowledgement})`
+        : "d.archived_at IS NULL";
     // Pending notices can be sparse, so read their candidates in larger batches.
     const batchSize = query.filter === "pending" ? 100 : query.limit + 1;
     const items: NoticeView[] = [];
@@ -113,13 +114,13 @@ export class NotificationRepository {
                   d.read_at,d.archived_at,d.resolved_at,e.payload
            FROM notification_deliveries d
            JOIN notification_events e ON e.id=d.event_id
-           WHERE d.recipient_id=? AND (${scopeWhere}) AND d.archived_at IS NULL
+           WHERE d.recipient_id=? AND (${scopeWhere}) AND ${archiveWhere}
              ${unreadWhere} ${cursorWhere}
            ORDER BY d.created_at DESC, d.id DESC LIMIT ?`,
         )
         .bind(principal, ...scopeArgs, ...(cursor ?? []), batchSize)
         .all<DeliveryRow & { payload: string }>();
-      for (const item of await this.inboxItems(rows)) {
+      for (const item of await this.inboxItems(principal, rows)) {
         if (
           query.filter === "pending" &&
           (item.actionState !== "pending" ||
@@ -141,22 +142,24 @@ export class NotificationRepository {
   }
 
   private async inboxItems(
+    principal: string,
     rows: Array<DeliveryRow & { payload: string }>,
   ): Promise<NoticeView[]> {
-    const parsed: Array<{ row: DeliveryRow; event: NoticeEventInput }> = [];
+    const parsed = rows.map((row) => {
+      const event = parseStoredNotice(row.payload);
+      return {
+        row,
+        event:
+          event?.scope.kind === row.scope_kind && event.scope.id === row.scope_id
+            ? event
+            : undefined,
+      };
+    });
     const taskIds = new Map<string, Set<string>>();
-    for (const row of rows) {
-      let event: NoticeEventInput;
-      try {
-        event = JSON.parse(row.payload);
-      } catch {
-        continue;
-      }
-      if (!event || typeof event !== "object") continue;
-      parsed.push({ row, event });
+    for (const { row, event } of parsed) {
       if (
         row.scope_kind !== "workspace" ||
-        event.source?.kind !== "workflow-task"
+        event?.source.kind !== "workflow-task"
       )
         continue;
       const ids = taskIds.get(row.scope_id) ?? new Set<string>();
@@ -169,7 +172,7 @@ export class NotificationRepository {
           async ([workspaceId, ids]) =>
             [
               workspaceId,
-              await this.readTaskStatuses(workspaceId, [...ids]),
+              await this.readTaskStatuses(workspaceId, principal, [...ids]),
             ] as const,
         ),
       ),
@@ -177,19 +180,21 @@ export class NotificationRepository {
     return parsed.map(({ row, event }) => ({
       id: row.id,
       scope: { kind: row.scope_kind, id: row.scope_id } as NoticeScope,
-      title: event.title,
-      body: event.body,
+      title: event?.title ?? "Notification unavailable",
+      body: event?.body ?? "",
       createdAt: row.created_at,
       readAt: row.read_at,
       archivedAt: row.archived_at,
-      source: event.source,
-      actionState: this.resolveActionState(
-        event,
-        row.resolved_at,
-        row.scope_kind === "workspace"
-          ? taskStatuses.get(row.scope_id)
-          : undefined,
-      ),
+      source: event?.source ?? { kind: "unavailable" },
+      actionState: event
+        ? this.resolveActionState(
+            event,
+            row.resolved_at,
+            row.scope_kind === "workspace"
+              ? taskStatuses.get(row.scope_id)
+              : undefined,
+          )
+        : "unavailable",
     }));
   }
 
@@ -239,16 +244,9 @@ export class NotificationRepository {
           .first<number>("n")
       ) ?? 0;
     }
-    const postgres = dialectFor(this.db).name === "postgres";
-    const sourceKind = postgres
-      ? "e.payload::jsonb #>> '{source,kind}'"
-      : "json_extract(e.payload,'$.source.kind')";
-    const sourceId = postgres
-      ? "e.payload::jsonb #>> '{source,id}'"
-      : "json_extract(e.payload,'$.source.id')";
-    const requiresAcknowledgement = postgres
-      ? "(e.payload::jsonb -> 'requireAcknowledgement') = 'true'::jsonb"
-      : "json_type(e.payload,'$.requireAcknowledgement')='true'";
+    const { sourceKind, sourceId, pendingAcknowledgement } = noticeActionSql(
+      this.db,
+    );
     return (
       await this.db
         .prepare(
@@ -256,9 +254,10 @@ export class NotificationRepository {
            JOIN notification_events e ON e.id=d.event_id
            LEFT JOIN workflow_tasks t ON d.scope_kind='workspace' AND t.workspace_id=d.scope_id
              AND (${sourceKind})='workflow-task' AND t.id=(${sourceId})
-           WHERE d.recipient_id=? AND (${scopeWhere}) AND d.archived_at IS NULL
-             AND ((d.read_at IS NULL AND t.status='open')
-               OR ((${sourceKind})='admin-message' AND ${requiresAcknowledgement} AND d.resolved_at IS NULL))`,
+             AND t.assignee=d.recipient_id
+           WHERE d.recipient_id=? AND (${scopeWhere})
+             AND ((d.archived_at IS NULL AND d.read_at IS NULL AND t.status='open')
+               OR ${pendingAcknowledgement})`,
         )
         .bind(principal, ...scopeArgs)
         .first<number>("n")
@@ -310,13 +309,19 @@ export class NotificationRepository {
 
   async follow(principal: string, workspaceId: string, collection: string): Promise<void> {
     if (!collection || collection.length > 200) return fail("Invalid collection.", 400);
-    await this.db
+    // Keep a concurrent collection deletion behind the subscription write.
+    const lock = dialectFor(this.db).name === "postgres" ? "FOR KEY SHARE" : "";
+    const result = await this.db
       .prepare(
-        `INSERT OR IGNORE INTO notification_subscriptions(workspace_id,principal_id,collection,created_at)
-         VALUES (?,?,?,?)`,
+        `INSERT INTO notification_subscriptions(workspace_id,principal_id,collection,created_at)
+         SELECT tenant_id,?,name,? FROM studio_objects WHERE tenant_id=? AND name=?
+         ${lock}
+         ON CONFLICT(workspace_id,principal_id,collection)
+         DO UPDATE SET created_at=notification_subscriptions.created_at`,
       )
-      .bind(workspaceId, principal, collection, Date.now())
+      .bind(principal, Date.now(), workspaceId, collection)
       .run();
+    if (!result.meta.changes) return fail("Collection not found.", 404);
   }
 
   async unfollow(principal: string, workspaceId: string, collection: string): Promise<void> {
@@ -332,7 +337,9 @@ export class NotificationRepository {
     return (
       await this.db
         .prepare(
-          `SELECT collection FROM notification_subscriptions WHERE workspace_id=? AND principal_id=? ORDER BY collection`,
+          `SELECT s.collection FROM notification_subscriptions s
+           JOIN studio_objects o ON o.tenant_id=s.workspace_id AND o.name=s.collection
+           WHERE s.workspace_id=? AND s.principal_id=? ORDER BY s.collection`,
         )
         .bind(workspaceId, principal)
         .all<{ collection: string }>()
@@ -381,14 +388,16 @@ export class NotificationRepository {
 
   private async readTaskStatuses(
     workspaceId: string,
+    principal: string,
     ids: string[],
   ): Promise<Map<string, string>> {
     const rows = (
       await this.db
         .prepare(
-          `SELECT id,status FROM workflow_tasks WHERE workspace_id=? AND id IN (SELECT value FROM ${boundTextArrayRows(this.db)})`,
+          `SELECT id,status FROM workflow_tasks
+           WHERE workspace_id=? AND assignee=? AND id IN (SELECT value FROM ${boundTextArrayRows(this.db)})`,
         )
-        .bind(workspaceId, JSON.stringify(ids))
+        .bind(workspaceId, principal, JSON.stringify(ids))
         .all<{ id: string; status: string }>()
     ).results;
     return new Map(rows.map(({ id, status }) => [id, status]));

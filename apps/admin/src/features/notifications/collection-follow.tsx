@@ -14,6 +14,7 @@ export function CollectionFollow({
   client?: NotificationClient;
 }) {
   const translate = useTranslate();
+  const t = (key: string) => translate(`savia.notificationInbox.${key}`);
   const queryClient = useQueryClient();
   const sessionGeneration = useSessionGeneration();
   const [busy, setBusy] = useState(false);
@@ -34,11 +35,37 @@ export function CollectionFollow({
         queryKey: notificationReadKey(sessionGeneration, "follows"),
       });
     } catch {
-      setError(translate("savia.notificationInbox.actionError"));
+      setError(t("actionError"));
     } finally {
       setBusy(false);
     }
   };
+
+  if (follows.data === undefined) {
+    if (!follows.isError)
+      return (
+        <span role="status" className="text-sm text-muted-foreground">
+          {t("followLoading")}
+        </span>
+      );
+    return (
+      <span className="inline-flex flex-wrap items-center gap-1">
+        <span role="status" className="text-sm text-muted-foreground">
+          {t("followLoadError")}
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="max-sm:h-11"
+          disabled={follows.isFetching}
+          onClick={() => void follows.refetch()}
+        >
+          {t("retry")}
+        </Button>
+      </span>
+    );
+  }
 
   return (
     <span className="inline-flex items-center gap-1">
@@ -47,13 +74,11 @@ export function CollectionFollow({
         variant="ghost"
         size="sm"
         className="max-sm:h-11"
-        disabled={busy || follows.isPending}
+        disabled={busy}
         aria-pressed={following}
         onClick={() => void toggle()}
       >
-        {following
-          ? translate("savia.notificationInbox.unfollow")
-          : translate("savia.notificationInbox.follow")}
+        {t(following ? "unfollow" : "follow")}
       </Button>
       {error && <span role="alert">{error}</span>}
     </span>

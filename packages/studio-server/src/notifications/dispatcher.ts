@@ -6,7 +6,8 @@ import {
   type NotificationPolicy,
 } from "@savia/studio-shared/notifications";
 import { guard } from "../services";
-import { resolveAudienceRecipients } from "./audience";
+import { resolveAudienceRecipients, type RecipientPage } from "./audience";
+import { boundTextArrayRows, parseStoredNotice } from "./types";
 
 const RETRY_DELAYS_MINUTES = [1, 5, 15, 60, 240];
 const MAX_RETRIES = 5;
@@ -42,6 +43,22 @@ function backoffMs(attempts: number, random: () => number): number {
   return minutes * 60_000 + Math.floor(random() * 60_000);
 }
 
+function readEvent(due: EventRow): NoticeEventInput | undefined {
+  const event = parseStoredNotice(due.payload);
+  if (!event) return undefined;
+  const { scope, audience } = event;
+  if (scope.kind !== due.scope_kind || scope.id !== due.scope_id)
+    return undefined;
+  if (
+    scope.kind === "account" &&
+    (audience.kind !== "explicit" ||
+      audience.principals.length !== 1 ||
+      audience.principals[0] !== scope.id)
+  )
+    return undefined;
+  return event;
+}
+
 export async function processNotifications(
   db: D1Database,
   policy: NotificationPolicy,
@@ -71,14 +88,14 @@ export async function processNotifications(
     retried: 0,
     recoveredLeases: 0,
   };
-  const startedAt = now();
+  const deadline = now() + options.softBudgetMs;
   let recipientAttempts = 0;
   const seen = new Set<string>();
   for (;;) {
     if (
       report.claimed >= options.maxEvents ||
       recipientAttempts >= options.maxRecipientAttempts ||
-      now() - startedAt >= options.softBudgetMs
+      now() >= deadline
     ) {
       return report;
     }
@@ -120,6 +137,7 @@ export async function processNotifications(
         options.maxRecipients,
         options.maxRecipientAttempts - recipientAttempts,
       ),
+      deadline,
       now,
       random,
       due,
@@ -136,6 +154,7 @@ async function processEvent(
   db: D1Database,
   policy: NotificationPolicy,
   maxRecipients: number,
+  deadline: number,
   now: () => number,
   random: () => number,
   due: EventRow,
@@ -154,27 +173,22 @@ async function processEvent(
     retried: 0,
     recoveredLeases: 0,
   };
-  let event: NoticeEventInput;
-  try {
-    event = JSON.parse(due.payload);
-  } catch {
-    await db
+  const event = readEvent(due);
+  if (!event || (event.expiresAt !== null && event.expiresAt <= now())) {
+    const failed = await db
       .prepare(
-        "UPDATE notification_events SET status='failed',error=? WHERE id=?",
+        `UPDATE notification_events
+         SET status='failed',error=?,lease_token=NULL,lease_until=0
+         WHERE id=? AND lease_token=? AND lease_until>?`,
       )
-      .bind("Unparseable event payload", due.id)
-      .run();
-    report.failed += 1;
-    return 0;
-  }
-  if (event.expiresAt !== null && event.expiresAt <= now()) {
-    await db
-      .prepare(
-        "UPDATE notification_events SET status='failed',error=? WHERE id=?",
+      .bind(
+        event ? "Event expired before delivery" : "Invalid event payload",
+        due.id,
+        token,
+        now(),
       )
-      .bind("Event expired before delivery", due.id)
       .run();
-    report.failed += 1;
+    report.failed += failed.meta.changes ?? 0;
     return 0;
   }
   const delivered = new Set(
@@ -204,39 +218,57 @@ async function processEvent(
   const statements: D1PreparedStatement[] = [];
   const newDeliveries: string[] = [];
   const newWaits: number[] = [];
+  const clearedRetries: string[] = [];
+  const clearRetry = (recipient: string) => {
+    retries.delete(recipient);
+    clearedRetries.push(recipient);
+  };
   let usedAttempts = 0;
   let after: string | null = due.cursor;
   let exhausted = false;
-  let nextRetry: number | null = null;
-  for (;;) {
-    if (usedAttempts >= maxRecipients) break;
-    const page = await resolveAudienceRecipients(
-      db,
-      policy,
-      event,
-      after,
-      Math.min(100, maxRecipients - usedAttempts),
-    );
-    if (page.ids.length === 0) {
-      exhausted = page.nextCursor === null;
-      after = page.nextCursor;
-      if (exhausted) break;
-      continue;
+  let audienceRetryAt: number | null = null;
+  audience: while (usedAttempts < maxRecipients && now() < deadline) {
+    let page: RecipientPage;
+    try {
+      page = await resolveAudienceRecipients(
+        db,
+        policy,
+        event,
+        after,
+        Math.min(100, maxRecipients - usedAttempts),
+      );
+    } catch {
+      audienceRetryAt = now() + backoffMs(0, random);
+      local.retried += 1;
+      break;
+    }
+    if (retries.size) {
+      const recipients = new Set(page.ids);
+      // A missing recipient in the range covered by this page left the audience.
+      for (const [recipient, retry] of retries) {
+        if (
+          retry.status === "pending" &&
+          (after === null || recipient > after) &&
+          (page.nextCursor === null || recipient <= page.nextCursor) &&
+          !recipients.has(recipient)
+        )
+          clearRetry(recipient);
+      }
     }
     for (const recipient of page.ids) {
+      if (now() >= deadline) break audience;
+      after = recipient;
       usedAttempts += 1;
-      if (delivered.has(recipient)) continue;
-      if (event.actor.kind === "user" && event.actor.id === recipient) {
-        local.skipped += 1;
-        continue;
-      }
       const retry = retries.get(recipient);
-      if (retry?.status === "failed") continue;
-      if (retry && retry.next_retry > now()) {
-        const wait = retry.next_retry;
-        nextRetry = nextRetry === null ? wait : Math.min(nextRetry, wait);
+      const isSender =
+        event.actor.kind === "user" && event.actor.id === recipient;
+      if (delivered.has(recipient) || isSender) {
+        if (retry?.status === "pending") clearRetry(recipient);
+        if (isSender && !delivered.has(recipient)) local.skipped += 1;
         continue;
       }
+      if (retry?.status === "failed") continue;
+      if (retry && retry.next_retry > now()) continue;
       let readable = false;
       try {
         readable =
@@ -254,9 +286,11 @@ async function processEvent(
           error,
           local,
         );
+        retries.delete(recipient);
         if (wait !== null) newWaits.push(wait);
         continue;
       }
+      if (retry) clearRetry(recipient);
       if (!readable) {
         local.skipped += 1;
         continue;
@@ -276,15 +310,6 @@ async function processEvent(
             now(),
           ),
       );
-      if (retry) {
-        statements.push(
-          db
-            .prepare(
-              "DELETE FROM notification_recipient_retries WHERE event_id=? AND recipient_id=?",
-            )
-            .bind(due.id, recipient),
-        );
-      }
       delivered.add(recipient);
       newDeliveries.push(recipient);
       local.delivered += 1;
@@ -295,26 +320,34 @@ async function processEvent(
       break;
     }
   }
+  if (clearedRetries.length) {
+    statements.push(
+      db
+        .prepare(
+          `DELETE FROM notification_recipient_retries WHERE event_id=?
+         AND recipient_id IN (SELECT value FROM ${boundTextArrayRows(db)})`,
+        )
+        .bind(due.id, JSON.stringify(clearedRetries)),
+    );
+  }
   const pendingWaits: number[] = [...newWaits];
   for (const retry of retries.values()) {
-    if (retry.status === "pending" && retry.next_retry > now())
-      pendingWaits.push(retry.next_retry);
+    if (retry.status === "pending") pendingWaits.push(retry.next_retry);
   }
-  if (nextRetry !== null) pendingWaits.push(nextRetry);
   const done = exhausted && pendingWaits.length === 0;
+  const retryAt = done
+    ? 0
+    : (audienceRetryAt ?? (exhausted ? Math.min(...pendingWaits) : now()));
   statements.push(
     db
       .prepare(
-        `UPDATE notification_events SET status=?,cursor=?,next_retry=?,error=NULL,lease_token=NULL,lease_until=0 WHERE id=?`,
+        `UPDATE notification_events SET status=?,cursor=?,next_retry=?,error=?,lease_token=NULL,lease_until=0 WHERE id=?`,
       )
       .bind(
         done ? "completed" : "pending",
         after,
-        done
-          ? 0
-          : exhausted && pendingWaits.length
-            ? Math.min(...pendingWaits)
-            : now(),
+        retryAt,
+        audienceRetryAt === null ? null : "Audience lookup failed",
         due.id,
       ),
   );

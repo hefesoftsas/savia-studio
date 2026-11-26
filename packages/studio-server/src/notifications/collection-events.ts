@@ -8,6 +8,10 @@ export function workflowNoticeStatements(
   return new NotificationRepository(db).eventStatements(input);
 }
 
+export function workflowTaskNoticeKey(runId: string, nodeId: string): string {
+  return `workflow:${runId}:${nodeId}`;
+}
+
 export function workflowTaskNotice(
   db: D1Database,
   workspaceId: string,
@@ -21,7 +25,7 @@ export function workflowTaskNotice(
 ): D1PreparedStatement[] {
   const event: NoticeEventInput = {
     scope: { kind: "workspace", id: workspaceId },
-    key: `workflow:${runId}:${nodeId}`,
+    key: workflowTaskNoticeKey(runId, nodeId),
     actor: { kind: "workflow", id: runId },
     source: { kind: "workflow-task", id: taskId },
     title,

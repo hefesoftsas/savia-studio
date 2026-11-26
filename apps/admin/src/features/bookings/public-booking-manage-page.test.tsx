@@ -89,6 +89,37 @@ function renderManagePage(token = manageToken, children?: ReactNode) {
   );
 }
 
+it("offers the first replacement day and excludes the current instant across offset formats", async () => {
+  const reservation = confirmedReservation({
+    startsAt: "2026-10-05T09:00:00-05:00",
+  });
+  const availability = availabilityData();
+  availability.days.unshift({
+    date: "2026-10-05",
+    slots: [
+      { startsAt: "2026-10-05T14:00:00Z", endsAt: "2026-10-05T14:30:00Z" },
+    ],
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) =>
+      Response.json({
+        data: String(input).includes("/availability?")
+          ? availability
+          : manageData(reservation),
+      }),
+    ),
+  );
+  renderManagePage();
+  fireEvent.click(await screen.findByRole("button", { name: "Reschedule" }));
+  expect(await screen.findByRole("button", { name: "10:00 AM" })).toBeEnabled();
+  expect(
+    screen.getByRole("button", { name: /Monday, October 5/ }),
+  ).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "9:00 AM" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+});
+
 it("preserves the selected reschedule time when the language changes", async () => {
   function SwitchLanguage() {
     const setLocale = useSetLocale();

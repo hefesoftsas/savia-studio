@@ -163,6 +163,53 @@ describe("booking calendar adapter", () => {
     expect(nango.proxy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      zone: "America/Sao_Paulo",
+      start: "2018-11-04",
+      end: "2018-11-05",
+      busy: {
+        start: "2018-11-04T03:00:00.000Z",
+        end: "2018-11-05T02:00:00.000Z",
+      },
+    },
+    {
+      zone: "America/Havana",
+      start: "2026-11-01",
+      end: "2026-11-02",
+      busy: {
+        start: "2026-11-01T04:00:00.000Z",
+        end: "2026-11-02T05:00:00.000Z",
+      },
+    },
+  ])(
+    "reads Google all-day events across a midnight transition in $zone",
+    async ({ zone, start, end, busy }) => {
+      await seedConnection();
+      const nango = fakeNango(async () =>
+        Response.json({
+          timeZone: zone,
+          items: [
+            {
+              id: "all-day",
+              status: "confirmed",
+              start: { date: start },
+              end: { date: end },
+            },
+          ],
+        }),
+      );
+      await expect(
+        createBookingCalendarAdapter(env.DB, nango).busy({
+          ...calendarInput,
+          from: busy.start,
+          to: busy.end,
+          excludeExternalId: "own-booking",
+        }),
+      ).resolves.toEqual([busy]);
+    },
+  );
+
   it("fails closed on Google freeBusy calendar errors and malformed data", async () => {
     await seedConnection();
     const nango = fakeNango(async () =>
@@ -221,6 +268,34 @@ describe("booking calendar adapter", () => {
       start: "2026-03-01T00:00:00.000Z",
       end: "2026-03-02T00:00:00.000Z",
     });
+  });
+
+  it("ignores interval details for Outlook events that cannot block a booking", async () => {
+    await seedConnection("outlook");
+    const nango = fakeNango(async () =>
+      Response.json({
+        value: [
+          { isCancelled: true, showAs: "busy" },
+          { isCancelled: false, showAs: "free" },
+          {
+            id: "occupied",
+            isCancelled: false,
+            showAs: "busy",
+            start: { dateTime: "2026-03-01T09:00:00", timeZone: "UTC" },
+            end: { dateTime: "2026-03-01T10:00:00", timeZone: "UTC" },
+          },
+        ],
+      }),
+    );
+    await expect(
+      createBookingCalendarAdapter(env.DB, nango).busy({
+        ...calendarInput,
+        provider: "outlook",
+        excludeExternalId: "my-appointment",
+      }),
+    ).resolves.toEqual([
+      { start: "2026-03-01T09:00:00.000Z", end: "2026-03-01T10:00:00.000Z" },
+    ]);
   });
 
   it("treats partial Outlook busy items as unavailable", async () => {

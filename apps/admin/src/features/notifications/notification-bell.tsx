@@ -1,9 +1,7 @@
 import { useState } from "react";
 import { useTranslate } from "ra-core";
-import { useQueryClient } from "@tanstack/react-query";
-import { useSessionGeneration } from "@/auth/session-scope";
 import { useNavigate } from "react-router-dom";
-import { Bell } from "lucide-react";
+import { Bell, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -12,7 +10,6 @@ import {
 } from "@/components/ui/popover";
 import { notificationClient, type NotificationClient } from "./client";
 import { useUnreadNotifications } from "./queries";
-import { notificationReadKey } from "./queries";
 
 export function NotificationBell({
   client = notificationClient,
@@ -21,9 +18,8 @@ export function NotificationBell({
 }) {
   const [open, setOpen] = useState(false);
   const translate = useTranslate();
+  const t = (key: string) => translate(`savia.notificationInbox.${key}`);
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const sessionGeneration = useSessionGeneration();
   const unread = useUnreadNotifications(client);
   const count = typeof unread.data === "number" ? unread.data : 0;
 
@@ -32,12 +28,8 @@ export function NotificationBell({
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (!next) {
-          void queryClient.invalidateQueries({
-            queryKey: notificationReadKey(sessionGeneration, "unread-count"),
-            exact: true,
-          });
-        }
+        if (next && unread.isStale && unread.data !== undefined)
+          void unread.refetch({ cancelRefetch: false });
       }}
     >
       <PopoverTrigger asChild>
@@ -46,12 +38,8 @@ export function NotificationBell({
           variant="ghost"
           size="icon"
           className="relative size-11 sm:size-8"
-          aria-label={
-            count > 0
-              ? `${translate("savia.notificationInbox.title")} (${count})`
-              : translate("savia.notificationInbox.title")
-          }
-          title={translate("savia.notificationInbox.title")}
+          aria-label={count > 0 ? `${t("title")} (${count})` : t("title")}
+          title={t("title")}
         >
           <Bell aria-hidden="true" size={17} />
           {count > 0 && (
@@ -65,11 +53,24 @@ export function NotificationBell({
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80 p-2">
-        <p className="px-2 py-1 text-sm font-medium">
-          {count === 0
-            ? translate("savia.notificationInbox.noNew")
-            : translate("savia.notificationInbox.unread")}
+        <p className="px-2 py-1 text-sm font-medium" role="status">
+          {unread.data === undefined
+            ? t(unread.isError ? "countLoadError" : "loading")
+            : t(count === 0 ? "noNew" : "unread")}
         </p>
+        {unread.isError && unread.data === undefined && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="w-full justify-start max-sm:min-h-11"
+            disabled={unread.isFetching}
+            onClick={() => void unread.refetch()}
+          >
+            <RefreshCw aria-hidden="true" />
+            {t("retry")}
+          </Button>
+        )}
         <Button
           type="button"
           variant="ghost"
@@ -80,7 +81,7 @@ export function NotificationBell({
             navigate("/notifications");
           }}
         >
-          {translate("savia.notificationInbox.openInbox")}
+          {t("openInbox")}
         </Button>
       </PopoverContent>
     </Popover>

@@ -35,6 +35,13 @@ Open **Bookings** in the tenant navigation. Administrators use a five-step setup
 
 Each professional has weekly availability and date exceptions. An exception replaces that day's weekly periods; an empty exception closes the day. Periods cannot overlap or cross midnight. Administrators can configure all professionals. A professional can update their own availability without changing services or other professionals.
 
+When clocks change, the service and buffer must fit in the actual elapsed time
+before the period ends. Missing or repeated local start times are skipped.
+All-day Google calendar conflicts use the first instant of each local date,
+including when midnight is skipped or repeated.
+Outlook events marked free or cancelled are ignored before checking their
+time intervals.
+
 Use **Remove service** or **Remove professional** to remove an item from the draft. Removing a professional also clears their service assignments. Changes take effect only when saved; **Discard changes** restores the saved configuration. Existing reservations retain their history. **Save settings** keeps the chosen publication state, **Save draft** saves an unpublished configuration, and **Save and publish** enables and publishes it. A draft may have no services or professionals. Validation returns to the step that needs correction.
 
 Publish when booking is enabled and an enabled service has an enabled professional assigned. Save the configuration before opening the public page; the link is offered only for saved, enabled and published settings. The form explains missing publication requirements before submitting. If the API rejects a save, its HTTP status and reason are shown, with known booking validation messages translated. Network failures retain the connection recovery message. Open the **Booking links** tab to create **My booking link**, bound to your configured professional, or an explicit **Team agenda** link. Customers following a personal link never select a professional. A single eligible service opens availability directly; several services add a service step. The public flow is **Service, if needed → Availability → Your details**. Availability uses a visible month calendar and time buttons together, stacked on mobile. Unavailable days are disabled, month navigation respects the booking horizon, and no time is selected until the customer clicks it. The display time zone defaults to the tenant zone and can be changed; calendar dates, times, summary, and confirmation then use that zone while reservation timestamps remain UTC. Customers review their selection, provide their name and email, and complete the configured captcha before confirming. Going back preserves their details; changing a service or professional clears the previous time. Refreshed availability must still include the selected time before proceeding. Public pages bypass the authenticated app and its offline storage. Their HTML uses no-store, no-referrer and noindex headers, and booking navigation is excluded from the service worker fallback. Public catalogs contain names and opaque booking identifiers, never internal principal identifiers or customer lists.
@@ -46,12 +53,23 @@ New links default to a 30-day expiry and 25 admitted booking submissions per UTC
 Each link has independent revocation and deletion. Delete permanently removes the public link from the panel and invalidates its canonical and short URLs, including legacy team links; it does not delete reservations or their private management links. Personal links expose only enabled services assigned to their fixed professional; optional service-scoped links expose only that service. The server enforces this scope for the catalog, challenge, availability and reservation, including caller-submitted identifiers. Disabled professionals/services, removed membership, inactive tenants, expiry and unpublishing stop new bookings. Existing tenant-wide URLs remain team links and can be revoked or deleted through the same panel; they are never silently converted into personal links.
 
 Changing the display language on a public booking link keeps the selected time and contact details. A retry with the same booking details retains the original request key and confirmation language, including after edits that only change email capitalization or spaces around the contact details. Each public link keeps its own form and confirmation state.
+Refreshing availability also preserves the request key when the same start
+instant is returned with an equivalent offset.
+A successful retry shows the stored time and status, including changes or
+cancellation made after the initial request.
 
 When the form reloads its CAPTCHA after a language change or a return from the calendar, complete the new verification before submitting. If verification fails to load, **Retry verification** reloads the CAPTCHA and keeps the selected time and contact details.
 
 Returning from the review step refreshes availability for the selected month. If availability cannot be loaded, retry to check the previously selected time. The form only lets you continue once it confirms that the time is still available.
 
 The selected date and its available times use the booking display time zone, which you can change in the calendar.
+The last bookable date reflects the elapsed booking horizon in that time zone.
+Changing the zone also moves the visible month into the bookable range when
+needed.
+During rescheduling, the current appointment time is excluded. Dates with no
+other times are disabled.
+Submitting the current instant with an equivalent time-zone offset does not
+create a new reservation revision or delivery job.
 
 Changing the display language on a management link keeps the selected time and review step when rescheduling. An in-progress change stays scoped to the appointment opened by that management link.
 

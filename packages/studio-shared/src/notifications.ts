@@ -16,12 +16,18 @@ export const noticeAudienceSchema = z.discriminatedUnion('kind',[
  z.strictObject({kind:z.literal('workspace-members')}),
  z.strictObject({kind:z.literal('collection-followers'),collection:id}),
 ]);
-export const noticeEventSchema = z.strictObject({
+const noticeEventShape = {
  scope:noticeScopeSchema,key:id,actor:z.strictObject({kind:z.enum(['user','workflow','public-form','system']),id:id.nullable()}),
  source:noticeSourceSchema,title:z.string().trim().min(1).max(500),body:z.string().max(4000),
  audience:noticeAudienceSchema,createdAt:time,expiresAt:time.nullable(),
  requireAcknowledgement:z.boolean().optional(),
-}).superRefine((event,ctx)=>{
+};
+// Native collection triggers compose keys from several stored identifiers.
+export const storedNoticeEventSchema = z.object({
+ ...noticeEventShape,
+ key: z.string().min(1),
+});
+export const noticeEventSchema = z.strictObject(noticeEventShape).superRefine((event,ctx)=>{
  if(event.scope.kind==='account' && (event.audience.kind!=='explicit' || event.audience.principals.length!==1 || event.audience.principals[0]!==event.scope.id))
   ctx.addIssue({code:'custom',message:'Account notices belong only to their principal'});
  if(new TextEncoder().encode(JSON.stringify(event)).length>16384)
@@ -42,13 +48,15 @@ export type NoticeAudience=z.infer<typeof noticeAudienceSchema>;
 export type NoticeActor=NoticeEventInput['actor'];
 export type InboxQuery=z.input<typeof inboxQuerySchema>;
 export type NoticeActionState='none'|'pending'|'done'|'expired'|'unavailable';
-export type NoticeView={id:string;scope:NoticeScope;title:string;body:string;createdAt:number;readAt:number|null;archivedAt:number|null;source:NoticeSource;actionState:NoticeActionState};
+export type NoticeView={id:string;scope:NoticeScope;title:string;body:string;createdAt:number;readAt:number|null;archivedAt:number|null;source:NoticeSource | {kind:"unavailable";id?:never};actionState:NoticeActionState};
 export type InboxPage={items:NoticeView[];nextCursor:string|null;cutoff:string};
 export type DispatchOptions={now?:()=>number;random?:()=>number;workerId:string;maxEvents?:number;maxRecipients?:number;maxRecipientAttempts?:number;softBudgetMs?:number;leaseMs?:number};
 export type DispatchReport={claimed:number;delivered:number;skipped:number;failed:number;retried:number;recoveredLeases:number};
 export interface NotificationPolicy {
  canReadScope(principal:string,scope:NoticeScope):Promise<boolean>;
+ /** Source-specific checks run only after the dispatcher authorizes the scope. */
  canReadSource(principal:string,scope:NoticeScope,source:NoticeSource):Promise<boolean>;
  canSend(principal:string,scope:NoticeScope):Promise<boolean>;
+ /** Return IDs in JavaScript string order, using the last ID as the continuation cursor. */
  recipients(event:NoticeEventInput,after:string|null,limit:number):Promise<{ids:string[];nextCursor:string|null}>;
 }

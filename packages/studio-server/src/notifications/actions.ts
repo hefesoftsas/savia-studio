@@ -108,6 +108,7 @@ export async function resolveTaskNotice(
 ): Promise<void> {
   const notice = await loadNotice(db, principal, scopes, deliveryId);
   const resolution = await noticeAction(db, principal, notice);
+  if (resolution.kind === "task" && resolution.state === "done") return;
   if (
     resolution.kind === "task" &&
     resolution.state === "pending" &&

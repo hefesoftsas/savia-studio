@@ -57,12 +57,12 @@ function mountPage(pageToken = token, children?: ReactNode) {
   );
 }
 
-function availabilityResponse() {
+function availabilityResponse(availableSlot = slot) {
   return Response.json({
     data: {
       displayTimeZone: "America/Bogota",
       businessTimeZone: "America/Bogota",
-      days: [{ date: "2026-10-05", slots: [slot] }],
+      days: [{ date: "2026-10-05", slots: [availableSlot] }],
     },
   });
 }
@@ -200,12 +200,17 @@ it.each([false, true])(
     const posts: Array<{ headers: Headers; body: Record<string, unknown> }> =
       [];
     let failFirst = true;
+    let returnedOffsetFormat = false;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input), "https://savia.test");
         if (url.pathname.endsWith("/availability"))
-          return availabilityResponse();
+          return availabilityResponse(
+            returnedOffsetFormat
+              ? { ...slot, startsAt: slot.startsAt.replace(/Z$/, "+00:00") }
+              : slot,
+          );
         if (url.pathname.endsWith("/reservations")) {
           posts.push({
             headers: new Headers(init?.headers),
@@ -222,6 +227,7 @@ it.each([false, true])(
             data: {
               reservation: {
                 ...slot,
+                status: "confirmed",
                 conference: {
                   provider: "google_meet",
                   joinUrl: "https://meet.google.com/abc-defg-hij",
@@ -251,6 +257,11 @@ it.each([false, true])(
       "Retry with the same request",
     );
     if (editDetails) {
+      returnedOffsetFormat = true;
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      const next = screen.getByRole("button", { name: "Continue" });
+      await waitFor(() => expect(next).toBeEnabled());
+      fireEvent.click(next);
       fireEvent.change(screen.getByLabelText("Your name"), {
         target: { value: " Casey " },
       });
@@ -291,6 +302,61 @@ it.each([false, true])(
       }),
     );
     expect(posts[1].body.customerLocale).toBe("en");
+  },
+);
+
+it.each(["confirmed", "cancelled"] as const)(
+  "shows the current stored appointment after retrying a booking that is now %s",
+  async (status) => {
+    let attempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = new URL(String(input), "https://savia.test").pathname;
+        if (path.endsWith("/availability")) return availabilityResponse();
+        if (path.endsWith("/reservations")) {
+          if (++attempt === 1) return new Response(null, { status: 503 });
+          return Response.json({
+            data: {
+              reservation: {
+                startsAt: "2026-10-07T16:00:00Z",
+                endsAt: "2026-10-07T16:30:00Z",
+                status,
+                conference: {
+                  provider: "google_meet",
+                  joinUrl: "https://meet.google.com/abc-defg-hij",
+                  status: "ready",
+                },
+              },
+              managementUrl: "https://savia.test/manage/private-token",
+            },
+          });
+        }
+        return Response.json({
+          data: { ...catalog, captcha: { captchaProvider: "disabled" } },
+        });
+      }),
+    );
+    mountPage();
+    await chooseAvailability();
+    fireEvent.change(screen.getByLabelText("Your name"), {
+      target: { value: "Casey" },
+    });
+    fireEvent.change(screen.getByLabelText("Email"), {
+      target: { value: "casey@example.test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Book appointment" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Retry booking" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: `Appointment ${status}` }),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Wednesday, October 7, 2026.*11:00 AM/),
+    ).toBeVisible();
+    if (status === "cancelled")
+      expect(screen.queryByRole("link", { name: /Google Meet/ })).toBeNull();
   },
 );
 
@@ -342,7 +408,7 @@ it("shows no confirmation from a booking request made on a different public link
     finish(
       Response.json({
         data: {
-          reservation: slot,
+          reservation: { ...slot, status: "confirmed" },
           managementUrl: "https://savia.test/manage/previous-link",
         },
       }),
@@ -406,7 +472,7 @@ it.each([
                 );
           return Response.json({
             data: {
-              reservation: slot,
+              reservation: { ...slot, status: "confirmed" },
               managementUrl: "https://savia.test/manage/private-token",
             },
           });
@@ -542,7 +608,7 @@ it("retries CAPTCHA setup without losing the booking details or submitting early
   const book = vi.fn((_input?: RequestInit) =>
     Response.json({
       data: {
-        reservation: slot,
+        reservation: { ...slot, status: "confirmed" },
         managementUrl: "https://savia.test/manage/demo",
       },
     }),

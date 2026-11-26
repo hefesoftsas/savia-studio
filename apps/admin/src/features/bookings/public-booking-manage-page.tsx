@@ -290,6 +290,8 @@ function PublicBookingManagementLink({ token }: { token: string }) {
     if (
       !bootstrap?.canReschedule ||
       !selection ||
+      Date.parse(selection.slot.startsAt) ===
+        Date.parse(bootstrap.reservation.startsAt) ||
       busy ||
       !checkChangeDeadline()
     )
@@ -569,7 +571,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
                 onReadyChange={setSlotsReady}
                 refreshKey={availabilityRefreshKey}
                 hideHeading
-                excludedStartsAt={[reservation.startsAt]}
+                excludedStartAt={reservation.startsAt}
               />
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -588,7 +590,8 @@ function PublicBookingManagementLink({ token }: { token: string }) {
                   type="button"
                   disabled={
                     !selection ||
-                    selection.slot.startsAt === reservation.startsAt ||
+                    Date.parse(selection.slot.startsAt) ===
+                      Date.parse(reservation.startsAt) ||
                     !slotsReady ||
                     busy
                   }

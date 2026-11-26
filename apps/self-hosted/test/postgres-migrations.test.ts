@@ -1,6 +1,6 @@
 import { createPostgresPool, closePostgresPool } from "../src/postgres/pool";
 import { describe, expect, it } from "vitest";
-import { mkdtemp, writeFile, rm, unlink } from "node:fs/promises";
+import { copyFile, mkdtemp, writeFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
@@ -598,12 +598,25 @@ live("native baseline parity", () => {
 live("native migration compatibility", () => {
   it("repairs an already-applied Flows trigger migration with its old checksum", async () => {
     await withPostgresFixture(async (_db, connectionString) => {
-      await migratePostgres({
-        connectionString,
-        schema: "savia_core",
-        directory: coreDirectory,
-        seed: false,
-      });
+      const repair = "0063_savia_flows_reserved_alias.sql";
+      const legacyDirectory = await mkdtemp(join(tmpdir(), "savia-pg-legacy-"));
+      try {
+        await Promise.all(
+          readdirSync(coreDirectory)
+            .filter((file) => file.endsWith(".sql") && file < repair)
+            .map((file) =>
+              copyFile(join(coreDirectory, file), join(legacyDirectory, file)),
+            ),
+        );
+        await migratePostgres({
+          connectionString,
+          schema: "savia_core",
+          directory: legacyDirectory,
+          seed: false,
+        });
+      } finally {
+        await rm(legacyDirectory, { recursive: true, force: true });
+      }
       const pool = createPostgresPool({ connectionString });
       const client = await pool.connect();
       try {
@@ -631,9 +644,6 @@ live("native migration compatibility", () => {
             "0058_savia_flows_native_causation.sql",
           ],
         );
-        await client.query(
-          "DELETE FROM savia_core._savia_postgres_migrations WHERE filename='0063_savia_flows_reserved_alias.sql'",
-        );
       } finally {
         client.release();
         await closePostgresPool(pool);
@@ -646,7 +656,7 @@ live("native migration compatibility", () => {
           directory: coreDirectory,
           seed: false,
         }),
-      ).toContain("0063_savia_flows_reserved_alias.sql");
+      ).toContain(repair);
       const verify = createPostgresPool({ connectionString });
       try {
         const definition = await verify.query<{ definition: string }>(

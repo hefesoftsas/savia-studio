@@ -75,8 +75,8 @@ function PublicBookingLink({ token }: { token: string }) {
   const previousStepRef = useRef(step);
   const [busy, setBusy] = useState(false);
   const [reservation, setReservation] = useState<{
-    startsAt: string;
-    endsAt: string;
+    selection: BookingSelection;
+    status: "confirmed" | "cancelled";
     managementUrl: string;
     conference?: BookingConferenceState;
   }>();
@@ -234,7 +234,7 @@ function PublicBookingLink({ token }: { token: string }) {
     const signature = JSON.stringify({
       serviceId,
       professionalId,
-      startsAt: selection.slot.startsAt,
+      startsAt: Date.parse(body.startsAt),
       customerName: body.customerName,
       customerEmail: body.customerEmail,
     });
@@ -251,6 +251,7 @@ function PublicBookingLink({ token }: { token: string }) {
         reservation: {
           startsAt: string;
           endsAt: string;
+          status: "confirmed" | "cancelled";
           conference?: BookingConferenceState;
         };
         managementUrl: string;
@@ -266,7 +267,15 @@ function PublicBookingLink({ token }: { token: string }) {
         }),
       });
       setReservation({
-        ...result.reservation,
+        selection: {
+          ...selection,
+          slot: {
+            startsAt: result.reservation.startsAt,
+            endsAt: result.reservation.endsAt,
+          },
+        },
+        status: result.reservation.status,
+        conference: result.reservation.conference,
         managementUrl: result.managementUrl,
       });
     } catch (requestError) {
@@ -328,22 +337,33 @@ function PublicBookingLink({ token }: { token: string }) {
   if (reservation)
     return (
       <main className="mx-auto grid max-w-2xl gap-5 px-4 py-10">
-        <h1 className="text-2xl font-semibold">{t("Appointment confirmed")}</h1>
-        <PublicBookingSummary catalog={catalog} selection={selection} />
+        <h1 className="text-2xl font-semibold">
+          {reservation.status === "cancelled"
+            ? t("Appointment cancelled")
+            : t("Appointment confirmed")}
+        </h1>
+        <PublicBookingSummary
+          catalog={catalog}
+          selection={reservation.selection}
+        />
         <BookingConference
           conference={reservation.conference}
-          status="confirmed"
+          status={reservation.status}
           pendingAction="manage"
         />
         <a
           className="underline underline-offset-4"
           href={reservation.managementUrl}
         >
-          {t("Manage or cancel this appointment")}
+          {reservation.status === "cancelled"
+            ? t("View appointment")
+            : t("Manage or cancel this appointment")}
         </a>
-        <p className="text-sm text-muted-foreground">
-          {t("Cancellation cutoff (minutes)")}: {catalog.cancellationMinutes}
-        </p>
+        {reservation.status === "confirmed" && (
+          <p className="text-sm text-muted-foreground">
+            {t("Cancellation cutoff (minutes)")}: {catalog.cancellationMinutes}
+          </p>
+        )}
       </main>
     );
 

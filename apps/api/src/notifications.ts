@@ -6,6 +6,7 @@ import {
   type NotificationPolicy,
 } from "@savia/studio-shared/notifications";
 import { processNotifications } from "@savia/studio-server/notifications/dispatcher";
+import { dialectFor } from "@savia/db/dialect";
 import { maintainNotifications } from "@savia/studio-server/notifications/maintenance";
 import type { RealtimeHubClient } from "./realtime/hub-client";
 import { publishRealtime } from "./realtime/hub-client";
@@ -19,6 +20,7 @@ import {
 } from "./external-crm/hubspot-access";
 
 function pageAfter(ids: string[], after: string | null, limit: number) {
+  ids.sort();
   const start = after === null ? 0 : ids.findIndex((id) => id > after);
   const page = start < 0 ? [] : ids.slice(start, start + limit);
   const last = page[page.length - 1];
@@ -28,17 +30,25 @@ function pageAfter(ids: string[], after: string | null, limit: number) {
   };
 }
 
+async function readRecipientPage(
+  statement: D1PreparedStatement,
+  limit: number,
+) {
+  const { results } = await statement.all<{ principal_id: string }>();
+  const ids = results.slice(0, limit).map(({ principal_id }) => principal_id);
+  return {
+    ids,
+    nextCursor: results.length > limit ? (ids.at(-1) ?? null) : null,
+  };
+}
+
 async function actorFor(
   db: D1Database,
   principal: string,
 ): Promise<AppActor | null> {
-  try {
-    const row = await findPrincipal(db, principal);
-    if (!row || !row.isActive) return null;
-    return await loadActor(db, row);
-  } catch {
-    return null;
-  }
+  const row = await findPrincipal(db, principal);
+  if (!row || !row.isActive) return null;
+  return loadActor(db, row);
 }
 
 function agencyId(tenant: string): number | null {
@@ -47,100 +57,81 @@ function agencyId(tenant: string): number | null {
 }
 
 export function createNotificationPolicy(db: D1Database): NotificationPolicy {
+  // Principals have UUIDs. Use byte ordering explicitly so the SQL cursor
+  // compares them the same way as the dispatcher on either database.
+  const collation = dialectFor(db).name === "postgres" ? '"C"' : "BINARY";
   return {
     async recipients(event, after, limit) {
       if (event.audience.kind === "explicit") {
-        return pageAfter(
-          [...new Set(event.audience.principals)].sort(),
-          after,
-          limit,
-        );
+        return pageAfter([...new Set(event.audience.principals)], after, limit);
       }
       if (event.scope.kind === "account") return { ids: [], nextCursor: null };
       if (event.audience.kind === "workspace-members") {
         const tenantId = agencyId(event.scope.id);
         if (tenantId === null) return { ids: [], nextCursor: null };
-        const rows = (
-          await db
+        const principal = `m.principal_id COLLATE ${collation}`;
+        const cursorWhere = after === null ? "" : `AND ${principal}>?`;
+        return readRecipientPage(
+          db
             .prepare(
               `SELECT m.principal_id FROM identity_tenant_membership m
                JOIN identity_principal p ON p.id=m.principal_id
                WHERE m.tenant_id=? AND m.is_active=1 AND p.is_active=1
-               ORDER BY m.principal_id`,
+                 ${cursorWhere}
+               ORDER BY ${principal} LIMIT ?`,
             )
-            .bind(tenantId)
-            .all<{ principal_id: string }>()
-        ).results;
-        return pageAfter(
-          rows.map((row) => row.principal_id),
-          after,
+            .bind(tenantId, ...(after === null ? [] : [after]), limit + 1),
           limit,
         );
       }
-      const rows = (
-        await db
+      const principal = `principal_id COLLATE ${collation}`;
+      const cursorWhere = after === null ? "" : `AND ${principal}>?`;
+      return readRecipientPage(
+        db
           .prepare(
             `SELECT principal_id FROM notification_subscriptions
              WHERE workspace_id=? AND collection=?
-             ORDER BY principal_id`,
+               ${cursorWhere}
+             ORDER BY ${principal} LIMIT ?`,
           )
-          .bind(event.scope.id, event.audience.collection)
-          .all<{ principal_id: string }>()
-      ).results;
-      return pageAfter(
-        rows.map((row) => row.principal_id),
-        after,
+          .bind(
+            event.scope.id,
+            event.audience.collection,
+            ...(after === null ? [] : [after]),
+            limit + 1,
+          ),
         limit,
       );
     },
     async canReadScope(principal, scope) {
-      try {
-        if (scope.kind === "account") {
-          const row = await findPrincipal(db, principal);
-          return Boolean(row?.isActive) && principal === scope.id;
-        }
-        const actor = await actorFor(db, principal);
-        return actor !== null && canAccessSharedCrm(actor, scope.id);
-      } catch {
-        return false;
+      if (scope.kind === "account") {
+        if (principal !== scope.id) return false;
+        return Boolean((await findPrincipal(db, principal))?.isActive);
       }
+      const actor = await actorFor(db, principal);
+      return actor !== null && canAccessSharedCrm(actor, scope.id);
     },
     async canReadSource(principal, scope, source) {
-      let scopeOk = false;
-      try {
-        if (scope.kind === "account") {
-          scopeOk =
-            Boolean((await findPrincipal(db, principal))?.isActive) &&
-            principal === scope.id;
-        } else {
-          const actor = await actorFor(db, principal);
-          scopeOk = actor !== null && canAccessSharedCrm(actor, scope.id);
-        }
-        if (!scopeOk) return false;
-        if (source.kind === "record") {
-          const row = await db
-            .prepare(
-              "SELECT 1 AS ok FROM studio_objects WHERE tenant_id=? AND name=?",
-            )
-            .bind(scope.id, source.collection)
-            .first<number>("ok");
-          return row !== null;
-        }
-        if (source.kind === "workflow-task") {
-          if (scope.kind !== "workspace") return false;
-          const row = await db
-            .prepare(
-              "SELECT 1 AS ok FROM workflow_tasks WHERE workspace_id=? AND id=? AND assignee=?",
-            )
-            .bind(scope.id, source.id, principal)
-            .first<number>("ok");
-          return row !== null;
-        }
-        return true;
-      } catch (error) {
-        if (source.kind === "workflow-task") throw error;
-        return scopeOk;
+      if (source.kind === "record") {
+        const row = await db
+          .prepare(
+            "SELECT 1 AS ok FROM studio_objects WHERE tenant_id=? AND name=?",
+          )
+          .bind(scope.id, source.collection)
+          .first<number>("ok");
+        return row !== null;
       }
+      if (source.kind === "workflow-task") {
+        if (scope.kind !== "workspace") return false;
+        const row = await db
+          .prepare(
+            "SELECT 1 AS ok FROM workflow_tasks WHERE workspace_id=? AND id=? AND assignee=?",
+          )
+          .bind(scope.id, source.id, principal)
+          .first<number>("ok");
+        return row !== null;
+      }
+      return true;
     },
     async canSend(principal, scope) {
       try {

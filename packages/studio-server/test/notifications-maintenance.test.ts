@@ -38,7 +38,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await fixture.db.exec(
-    "DELETE FROM notification_recipient_retries; DELETE FROM notification_deliveries; DELETE FROM notification_events; DELETE FROM notification_scope_settings; DELETE FROM notification_maintenance_checkpoints;",
+    "DELETE FROM notification_recipient_retries; DELETE FROM notification_deliveries; DELETE FROM notification_events; DELETE FROM notification_scope_settings; DELETE FROM notification_maintenance_checkpoints; DELETE FROM workflow_tasks;",
   );
 });
 
@@ -93,8 +93,39 @@ it("retains unread longer than read and protects open tasks", async () => {
   expect(remaining.map((row) => row.recipient_id)).toEqual(["bob"]);
 });
 
-it("continues past protected deliveries and scopes open task protection to their workspace", async () => {
-  const workspace = "domain:open-task";
+it("preserves a delivery marked unread after the cleanup scan", async () => {
+  await seedDelivery("alice", now - 100 * dayMs, now - 99 * dayMs);
+  await seedDelivery("bob", now - 190 * dayMs, null);
+  const db = new Proxy(fixture.db, {
+    get(target, key, receiver) {
+      if (key !== "prepare") return Reflect.get(target, key, receiver);
+      return (sql: string) => {
+        const prepared = target.prepare(sql);
+        if (!sql.includes("AS open_task")) return prepared;
+        return {
+          bind: (...values: unknown[]) => ({
+            async all() {
+              const result = await prepared.bind(...values).all();
+              await target
+                .prepare(
+                  "UPDATE notification_deliveries SET read_at=NULL WHERE recipient_id='alice'",
+                )
+                .run();
+              return result;
+            },
+          }),
+        };
+      };
+    },
+  });
+  expect((await maintainNotifications(db, now, 100)).cleanedDeliveries).toBe(1);
+  const remaining = await fixture.db
+    .prepare("SELECT recipient_id,read_at FROM notification_deliveries")
+    .all();
+  expect(remaining.results).toEqual([{ recipient_id: "alice", read_at: null }]);
+});
+
+async function seedOpenTask(workspace: string) {
   await fixture.db.batch([
     fixture.db
       .prepare(
@@ -117,6 +148,12 @@ it("continues past protected deliveries and scopes open task protection to their
       )
       .bind(workspace),
   ]);
+}
+
+it("continues past protected deliveries and scopes open task protection to their workspace", async () => {
+  const workspace = "domain:open-task";
+  await seedOpenTask(workspace);
+  await seedOpenTask("domain:unreferenced-task");
   const repo = new NotificationRepository(fixture.db);
   for (const [index, scope] of [workspace, tenant].entries()) {
     const createdAt = now - (190 - index) * dayMs;
@@ -138,9 +175,29 @@ it("continues past protected deliveries and scopes open task protection to their
       .bind(`delivery-${index}`, id, scope, createdAt)
       .run();
   }
-  expect(
-    (await maintainNotifications(fixture.db, now, 1)).cleanedDeliveries,
-  ).toBe(0);
+  const taskReadSizes: number[] = [];
+  const db = new Proxy(fixture.db, {
+    get(target, key, receiver) {
+      if (key !== "prepare") return Reflect.get(target, key, receiver);
+      return (sql: string) => {
+        const prepared = target.prepare(sql);
+        if (!sql.includes("workflow_tasks")) return prepared;
+        const watch = (statement: D1PreparedStatement) => ({
+          async all() {
+            const result = await statement.all();
+            taskReadSizes.push(result.results.length);
+            return result;
+          },
+        });
+        return {
+          ...watch(prepared),
+          bind: (...values: unknown[]) => watch(prepared.bind(...values)),
+        };
+      };
+    },
+  });
+  expect((await maintainNotifications(db, now, 1)).cleanedDeliveries).toBe(0);
+  expect(taskReadSizes).toEqual([1]);
   expect(
     (await maintainNotifications(fixture.db, now, 1)).cleanedDeliveries,
   ).toBe(1);
@@ -148,6 +205,56 @@ it("continues past protected deliveries and scopes open task protection to their
     .prepare("SELECT id FROM notification_deliveries")
     .all();
   expect(remaining.results).toEqual([{ id: "delivery-0" }]);
+});
+
+it("cleans orphaned events even when earlier events have retry records", async () => {
+  const repo = new NotificationRepository(fixture.db);
+  const eventIds = [];
+  for (const [index, status] of [
+    "completed",
+    "failed",
+    "completed",
+    "pending",
+  ].entries()) {
+    const { id } = await repo.accept({
+      scope: { kind: "workspace", id: tenant },
+      key: `retention-event-${index}`,
+      actor: { kind: "user", id: "admin" },
+      source: { kind: "admin-message", id: `retention-message-${index}` },
+      title: "Retention notice",
+      body: "",
+      audience: { kind: "explicit", principals: ["alice"] },
+      createdAt: now - (200 - index) * dayMs,
+      expiresAt: null,
+    });
+    eventIds.push(id);
+    await fixture.db
+      .prepare("UPDATE notification_events SET status=? WHERE id=?")
+      .bind(status, id)
+      .run();
+  }
+  for (const [index, status] of ["failed", "pending"].entries()) {
+    await fixture.db
+      .prepare(
+        "INSERT INTO notification_recipient_retries(event_id,recipient_id,next_retry,error,status) VALUES(?,'alice',?,'Delivery unavailable',?)",
+      )
+      .bind(eventIds[index], now, status)
+      .run();
+  }
+
+  expect((await maintainNotifications(fixture.db, now, 1)).cleanedEvents).toBe(
+    1,
+  );
+  const remainingEvents = await fixture.db
+    .prepare("SELECT id FROM notification_events ORDER BY created_at")
+    .all();
+  expect(remainingEvents.results).toEqual(
+    [eventIds[0], eventIds[1], eventIds[3]].map((id) => ({ id })),
+  );
+  const retries = await fixture.db
+    .prepare("SELECT COUNT(*) AS total FROM notification_recipient_retries")
+    .first<number>("total");
+  expect(retries).toBe(2);
 });
 
 it("backfills open workflow tasks resumably without duplicating live capture", async () => {
@@ -168,9 +275,17 @@ it("backfills open workflow tasks resumably without duplicating live capture", a
   await repo.start(draft.id, {}, "owner", `backfill-${now}`);
   const { processWorkflows } = await import("../src/workflows/runtime");
   await processWorkflows(fixture.db, async () => true, { now });
+  const live = await fixture.db
+    .prepare("SELECT id FROM notification_events")
+    .all();
+  expect(live.results).toHaveLength(1);
   const first = await backfillWorkflowNotices(fixture.db, null, 100);
-  expect(first.backfilled).toBeGreaterThanOrEqual(1);
+  expect(first.backfilled).toBe(0);
   expect(first.cursor).not.toBeNull();
+  expect(
+    (await fixture.db.prepare("SELECT id FROM notification_events").all())
+      .results,
+  ).toEqual(live.results);
   const second = await backfillWorkflowNotices(fixture.db, null, 100);
   expect(second.backfilled).toBe(0);
   const resumed = await backfillWorkflowNotices(fixture.db, first.cursor, 100);
@@ -182,4 +297,47 @@ it("backfills open workflow tasks resumably without duplicating live capture", a
     .bind()
     .first<{ cursor: string }>();
   expect(checkpoint?.cursor).toBe(first.cursor);
+});
+
+it("resumes a legacy checkpoint without skipping tasks that share an ID", async () => {
+  const workspaces = ["domain:backfill-one", "domain:backfill-two"];
+  for (const workspace of workspaces) await seedOpenTask(workspace);
+  const repo = new NotificationRepository(fixture.db);
+  await repo.accept({
+    scope: { kind: "workspace", id: workspaces[0]! },
+    key: "workflow:backfill:shared-task",
+    actor: { kind: "system", id: null },
+    source: { kind: "workflow-task", id: "shared-task" },
+    title: "Open task",
+    body: "",
+    audience: { kind: "explicit", principals: ["alice"] },
+    createdAt: now,
+    expiresAt: null,
+  });
+  await fixture.db
+    .prepare(
+      "INSERT INTO notification_maintenance_checkpoints(name,cursor) VALUES ('backfill','shared-task')",
+    )
+    .run();
+
+  const first = await backfillWorkflowNotices(fixture.db, "shared-task", 1);
+  expect(first.backfilled).toBe(0);
+  expect(first.cursor).not.toBe("shared-task");
+  const second = await backfillWorkflowNotices(fixture.db, first.cursor, 1);
+  expect(second.backfilled).toBe(1);
+  const events = await fixture.db
+    .prepare(
+      "SELECT scope_id,event_key FROM notification_events ORDER BY scope_id",
+    )
+    .all();
+  expect(events.results).toEqual([
+    { scope_id: workspaces[0], event_key: "workflow:backfill:shared-task" },
+    { scope_id: workspaces[1], event_key: "workflow:retention-run:task" },
+  ]);
+  const checkpoint = await fixture.db
+    .prepare(
+      "SELECT cursor FROM notification_maintenance_checkpoints WHERE name='backfill'",
+    )
+    .first<string>("cursor");
+  expect(checkpoint).toBe(second.cursor);
 });

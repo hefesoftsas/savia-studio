@@ -63,6 +63,63 @@ it("uses date exceptions and requires the service plus buffer to fit working hou
     9,
   );
 });
+it("offers unambiguous starts when the appointment fits in the extra hour after clocks roll back", () => {
+  const settings = {
+    ...defaultSettings("Appointments"),
+    timeZone: "America/New_York",
+    leadMinutes: 0,
+    horizonDays: 10,
+  };
+  const professional = {
+    id: crypto.randomUUID(),
+    principalId: "user",
+    enabled: true,
+    weekly: [{ day: 0, start: "00:00", end: "02:00" }],
+    exceptions: [],
+  };
+  const service = {
+    id: crypto.randomUUID(),
+    name: "Consultation",
+    description: "",
+    durationMinutes: 120,
+    bufferMinutes: 30,
+    enabled: true,
+    professionalIds: [professional.id],
+  };
+  const slots = slotsForDate(
+    settings,
+    professional,
+    service,
+    "2026-11-01",
+    [],
+    Date.parse("2026-10-31T12:00:00Z"),
+  );
+  expect(slots).toEqual([
+    {
+      startsAt: "2026-11-01T04:00:00.000Z",
+      endsAt: "2026-11-01T06:00:00.000Z",
+    },
+    {
+      startsAt: "2026-11-01T04:15:00.000Z",
+      endsAt: "2026-11-01T06:15:00.000Z",
+    },
+    {
+      startsAt: "2026-11-01T04:30:00.000Z",
+      endsAt: "2026-11-01T06:30:00.000Z",
+    },
+  ]);
+  expect(
+    slotsForDate(
+      settings,
+      { ...professional, weekly: [{ day: 0, start: "00:00", end: "03:00" }] },
+      service,
+      "2026-03-08",
+      [],
+      Date.parse("2026-03-07T12:00:00Z"),
+    ),
+  ).toEqual([]);
+});
+
 it("rejects duplicate professionals and overlapping working periods", () => {
   const pro = {
     id: crypto.randomUUID(),

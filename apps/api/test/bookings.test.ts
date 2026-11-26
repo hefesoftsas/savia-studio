@@ -1380,6 +1380,46 @@ it.each(["workspace", "management"])(
   },
 );
 
+it("treats equivalent timestamp formats as the same reservation time", async () => {
+  const f = await fixture();
+  const created = await f.reserve();
+  expect(created.status).toBe(201);
+  const { data } = (await created.json()) as {
+    data: {
+      managementUrl: string;
+      reservation: { id: string; version: number };
+    };
+  };
+  const legacyTime = f.payload.startsAt.replace(/Z$/, "+00:00");
+  await env.DB.prepare("UPDATE tenant_bookings SET starts_at=? WHERE id=?")
+    .bind(legacyTime, data.reservation.id)
+    .run();
+  const listJobs = () =>
+    env.DB.prepare(
+      "SELECT revision,kind FROM tenant_booking_jobs WHERE booking_id=? ORDER BY revision,kind",
+    )
+      .bind(data.reservation.id)
+      .all();
+  const jobs = (await listJobs()).results;
+  const manage = new URL(data.managementUrl).pathname.replace(
+    "/public/",
+    "/api/public/",
+  );
+  const response = await f.app.request(`${manage}/reschedule`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      version: data.reservation.version,
+      startsAt: f.payload.startsAt,
+    }),
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    data: { startsAt: legacyTime, version: data.reservation.version },
+  });
+  expect((await listJobs()).results).toEqual(jobs);
+});
+
 it("reschedules atomically and preserves old occupancy when the new slot conflicts", async () => {
   const f = await fixture(),
     first = ((await (await f.reserve()).json()) as any).data;
