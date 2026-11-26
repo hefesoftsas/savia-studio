@@ -31,7 +31,7 @@ jobs:
       should_scan: ${{ steps.plan.outputs.should_scan }}
     steps:
       - name: Check out trusted selection code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
@@ -59,7 +59,7 @@ jobs:
         language: ${{ fromJSON(needs.changes.outputs.languages) }}
     steps:
       - name: Check out source for analysis
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           persist-credentials: false
 
