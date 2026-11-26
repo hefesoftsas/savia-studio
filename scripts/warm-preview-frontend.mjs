@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { appendFile } from "node:fs/promises";
+import { appendFile, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { stagePreviewFrontendArtifact } from "../infra/pulumi/preview-frontend-artifacts.mjs";
 import { validateDeploymentUrl } from "./configure-plugin-editor-preview.mjs";
@@ -23,12 +24,29 @@ try {
   )
     throw new Error("Exact main push required");
 
-  const needed = await needsPreviewFrontendBuild({
-    base: env.PREVIEW_PUSH_BASE,
-    head: revision,
-    cwd: root,
-    run,
-  });
+  const hostedRevision = env.SAVIA_PREVIEW_HOSTED_FRONTEND_REVISION;
+  let hostedFrontend = false;
+  if (/^[a-f0-9]{40}$/.test(hostedRevision ?? "")) {
+    const pin = await readFile(
+      join(root, "deployment/hosted-plugins.json"),
+      "utf8",
+    )
+      .then(JSON.parse)
+      .catch(() => null);
+    hostedFrontend = pin?.revision === hostedRevision;
+  }
+  if (hostedFrontend)
+    console.log(
+      "Skipping standalone frontend warmup for the verified hosted plugin revision.",
+    );
+  const needed =
+    !hostedFrontend &&
+    (await needsPreviewFrontendBuild({
+      base: env.PREVIEW_PUSH_BASE,
+      head: revision,
+      cwd: root,
+      run,
+    }));
   if (directory === "--plan") {
     await appendFile(env.GITHUB_OUTPUT, `needed=${needed}\n`);
   } else if (!needed) {
