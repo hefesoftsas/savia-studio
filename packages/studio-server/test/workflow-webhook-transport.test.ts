@@ -1,5 +1,27 @@
+import { isDnsOverHttpsRequest } from "./fixtures/is-dns-over-https";
 import { it, expect } from "vitest";
 import { sendWorkflowWebhook } from "../src/workflows/webhook-transport";
+it("matches only the configured DNS-over-HTTPS endpoint", () => {
+  expect(
+    isDnsOverHttpsRequest(
+      "https://cloudflare-dns.com/dns-query?name=example.com",
+    ),
+  ).toBe(true);
+  expect(
+    isDnsOverHttpsRequest(new Request("https://cloudflare-dns.com/dns-query")),
+  ).toBe(true);
+  expect(
+    isDnsOverHttpsRequest(
+      "https://cloudflare-dns.com.docs.example.test/dns-query",
+    ),
+  ).toBe(false);
+  expect(isDnsOverHttpsRequest("http://cloudflare-dns.com/dns-query")).toBe(
+    false,
+  );
+  expect(
+    isDnsOverHttpsRequest("https://cloudflare-dns.com/not-dns-query"),
+  ).toBe(false);
+});
 const input = {
   url: "https://hooks.hefesoft.com/events",
   authType: "bearer" as const,
@@ -15,7 +37,7 @@ function transport(
   address = "93.184.216.34",
 ): typeof fetch {
   return (async (url: RequestInfo | URL, init?: RequestInit) => {
-    if (String(url).includes("cloudflare-dns.com"))
+    if (isDnsOverHttpsRequest(url))
       return Response.json({ Status: 0, Answer: [{ type: 1, data: address }] });
     requests.push(new Request(url, init));
     return response();

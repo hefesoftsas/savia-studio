@@ -18,6 +18,7 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { PublicFormPage } from "./public-form-page";
 
+const apiOrigin = "https://api.example.test";
 const definition = {
   id: "form-id",
   title: "Solicita información",
@@ -43,6 +44,7 @@ const remove = vi.fn();
 let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   widget = undefined;
+  vi.stubEnv("VITE_SAVIA_API_URL", apiOrigin);
   fetchMock = vi
     .fn()
     .mockResolvedValue(new Response(JSON.stringify(definition)));
@@ -59,6 +61,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -100,7 +103,7 @@ it("uses only the anonymous definition and requires captcha before posting allow
   expect(await screen.findByText("received-123")).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledTimes(2);
   for (const [url, init] of fetchMock.mock.calls) {
-    expect(String(url)).toContain("/api/public/forms/public-token");
+    expect(url).toBe(`${apiOrigin}/api/public/forms/public-token`);
     expect(init.credentials).toBe("omit");
   }
   const payload = JSON.parse(fetchMock.mock.calls[1][1].body);
@@ -392,6 +395,7 @@ it("accepts an explicit false answer for a required boolean", async () => {
 });
 
 it("uses the bundled self-hosted challenge and keeps the solved proof for an uncertain retry", async () => {
+  const endpoint = `${apiOrigin}/api/public/forms/self-hosted-token`;
   if (!customElements.get("altcha-widget")) {
     customElements.define(
       "altcha-widget",
@@ -419,9 +423,7 @@ it("uses the bundled self-hosted challenge and keeps the solved proof for an unc
     expect(value).not.toBeNull();
     return value!;
   });
-  expect(element.getAttribute("challenge")).toContain(
-    "/api/public/forms/self-hosted-token/challenge",
-  );
+  expect(element.getAttribute("challenge")).toBe(`${endpoint}/challenge`);
   expect(window.turnstile?.render).not.toHaveBeenCalled();
   act(() =>
     element.dispatchEvent(
@@ -447,10 +449,12 @@ it("uses the bundled self-hosted challenge and keeps the solved proof for an unc
   expect(await screen.findByText("self-hosted-receipt")).toBeInTheDocument();
   expect(fetchMock.mock.calls[2][1].body).toBe(fetchMock.mock.calls[1][1].body);
   expect(
-    fetchMock.mock.calls.every(
-      ([url]) => !String(url).includes("cloudflare.com"),
-    ),
-  ).toBe(true);
+    fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"]),
+  ).toEqual([
+    [endpoint, "GET"],
+    [endpoint, "POST"],
+    [endpoint, "POST"],
+  ]);
 });
 
 function render(ui: ReactElement) {
@@ -500,6 +504,7 @@ it("selects the public quote wizard for quote definitions with a presentation de
   expect(screen.queryByLabelText(/Nombre/)).not.toBeInTheDocument();
 });
 it("submits without a captcha widget when verification is disabled locally", async () => {
+  const endpoint = `${apiOrigin}/api/public/forms/local-token`;
   fetchMock.mockResolvedValueOnce(
     new Response(
       JSON.stringify({
@@ -527,10 +532,11 @@ it("submits without a captcha widget when verification is disabled locally", asy
   const payload = JSON.parse(fetchMock.mock.calls[1][1].body);
   expect(payload.token).toBe("local-bypass");
   expect(
-    fetchMock.mock.calls.every(
-      ([url]) => !String(url).includes("cloudflare.com"),
-    ),
-  ).toBe(true);
+    fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"]),
+  ).toEqual([
+    [endpoint, "GET"],
+    [endpoint, "POST"],
+  ]);
 });
 it("explains provider failures with the quote-specific message", async () => {
   render(<PublicFormPage token="public-token" />);
