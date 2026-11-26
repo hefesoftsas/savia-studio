@@ -84,6 +84,16 @@ type ChatMessage = {
   usage?: { input: number; output: number };
 };
 type Proposal = { message: string; files: IdeFiles };
+type ExtensionTransition = {
+  draftReferences: ProjectEditorExtensionReference[];
+  pending: Set<string>;
+  next: ProjectEditorExtensionReference[];
+  applied: boolean;
+  settled: Promise<void>;
+  cancelReason?: Error;
+  resolve(): void;
+  reject(error: Error): void;
+};
 type Preview = {
   document: string;
   session: string;
@@ -126,7 +136,7 @@ export default function PluginIde({
   initialEditorExtensions?: string[];
   onDraftChange?: (draft: ProjectDraft) => void;
   canPublishShared?: boolean;
-  onClose: () => void;
+  onClose: () => void | Promise<void>;
   onPublished: () => void | Promise<unknown>;
 }) {
   const t = useMessages(pluginIdeMessages);
@@ -155,14 +165,7 @@ export default function PluginIde({
   const [activationErrors, setActivationErrors] = useState<
     Record<string, string>
   >({});
-  const extensionRollback = useRef<{
-    previous: ProjectEditorExtensionReference[];
-    pending: Set<string>;
-    next: ProjectEditorExtensionReference[];
-    applied: boolean;
-    resolve(): void;
-    reject(error: Error): void;
-  } | null>(null);
+  const extensionRollback = useRef<ExtensionTransition | null>(null);
   const runtimeAvailable = !!resolvePluginEditorRuntimeUrl(
     import.meta.env.VITE_PLUGIN_EDITOR_RUNTIME_URL,
     location.origin,
@@ -226,6 +229,15 @@ export default function PluginIde({
     }),
     [files, originalArchive, originalFiles],
   );
+  const editorFiles = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(searchableFiles).filter(
+          ([name]) => !/\.(?:png|webp|jpg|jpeg|gif|b64|base64)$/i.test(name),
+        ),
+      ),
+    [searchableFiles],
+  );
   const [selectedOriginal, setSelectedOriginal] = useState<string | null>(
     () =>
       Object.keys(originalFiles).find((name) =>
@@ -246,7 +258,7 @@ export default function PluginIde({
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [undo, setUndo] = useState<IdeFiles | null>(null);
   const [busy, setBusy] = useState<
-    "compile" | "publish" | "activate" | "import" | null
+    "compile" | "publish" | "activate" | "import" | "close" | null
   >(null);
   const [generating, setGenerating] = useState(false);
   const [streamingMessage, setStreamingMessage] = useState("");
@@ -293,7 +305,8 @@ export default function PluginIde({
     draftCallback.current?.({
       files,
       editorExtensions,
-      installedEditorExtensions,
+      installedEditorExtensions:
+        extensionRollback.current?.draftReferences ?? installedEditorExtensions,
       history: history.slice(-10).map((item) => ({
         role: item.role,
         content: item.content.slice(0, 4000),
@@ -340,50 +353,73 @@ export default function PluginIde({
     };
     // Set the transition before persistence so concurrent actions cannot replace it.
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let resolveApplied!: () => void;
+    let rejectApplied!: (error: Error) => void;
+    let markSettled!: () => void;
     const applied = new Promise<void>((resolve, reject) => {
-      extensionRollback.current = {
-        previous,
-        next,
-        applied: false,
-        pending: new Set(
-          next
-            .filter(
-              (ref) =>
-                !previous.some(
-                  (old) => old.installationId === ref.installationId,
-                ),
-            )
-            .map((ref) => ref.installationId),
-        ),
-        resolve,
-        reject,
-      };
-      timer = setTimeout(
-        () => reject(new Error("Extension synchronization timed out.")),
-        120000,
-      );
+      resolveApplied = resolve;
+      rejectApplied = reject;
     });
+    const settled = new Promise<void>((resolve) => {
+      markSettled = resolve;
+    });
+    const transition: ExtensionTransition = {
+      draftReferences: next,
+      next,
+      applied: false,
+      settled,
+      pending: new Set(
+        next
+          .filter(
+            (ref) =>
+              !previous.some(
+                (old) =>
+                  old.installationId === ref.installationId &&
+                  old.sha256 === ref.sha256,
+              ),
+          )
+          .map((ref) => ref.installationId),
+      ),
+      resolve: resolveApplied,
+      reject: rejectApplied,
+    };
+    extensionRollback.current = transition;
     // Avoid an unhandled rejection while the backend save is pending.
     void applied.catch(() => {});
     try {
       await onInstalledExtensionsChange(draft);
       if (!extensionSessionActive.current)
         throw new Error("Editor session ended.");
+      if (transition.cancelReason) throw transition.cancelReason;
+      timer = setTimeout(
+        () =>
+          transition.reject(new Error("Extension synchronization timed out.")),
+        120000,
+      );
       setInstalledEditorExtensions(next);
       setExtensionsStarted(true);
       await applied;
     } catch (error) {
       if (extensionSessionActive.current) {
-        await onInstalledExtensionsChange({
-          ...latestExtensionDraft.current,
-          installedEditorExtensions: previous,
-        });
+        transition.draftReferences = previous;
         setInstalledEditorExtensions(previous);
+        try {
+          await onInstalledExtensionsChange({
+            ...latestExtensionDraft.current,
+            installedEditorExtensions: previous,
+          });
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            `${message(error)} ${t("extensionRestoreSaveFailed")}`,
+          );
+        }
       }
       throw error;
     } finally {
       if (timer) clearTimeout(timer);
       extensionRollback.current = null;
+      markSettled();
     }
   }
   function finishExtensionTransition() {
@@ -393,6 +429,31 @@ export default function PluginIde({
 
   const snapshot = JSON.stringify(files);
   const savedSnapshot = useRef(snapshot);
+  async function closeProject() {
+    if (
+      !onDraftChange &&
+      snapshot !== savedSnapshot.current &&
+      !window.confirm(t("discardConfirm"))
+    )
+      return;
+    const transition = extensionRollback.current;
+    if (transition?.cancelReason) return;
+    setBusy("close");
+    try {
+      if (transition) {
+        transition.cancelReason = new Error(
+          t("extensionChangeCancelledOnClose"),
+        );
+        transition.reject(transition.cancelReason);
+        await transition.settled;
+      }
+      if (extensionSessionActive.current) await onClose();
+    } catch (error) {
+      if (extensionSessionActive.current) setError(message(error));
+    } finally {
+      if (extensionSessionActive.current) setBusy(null);
+    }
+  }
   const currentSnapshot = useRef(snapshot);
   currentSnapshot.current = snapshot;
   const surface = useRef<HTMLElement>(null);
@@ -1007,14 +1068,7 @@ export default function PluginIde({
             size="icon"
             aria-label={backLabel ?? t("back")}
             disabled={locked}
-            onClick={() => {
-              if (
-                onDraftChange ||
-                snapshot === savedSnapshot.current ||
-                window.confirm(t("discardConfirm"))
-              )
-                onClose();
-            }}
+            onClick={() => void closeProject()}
           >
             <ArrowLeft aria-hidden="true" />
           </Button>
@@ -1468,22 +1522,7 @@ export default function PluginIde({
                     <PluginVscodeEditor
                       projectId={projectId}
                       installedExtensions={installedEditorExtensions}
-                      loadInstalledExtension={async (reference) => {
-                        const installations = await extensionClient.list();
-                        const installation = installations.find(
-                          (item) =>
-                            item.installationId === reference.installationId &&
-                            item.sha256 === reference.sha256,
-                        );
-                        if (!installation)
-                          throw new Error(
-                            "Installed extension is unavailable.",
-                          );
-                        const bytes = await extensionClient.downloadPackage(
-                          reference.installationId,
-                        );
-                        return { installation, bytes };
-                      }}
+                      extensionSource={extensionClient}
                       onExtensionStatus={(id, error) => {
                         setActivationErrors((current) => {
                           const next = { ...current };
@@ -1512,14 +1551,7 @@ export default function PluginIde({
                           finishExtensionTransition();
                         }
                       }}
-                      files={Object.fromEntries(
-                        Object.entries(searchableFiles).filter(
-                          ([name]) =>
-                            !/\.(?:png|webp|jpg|jpeg|gif|b64|base64)$/i.test(
-                              name,
-                            ),
-                        ),
-                      )}
+                      files={editorFiles}
                       activeFile={activeFile}
                       formatRequest={formatRequest}
                       extensions={editorExtensions}

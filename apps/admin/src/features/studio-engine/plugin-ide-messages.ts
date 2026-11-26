@@ -49,6 +49,16 @@ export const pluginIdeMessages = {
   jsonLanguage: ["JSON", "JSON", "JSON"],
   formatDocument: ["Formatear", "Format", "Formatar"],
   editorExtensions: ["Extensiones", "Extensions", "Extensões"],
+  extensionRestoreSaveFailed: [
+    "La configuración anterior de extensiones sigue pendiente de guardar.",
+    "The previous extension settings still need to be saved.",
+    "As configurações anteriores das extensões ainda precisam ser salvas.",
+  ],
+  extensionChangeCancelledOnClose: [
+    "El cambio de extensiones se canceló al salir del proyecto.",
+    "The extension change was cancelled when closing the project.",
+    "A alteração das extensões foi cancelada ao fechar o projeto.",
+  ],
   search: ["Buscar", "Search", "Buscar"],
   searchCode: ["Buscar en el código", "Search code", "Buscar no código"],
   searchPlaceholder: [

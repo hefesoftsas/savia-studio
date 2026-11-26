@@ -2,9 +2,17 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import type { InstalledEditorExtension } from "@savia/studio-shared/plugin-editor-extensions";
 import { render } from "./locale-test-render";
 import PluginIde from "../plugin-ide";
+import { PluginEditorExtensionClient } from "../plugin-editor-extension-client";
 
 it("opens VS Code setup guidance without closing the current draft", async () => {
   const onClose = vi.fn();
@@ -31,14 +39,15 @@ const mocks = vi.hoisted(() => ({
   compile: vi.fn(),
   pack: vi.fn(),
 }));
-vi.mock("@/features/assistant/assistant-context", () => ({
-  useAppServices: () => ({
+vi.mock("@/features/assistant/assistant-context", () => {
+  const services = {
     apiClient: {
       post: mocks.post,
       requestResponse: mocks.requestResponse,
     },
-  }),
-}));
+  };
+  return { useAppServices: () => services };
+});
 
 function sseResponse(frames: unknown[], status = 200) {
   const text = frames
@@ -141,8 +150,198 @@ vi.mock("../plugin-ide-preview", () => ({
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   vi.resetAllMocks();
 });
+
+function mockInstalledExtension() {
+  vi.stubEnv(
+    "VITE_PLUGIN_EDITOR_RUNTIME_URL",
+    "https://editor.example.test/plugin-editor",
+  );
+  const installation: InstalledEditorExtension = {
+    id: "acme.snippets",
+    publisher: "acme",
+    name: "snippets",
+    version: "1.0.0",
+    installationId: "d4ccc664-5d54-4dd6-8678-a7365486684b",
+    sha256: "a".repeat(64),
+    source: "vsix",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    license: null,
+    compressedBytes: 1,
+    expandedBytes: 1,
+    dependencies: [],
+    compatibility: { supported: true, reason: null },
+  };
+  vi.spyOn(PluginEditorExtensionClient.prototype, "list").mockResolvedValue([
+    installation,
+  ]);
+  vi.spyOn(PluginEditorExtensionClient.prototype, "search").mockResolvedValue({
+    results: [],
+    nextOffset: null,
+    totalSize: 0,
+    offset: 0,
+  });
+  return {
+    installationId: installation.installationId,
+    sha256: installation.sha256,
+  };
+}
+
+it("keeps extension settings through concurrent edits and queues the previous settings if activation fails", async () => {
+  const references = [mockInstalledExtension()];
+  let finishSave!: () => void;
+  const persist = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    )
+    .mockRejectedValueOnce(new Error("Fixture rollback save failed"));
+  const onDraftChange = vi.fn();
+  const view = render(
+    <PluginIde
+      tenantId={2}
+      onClose={vi.fn()}
+      onPublished={vi.fn()}
+      onDraftChange={onDraftChange}
+      onInstalledExtensionsChange={persist}
+    />,
+    { locale: "en" },
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Extensions" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Installed" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Enable" }));
+  expect(persist).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "Code" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "entry.tsx" }), {
+    target: { value: "export function render() { return 1; }" },
+  });
+  const editedFiles = expect.objectContaining({
+    "entry.tsx": "export function render() { return 1; }",
+  });
+  expect(onDraftChange).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      files: editedFiles,
+      installedEditorExtensions: references,
+    }),
+  );
+  await act(async () => finishSave());
+  const iframe = view.container.querySelector<HTMLIFrameElement>(
+    "iframe.plugin-vscode-editor",
+  )!;
+  fireEvent(
+    window,
+    new MessageEvent("message", {
+      source: iframe.contentWindow,
+      origin: new URL(iframe.src).origin,
+      data: {
+        session: Object.fromEntries(
+          new URLSearchParams(new URL(iframe.src).hash.slice(1)),
+        ),
+        message: {
+          type: "savia-editor-state-applied",
+          installedExtensions: references,
+          error: "Fixture activation failed",
+        },
+      },
+    }),
+  );
+  await waitFor(() => expect(persist).toHaveBeenCalledTimes(2));
+  const restore = expect.objectContaining({
+    files: editedFiles,
+    installedEditorExtensions: [],
+  });
+  expect(persist).toHaveBeenLastCalledWith(restore);
+  expect(onDraftChange).toHaveBeenLastCalledWith(restore);
+  fireEvent.click(screen.getByRole("button", { name: "Extensions" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Installed" }));
+  expect(await screen.findByRole("button", { name: "Enable" })).toBeEnabled();
+  expect(
+    await screen.findByText(
+      /Fixture activation failed.*previous extension settings/i,
+    ),
+  ).toBeVisible();
+});
+
+it.each(["saving", "activating"] as const)(
+  "restores extension settings before closing while %s",
+  async (phase) => {
+    const reference = mockInstalledExtension();
+    let finishSave!: () => void;
+    let finishRestore!: () => void;
+    const persist = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishSave = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishRestore = resolve;
+          }),
+      );
+    let finishClose!: () => void;
+    const onClose = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishClose = resolve;
+        }),
+    );
+    const view = render(
+      <PluginIde
+        tenantId={2}
+        onClose={onClose}
+        backLabel="Back to projects"
+        onPublished={vi.fn()}
+        onDraftChange={vi.fn()}
+        onInstalledExtensionsChange={persist}
+      />,
+      { locale: "en" },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Extensions" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Installed" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Enable" }));
+    expect(persist).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ installedEditorExtensions: [reference] }),
+    );
+    if (phase === "activating") {
+      await act(async () => finishSave());
+      expect(
+        view.container.querySelector("iframe.plugin-vscode-editor"),
+      ).toBeInTheDocument();
+    }
+
+    const back = screen.getByRole("button", { name: "Back to projects" });
+    fireEvent.click(back);
+    expect(back).toBeDisabled();
+    expect(onClose).not.toHaveBeenCalled();
+    if (phase === "saving") {
+      await act(async () => finishSave());
+      expect(
+        view.container.querySelector("iframe.plugin-vscode-editor"),
+      ).toBeNull();
+    }
+    await waitFor(() => expect(persist).toHaveBeenCalledTimes(2));
+    expect(persist).toHaveBeenLastCalledWith(
+      expect.objectContaining({ installedEditorExtensions: [] }),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => finishRestore());
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(back).toBeDisabled();
+    await act(async () => finishClose());
+    expect(back).toBeEnabled();
+  },
+);
 
 it("keeps semantic diagnostics for standalone entry files", () => {
   render(<PluginIde tenantId={2} onClose={vi.fn()} onPublished={vi.fn()} />);

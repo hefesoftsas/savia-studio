@@ -274,15 +274,21 @@ Each save uses optimistic versioning; a conflicting save leaves the draft intact
 and offers retry or saving a separate copy. A scoped browser recovery copy protects
 pending edits across reloads when local storage is available. The editor warns
 before unloading while a server save is still pending, including when undoing
-the edit that is being saved. If its response is lost, Retry saves the current
-draft with the last acknowledged version. Do not close the page until
+the edit that is being saved. If its response is lost, Retry checks whether the
+next server version matches an unconfirmed save. Once confirmed, newer edits
+save against that version. Do not close the page until
 “Project saved” appears if browser recovery storage is unavailable.
 **Back to projects** waits for pending edits to reach the server before showing
 the refreshed project list.
-When the server has a newer draft, recovering offline edits creates a separate
-project. Project actions stay disabled while the copy saves. The editor then
-confirms the recovery. If saving fails, the recovery draft stays available and
-opening the project again retries it.
+Reopening a project clears a recovery copy that matches the saved files and
+conversation. If the server has a newer version and the recovery copy contains
+different edits, Savia saves those edits as a separate project. Project actions
+stay disabled while the copy saves. The editor then confirms the recovery. If
+saving fails, the recovery draft stays available and reopening retries it.
+If the server created the copy before losing the response, restarting recovery
+reopens that copy when its saved contents match the recovery draft.
+Recovery uses the source files and conversation. Editor preferences come from
+the server, and separate recovery projects start with default preferences.
 
 The store project list groups releases by plugin ID and sorts semantic versions newest
 first. **Edit latest version** creates an editable project from the latest release.
@@ -382,6 +388,13 @@ packages are immutable and project settings pin the chosen installation and
 digest. Updating a pinned extension requires an explicit update; removing a
 package is blocked while any project still references it. Project extension
 references are saved in the backend and restored when reopening the project.
+Source edits made during an extension change keep the requested references in
+the same project draft. If activation fails, the editor restores the previous
+references and saves them with the latest source. A failed restore save keeps
+the previous settings queued so the project can retry them.
+Returning to the project list cancels an extension change that is still awaiting
+confirmation. The project saves the previous references with the latest source
+before closing.
 
 Third-party extensions run in a separately hosted, cross-origin WebWorker
 runtime. They do not receive Savia application cookies or access to the parent
@@ -414,12 +427,26 @@ browser recovery storage. Versions opened for inspection remain read-only.
 The standalone editor document is excluded from the offline app-shell fallback
 at both `/plugin-editor.html` and Cloudflare's canonical `/plugin-editor` URL,
 including query strings. Keep both routes excluded when changing PWA routing.
+The editor updates its virtual workspace from acknowledged project changes so
+extensions that read a project file see the latest acknowledged content. Newer
+local edits stay in the editor until Savia acknowledges them.
+When an import replaces the project sources, the editor removes obsolete files
+and their empty directories from the virtual workspace before writing the new
+ones.
+If the editor iframe reloads, it receives the current project and begins a new
+edit sequence. Unchanged project state stays in the iframe during ordinary
+workspace updates.
 
 The preview editor currently searches Open VSX and also accepts local VSIX
 uploads; it does not use Microsoft's Marketplace. A package that fails the
 browser compatibility checks cannot be activated even if it can be inspected.
 The same-origin bundled-extension fallback remains available when the isolated
 runtime is unavailable, but marketplace and VSIX extensions stay disabled.
+The editor loads installed extension metadata once for each set of newly
+requested extensions. It downloads and activates packages one at a time, after
+their required dependencies are active. It reports missing or circular
+dependencies before downloading the affected packages. The editor reuses an
+active extension until it is disabled or the editor session reloads.
 
 The Extensions panel opens on popular Open VSX snippet candidates filtered for
 this web editor, rather than the registry's desktop-heavy overall download chart.

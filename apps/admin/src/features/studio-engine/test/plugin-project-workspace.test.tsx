@@ -1,4 +1,5 @@
 import React from "react";
+import { webcrypto } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   act,
@@ -10,6 +11,7 @@ import {
 import { render } from "./locale-test-render";
 import Workspace from "../plugin-project-workspace";
 import { setStudioRuntime } from "../runtime";
+import { pluginProjectIdSchema } from "@savia/studio-shared/plugin-projects";
 const mocks = vi.hoisted(() => ({
   identity: vi.fn().mockResolvedValue({ id: "alice" }),
 }));
@@ -737,6 +739,119 @@ it("recovers unsaved local content for the same owner and version", async () => 
   expect(await screen.findByLabelText("source")).toHaveValue("offline edit");
 });
 it.each([false, true])(
+  "recovers source from an older draft with obsolete extension settings (needs copy: %s)",
+  async (needsCopy) => {
+    const recoveryKey = `savia:plugin-project:alice:1:${id}`;
+    localStorage.setItem(
+      recoveryKey,
+      JSON.stringify({
+        files: { ...files, "entry.tsx": "local source to recover" },
+        history: [{ role: "user", content: "Keep this conversation" }],
+        version: 1,
+        editorExtensions: [needsCopy ? "savia.formatter" : "savia.retired"],
+        installedEditorExtensions: [
+          { installationId: id, sha256: "a".repeat(64) },
+        ],
+      }),
+    );
+    const save = vi.fn((path: string, requestBody: string) => {
+      const record = JSON.parse(requestBody);
+      if (record.version === 0 && record.installedEditorExtensions?.length)
+        return Response.json(
+          { error: "Obsolete extension reference" },
+          { status: 422 },
+        );
+      return Response.json({
+        data: { ...record, id: path.split("/").at(-1), version: 1 },
+      });
+    });
+    setStudioRuntime({
+      embedded: true,
+      tenantId: 1,
+      pluginTransport: async (path, init) => {
+        if (path === "/api/plugin-projects")
+          return Response.json({ data: [{ id, label: "Draft" }] });
+        if (path.endsWith("/registry"))
+          return Response.json({ canPublish: false });
+        if (init?.method === "PUT") return save(path, String(init.body));
+        return Response.json({
+          data: { id, files, history: [], version: needsCopy ? 2 : 1 },
+        });
+      },
+    });
+    render(
+      <Workspace tenantId={1} onClose={() => {}} onPublished={() => {}} />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Draft" }));
+    expect(await screen.findByLabelText("source")).toHaveValue(
+      "local source to recover",
+    );
+    if (needsCopy) {
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(save.mock.calls[0][1])).toEqual({
+        files: { ...files, "entry.tsx": "local source to recover" },
+        history: [{ role: "user", content: "Keep this conversation" }],
+        version: 0,
+      });
+      expect(localStorage.getItem(recoveryKey)).toBeNull();
+    }
+  },
+);
+it.each([true, false])(
+  "creates a recovery copy only for divergent content when the files match (matching history: %s)",
+  async (sameHistory) => {
+    const recoveryKey = `savia:plugin-project:alice:1:${id}`;
+    const source = "saved before the response was lost";
+    const history = [{ role: "user", content: "Keep this conversation" }];
+    localStorage.setItem(
+      recoveryKey,
+      JSON.stringify({
+        files: {
+          "preview.json": files["preview.json"],
+          ...files,
+          "entry.tsx": source,
+        },
+        history: sameHistory
+          ? history
+          : [{ role: "user", content: "Offline conversation" }],
+        version: 1,
+      }),
+    );
+    const save = vi.fn((path: string, body: string) => {
+      return Response.json({
+        data: { ...JSON.parse(body), id: path.split("/").at(-1), version: 1 },
+      });
+    });
+    setStudioRuntime({
+      embedded: true,
+      tenantId: 1,
+      pluginTransport: async (path, init) => {
+        if (path === "/api/plugin-projects")
+          return Response.json({ data: [{ id, label: "Draft" }] });
+        if (path.endsWith("/registry"))
+          return Response.json({ canPublish: false });
+        if (init?.method === "PUT") return save(path, String(init.body));
+        return Response.json({
+          data: {
+            id,
+            files: { ...files, "entry.tsx": source },
+            history,
+            editorExtensions: ["savia.formatter"],
+            version: 2,
+          },
+        });
+      },
+    });
+    render(
+      <Workspace tenantId={1} onClose={() => {}} onPublished={() => {}} />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Draft" }));
+    expect(await screen.findByLabelText("source")).toHaveValue(source);
+    expect(save).toHaveBeenCalledTimes(sameHistory ? 0 : 1);
+    expect(localStorage.getItem(recoveryKey)).toBeNull();
+  },
+);
+it.each([false, true])(
   "reports recovery only after saving a separate project (retry: %s)",
   async (retry) => {
     const recoveryKey = `savia:plugin-project:alice:1:${id}`;
@@ -811,6 +926,104 @@ it.each([false, true])(
     expect(recovered.version).toBe(0);
   },
 );
+it.each([false, true])(
+  "reuses a recovery project after a lost response only when it matches (changed: %s)",
+  async (changed) => {
+    vi.stubGlobal("crypto", webcrypto);
+    const recoveryKey = `savia:plugin-project:alice:1:${id}`;
+    const source = "unsaved offline source";
+    localStorage.setItem(
+      recoveryKey,
+      JSON.stringify({
+        files: { ...files, "entry.tsx": source },
+        history: [],
+        version: 1,
+      }),
+    );
+    let disconnected = true;
+    const recoveredProjects = new Map<string, object>();
+    setStudioRuntime({
+      embedded: true,
+      tenantId: 1,
+      pluginTransport: async (path, init) => {
+        if (path === "/api/plugin-projects")
+          return Response.json({ data: [{ id, label: "Draft" }] });
+        if (path.endsWith("/registry"))
+          return Response.json({ canPublish: false });
+        if (path === `/api/plugin-projects/${id}`)
+          return Response.json({
+            data: { id, files, history: [], version: 2 },
+          });
+        if (init?.method === "PUT") {
+          expect(
+            pluginProjectIdSchema.safeParse(path.split("/").at(-1)).success,
+          ).toBe(true);
+          if (recoveredProjects.has(path))
+            return Response.json(
+              { error: "Project already exists" },
+              { status: 409 },
+            );
+          const data = {
+            ...JSON.parse(String(init.body)),
+            id: path.split("/").at(-1),
+            version: 1,
+          };
+          recoveredProjects.set(path, data);
+          if (disconnected)
+            return Response.json({ error: "Response lost" }, { status: 503 });
+          return Response.json({ data });
+        }
+        if (disconnected)
+          return Response.json(
+            { error: "Connection unavailable" },
+            { status: 503 },
+          );
+        const data = recoveredProjects.get(path);
+        return data
+          ? Response.json({ data })
+          : new Response(null, { status: 404 });
+      },
+    });
+    const workspace = (
+      <Workspace tenantId={1} onClose={() => {}} onPublished={() => {}} />
+    );
+    try {
+      const first = render(workspace);
+      fireEvent.click(await screen.findByRole("button", { name: "Draft" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Response lost",
+      );
+      expect(recoveredProjects.size).toBe(1);
+      expect(localStorage.getItem(recoveryKey)).toContain(source);
+      first.unmount();
+
+      if (changed) {
+        const [path, saved] = [...recoveredProjects][0];
+        recoveredProjects.set(path, {
+          ...saved,
+          files: { ...files, "entry.tsx": "changed in the saved copy" },
+          version: 2,
+        });
+      }
+      disconnected = false;
+      render(workspace);
+      fireEvent.click(await screen.findByRole("button", { name: "Draft" }));
+      if (changed) {
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+          "Project already exists",
+        );
+        expect(localStorage.getItem(recoveryKey)).toContain(source);
+      } else {
+        expect(await screen.findByLabelText("source")).toHaveValue(source);
+        expect(localStorage.getItem(recoveryKey)).toBeNull();
+      }
+      expect(recoveredProjects.size).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  },
+);
+
 it("does not load another account’s browser recovery", async () => {
   localStorage.setItem(
     `savia:plugin-project:bob:1:${id}`,

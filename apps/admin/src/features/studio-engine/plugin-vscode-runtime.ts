@@ -40,6 +40,7 @@ import {
 } from "./plugin-vscode-protocol";
 import { EditorExtensionTransferReceiver } from "./plugin-editor-extension-transfer";
 import { InstalledEditorExtensionManager } from "./plugin-editor-installed-extensions";
+import { createPluginEditorFileSync } from "./plugin-editor-file-sync";
 import { PluginEditorTypescriptClient } from "./plugin-editor-typescript-client";
 import { pluginIdeDeclarations } from "./plugin-ide-declarations";
 import { formatPluginDocument } from "./plugin-editor-format";
@@ -84,6 +85,51 @@ function cancelInlineCompletion(requestId: string) {
 }
 let sequence = 0;
 const localEdits = new Map<string, number>();
+const syncProjectFiles = createPluginEditorFileSync({
+  async writeFile(path, value) {
+    const uri = monaco.Uri.parse(projectFileUri(path));
+    const fileService = await getService(IFileService);
+    await fileService.createFolder(
+      uri.with({ path: uri.path.slice(0, uri.path.lastIndexOf("/")) }),
+    );
+    await fileService.writeFile(uri, VSBuffer.fromString(value));
+  },
+  async removeFile(path) {
+    if (activeFile === path) {
+      editor.setModel(null);
+      activeFile = "";
+    }
+    documents.get(path)?.dispose();
+    documents.delete(path);
+    models.delete(path);
+    views.delete(path);
+
+    const fileService = await getService(IFileService);
+    const uri = monaco.Uri.parse(projectFileUri(path));
+    if (await fileService.exists(uri)) await fileService.del(uri);
+    // An imported source may turn a directory from the old project into a file.
+    let separator = path.lastIndexOf("/");
+    while (separator > 0) {
+      const folder = monaco.Uri.parse(projectFileUri(path.slice(0, separator)));
+      if (await fileService.exists(folder)) {
+        const { isDirectory, children } = await fileService.resolve(folder);
+        if (!isDirectory || children?.length !== 0) break;
+        await fileService.del(folder, { recursive: false });
+      }
+      separator = path.lastIndexOf("/", separator - 1);
+    }
+  },
+  applyToModel(path, value) {
+    const model = models.get(path);
+    if (!model || model.getValue() === value) return;
+    applying = true;
+    try {
+      model.setValue(value);
+    } finally {
+      applying = false;
+    }
+  },
+});
 
 function completionFiles() {
   const files = { ...state?.files };
@@ -207,31 +253,7 @@ async function extensions(ids: string[]) {
 async function update(next: EditorState) {
   const previous = state;
   state = next;
-  for (const [path, value] of Object.entries(next.files)) {
-    if ((next.acknowledgements[path] ?? 0) >= (localEdits.get(path) ?? 0))
-      localEdits.delete(path);
-    if ((next.acknowledgements[path] ?? 0) < (localEdits.get(path) ?? 0))
-      continue;
-    if (
-      previous?.files[path] === value &&
-      models.get(path)?.getValue() === value
-    )
-      continue;
-    const uri = monaco.Uri.parse(projectFileUri(path));
-    const existing = models.get(path);
-    if (!existing || existing.getValue() !== value) {
-      const fileService = await getService(IFileService);
-      await fileService.createFolder(
-        uri.with({ path: uri.path.slice(0, uri.path.lastIndexOf("/")) }),
-      );
-      await fileService.writeFile(uri, VSBuffer.fromString(value));
-      if (existing && existing.getValue() !== value && !localEdits.has(path)) {
-        applying = true;
-        existing.setValue(value);
-        applying = false;
-      }
-    }
-  }
+  await syncProjectFiles(next, localEdits);
   await extensions(next.extensions);
   if (previous)
     for (const reference of previous.installedExtensions)
@@ -241,16 +263,6 @@ async function update(next: EditorState) {
         )
       )
         await thirdParty.disable(reference.installationId);
-  for (const [path, reference] of documents) {
-    if (!Object.hasOwn(next.files, path)) {
-      if (activeFile === path) editor.setModel(null);
-      reference.dispose();
-      documents.delete(path);
-      models.delete(path);
-      views.delete(path);
-      localEdits.delete(path);
-    }
-  }
   if (!Object.hasOwn(next.files, next.activeFile)) {
     editor.setModel(null);
     activeFile = "";
