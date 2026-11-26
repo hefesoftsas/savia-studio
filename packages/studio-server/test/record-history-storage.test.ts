@@ -1,5 +1,7 @@
 import { beforeAll, afterAll, expect, it } from "vitest";
 import { getPlatformProxy } from "wrangler";
+import { registerDialect } from "@savia/db/dialect";
+import { postgresDialect } from "@savia/db/postgres-dialect";
 import {
   historyDatabase,
   purgeExpiredRecordHistory,
@@ -164,6 +166,68 @@ it("captures scalar null/false/zero, omits unsafe values, and attributes direct 
       .first("n"),
   ).toBe(0);
 });
+
+it("attributes an INSERT SELECT with comments to the workflow that ran it", async () => {
+  const actor = historyDatabase(db, "t", {
+    kind: "workflow",
+    id: "importer",
+    causeId: "import-1",
+  });
+  await actor
+    .prepare(
+      `/* Import a record */
+       INSERT INTO studio_records (tenant_id, object_name, id, data)
+       /* Default values for the imported record */ SELECT ?, ?, ?, ?`,
+    )
+    .bind(
+      "t",
+      "items",
+      "commented-import",
+      JSON.stringify({ name: "imported" }),
+    )
+    .run();
+
+  const rows = await events("commented-import");
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({
+    action: "created",
+    actor_kind: "workflow",
+    actor_id: "importer",
+    cause_id: "import-1",
+  });
+});
+
+it("keeps a PostgreSQL lock after nested comments ahead of the actor context", async () => {
+  const batches: string[][] = [];
+  function prepare(sql: string) {
+    return { sql, bind: () => ({ sql }) };
+  }
+  const postgres = {
+    prepare,
+    async batch(statements: ReturnType<typeof prepare>[]) {
+      batches.push(statements.map(({ sql }) => sql));
+      return statements.map(() => ({ results: [] }));
+    },
+  } as unknown as D1Database;
+  registerDialect(postgres, postgresDialect);
+  const actor = historyDatabase(postgres, "t", { kind: "user", id: "alice" });
+  const lock =
+    "-- Protect the import\r" +
+    "/* Import transaction /* lock scope */ setup */\n" +
+    "LOCK TABLE studio_records IN SHARE ROW EXCLUSIVE MODE";
+  const write = "UPDATE studio_records SET version=2 WHERE id='imported'";
+  await actor.batch([actor.prepare(lock), actor.prepare(write)]);
+
+  expect(batches).toEqual([
+    [
+      lock,
+      expect.stringContaining("INSERT INTO studio_record_history_context"),
+      write,
+      expect.stringContaining("DELETE FROM studio_record_history_context"),
+    ],
+  ]);
+});
+
 it("rolls back history and actor context with failed mutation batches", async () => {
   const actor = historyDatabase(db, "t", { kind: "user", id: "bob" });
   await expect(

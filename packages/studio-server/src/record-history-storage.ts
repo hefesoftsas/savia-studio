@@ -9,6 +9,40 @@ export type RecordHistoryActor = {
 
 const historySources = new WeakMap<D1Database, D1Database>();
 
+function sqlStatementStart(sql: string, postgres: boolean): number {
+  let offset = 0;
+  while (offset < sql.length) {
+    if (/\s/.test(sql[offset])) {
+      offset++;
+    } else if (sql.startsWith("--", offset)) {
+      offset += 2;
+      while (
+        offset < sql.length &&
+        sql[offset] !== "\n" &&
+        !(postgres && sql[offset] === "\r")
+      )
+        offset++;
+    } else if (sql.startsWith("/*", offset)) {
+      let depth = 1;
+      offset += 2;
+      while (depth > 0 && offset < sql.length) {
+        if (sql.startsWith("*/", offset)) {
+          depth--;
+          offset += 2;
+        } else if (postgres && sql.startsWith("/*", offset)) {
+          depth++;
+          offset += 2;
+        } else {
+          offset++;
+        }
+      }
+    } else {
+      break;
+    }
+  }
+  return offset;
+}
+
 /** Context exists only within the mutation transaction, never between requests. */
 export function historyDatabase(
   db: D1Database,
@@ -16,6 +50,7 @@ export function historyDatabase(
   actor: RecordHistoryActor,
 ): D1Database {
   const source = db;
+  const postgres = dialectFor(source).name === "postgres";
   db = historySources.get(db) ?? db;
   const originals = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
   const knownStatements = new WeakSet<D1PreparedStatement>();
@@ -96,12 +131,12 @@ export function historyDatabase(
       if (key === "batch") return batch;
       if (key === "prepare")
         return (sql: string) => {
-          const isLeadingLock = /^\s*LOCK\s+TABLE\b/i.test(sql);
+          const statement = sql.slice(sqlStatementStart(sql, postgres));
+          const isLeadingLock = /^LOCK\s+TABLE\b/i.test(statement);
           return wrap(
             target.prepare(sql),
-            !/^(?:\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*(?:SELECT|EXPLAIN)\b/i.test(
-              sql,
-            ) && /\bstudio_records\b/i.test(sql),
+            !/^(?:SELECT|EXPLAIN)\b/i.test(statement) &&
+              /\bstudio_records\b/i.test(statement),
             isLeadingLock,
           );
         };
