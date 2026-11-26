@@ -7,6 +7,7 @@ export interface Variable {
   required?: boolean;
   configured?: boolean;
   overridden?: boolean;
+  hasPlatformDefault?: boolean;
 }
 export interface Step {
   id: string;

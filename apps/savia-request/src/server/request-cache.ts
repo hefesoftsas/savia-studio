@@ -53,15 +53,17 @@ const sensitiveName =
   /token|api.?key|password|passwd|secret|auth|credential|session|cookie|signature|(^|[_-])key([_-]|$)|^key$/i;
 
 export function validateRequestCachePolicy(
-  policy: RequestCachePolicy | undefined,
+  policy: unknown,
 ): policy is RequestCachePolicy {
-  return Boolean(
-    policy &&
-    typeof policy.enabled === "boolean" &&
-    Number.isInteger(policy.ttlSeconds) &&
-    policy.ttlSeconds > 0 &&
-    policy.ttlSeconds <= MAX_TTL_SECONDS &&
-    ["public", "tenant", "connection"].includes(policy.scope),
+  if (!policy || typeof policy !== "object") return false;
+  const { enabled, ttlSeconds, scope } = policy as Partial<RequestCachePolicy>;
+  return (
+    typeof enabled === "boolean" &&
+    typeof ttlSeconds === "number" &&
+    Number.isInteger(ttlSeconds) &&
+    ttlSeconds > 0 &&
+    ttlSeconds <= MAX_TTL_SECONDS &&
+    (scope === "public" || scope === "tenant" || scope === "connection")
   );
 }
 

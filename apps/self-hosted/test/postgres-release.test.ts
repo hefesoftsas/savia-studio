@@ -221,6 +221,141 @@ async function nativeFixture(run: (db: D1Database) => Promise<void>) {
 (postgresTestUrl ? describe : describe.skip)(
   "native PostgreSQL request HTTP contracts",
   () => {
+    it("commits flow changes atomically and restores guarded tenant settings", async () => {
+      await withPostgresFixture(async (_core, connectionString) => {
+        await migratePostgres({
+          connectionString,
+          schema: "savia_request",
+          directory: resolve("../savia-request/postgres"),
+          seed: false,
+        });
+        const db = openPostgresDatabase({
+          connectionString,
+          schema: "savia_request",
+          maxConnections: 2,
+        });
+        registerDialect(db, postgresDialect);
+        try {
+          const request = (
+            path: string,
+            method: string,
+            body?: unknown,
+            tenant?: string,
+          ) =>
+            requestApp.request(
+              "http://savia-request.internal/api" + path,
+              {
+                method,
+                headers: {
+                  "content-type": "application/json",
+                  ...(tenant ? { "x-savia-tenant": tenant } : {}),
+                },
+                ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+              },
+              {
+                DB: db as unknown as D1Database,
+                ENCRYPTION_KEY: "native-contract-key",
+              },
+            );
+          const id = "native-guarded-restore";
+          const path = `/flows/${id}`;
+          const tenant = "tenant:101";
+          const definition = {
+            id,
+            name: "Shared request",
+            input: {},
+            description: "",
+            steps: [
+              {
+                id: "s1",
+                name: "Read",
+                url: "https://example.test",
+                method: "GET",
+                headers: {},
+                body: "",
+                pre: "",
+                post: "",
+              },
+            ],
+          };
+          const defaults = [
+            { key: "endpoint", value: "https://example.test", secret: false },
+          ];
+          const override = [{ ...defaults[0], value: "https://tenant.test" }];
+          expect((await request(path, "PUT", definition)).status).toBe(200);
+          expect(
+            (await request(`${path}/variables`, "PUT", defaults)).status,
+          ).toBe(200);
+          const saved = await request(
+            `${path}/variables`,
+            "PUT",
+            {
+              flow: { ...definition, name: "Tenant request" },
+              variables: override,
+            },
+            tenant,
+          );
+          expect(saved.status).toBe(200);
+          await db
+            .prepare(
+              "ALTER TABLE tenant_flow_variables ADD CHECK (key <> 'fail-on-write')",
+            )
+            .run();
+          const rejected = await request(
+            `${path}/variables`,
+            "PUT",
+            {
+              flow: { ...definition, name: "Rejected definition" },
+              variables: [
+                { key: "fail-on-write", value: "fixture", secret: false },
+              ],
+            },
+            tenant,
+          );
+          expect(rejected.status).toBe(500);
+          expect(
+            await (await request(path, "GET", undefined, tenant)).json(),
+          ).toMatchObject({
+            name: "Tenant request",
+            variables: override,
+          });
+
+          const variableReset = await request(
+            `${path}/variables/endpoint?requirePlatformDefault=true`,
+            "DELETE",
+            undefined,
+            tenant,
+          );
+          expect(variableReset.status).toBe(200);
+          expect(await variableReset.json()).toEqual({
+            ok: true,
+            reverted: true,
+          });
+          expect(
+            (await request(`${path}/variables`, "PUT", override, tenant))
+              .status,
+          ).toBe(200);
+
+          const flowReset = await request(
+            `${path}/reset?requirePlatformDefault=true`,
+            "POST",
+            {},
+            tenant,
+          );
+          expect(flowReset.status).toBe(200);
+          expect(await flowReset.json()).toEqual({ ok: true, reverted: true });
+          const detail = await request(path, "GET", undefined, tenant);
+          expect(await detail.json()).toMatchObject({
+            name: "Shared request",
+            customized: false,
+            variables: defaults,
+          });
+        } finally {
+          await db.close();
+        }
+      });
+    }, 180_000);
+
     it("lists and soft-deletes requests without resurrection on later seeding", async () => {
       await withPostgresFixture(async (_core, connectionString) => {
         await migratePostgres({

@@ -48,4 +48,33 @@ describe("savia-request-cache", () => {
     clearAllSaviaRequestSnapshots();
     expect(readSaviaRequestSnapshot(undefined)).toBeUndefined();
   });
+
+  it("keeps typed secrets out of a snapshot without changing the live draft", () => {
+    const variables = [
+      { key: "token", secret: true, value: "unsaved-fixture" },
+      { key: "endpoint", secret: false, value: "https://public.test" },
+    ];
+    writeSaviaRequestSnapshot("tenant:1", {
+      flows: [],
+      folders: [],
+      stepIndex: 0,
+      error: null,
+      updatedAt: 1,
+      flow: {
+        id: "flow",
+        name: "Draft",
+        description: "",
+        steps: [],
+        input: {},
+        versions: [],
+        variables,
+      },
+    });
+
+    expect(readSaviaRequestSnapshot("tenant:1")?.flow?.variables).toEqual([
+      { ...variables[0], value: "" },
+      variables[1],
+    ]);
+    expect(variables[0].value).toBe("unsaved-fixture");
+  });
 });

@@ -12,8 +12,12 @@
  * side (Exportar / Importar); import grows into preview and results below.
  * FORM: bulk-only transfer; per-flow editing stays in the flow workspace.
  */
-import { useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Download, Info, KeyRound, Upload } from "lucide-react";
+import {
+  getSessionGeneration,
+  useSessionGeneration,
+} from "@/auth/session-scope";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -75,6 +79,18 @@ function SecretHelp({
 }
 
 export function SecretsScreen() {
+  const { active, scope } = useSaviaRequestWorkspace();
+  const sessionGeneration = useSessionGeneration();
+  if (!active) return null;
+  return (
+    <SecretsTransfer
+      key={JSON.stringify([scope, sessionGeneration])}
+      sessionGeneration={sessionGeneration}
+    />
+  );
+}
+
+function SecretsTransfer({ sessionGeneration }: { sessionGeneration: number }) {
   const { api, busy: parentBusy, dirty } = useSaviaRequestWorkspace();
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
@@ -83,15 +99,39 @@ export function SecretsScreen() {
   const [previewEntries, setPreviewEntries] = useState<PreviewEntry[]>([]);
   const [results, setResults] = useState<ImportResult[] | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const mounted = useRef(false);
   const disabled = parentBusy || busy || dirty;
 
-  const exportAll = async () => {
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const isCurrent = () =>
+    mounted.current && sessionGeneration === getSessionGeneration();
+
+  const beginTransfer = (nextProgress: string | null = null) => {
+    if (disabled || !isCurrent()) return false;
     setBusy(true);
     setMessage(null);
     setResults(null);
-    setProgress("Exportando secretos…");
+    setProgress(nextProgress);
+    return true;
+  };
+
+  const finishTransfer = () => {
+    if (!isCurrent()) return;
+    setBusy(false);
+    setProgress(null);
+  };
+
+  const exportAll = async () => {
+    if (!beginTransfer("Exportando secretos…")) return;
     try {
       const exported = await api.exportSecrets();
+      if (!isCurrent()) return;
       if (!exported.flows.length)
         throw new Error("No hay variables para exportar.");
       const withValue = exported.flows.reduce(
@@ -108,6 +148,7 @@ export function SecretsScreen() {
         text: `Secretos de ${exported.flows.length} flow(s) exportados (${withValue} con valor). Guárdalos en un lugar seguro.`,
       });
     } catch (exception) {
+      if (!isCurrent()) return;
       setMessage({
         kind: "alert",
         text:
@@ -116,18 +157,18 @@ export function SecretsScreen() {
             : "No pudimos exportar los secretos.",
       });
     } finally {
-      setBusy(false);
-      setProgress(null);
+      finishTransfer();
     }
   };
 
   const previewFile = async (file: File) => {
-    setBusy(true);
-    setMessage(null);
-    setResults(null);
+    if (!beginTransfer()) return;
     try {
-      const parsed = parseSecretsFile(await file.text());
+      const contents = await file.text();
+      if (!isCurrent()) return;
+      const parsed = parseSecretsFile(contents);
       const summaries = await api.listFlows();
+      if (!isCurrent()) return;
       const names = new Map(summaries.map((flow) => [flow.id, flow.name]));
       setPreviewEntries(
         parsed.flows.map((entry) => ({
@@ -141,6 +182,7 @@ export function SecretsScreen() {
       );
       setPreview(parsed);
     } catch (exception) {
+      if (!isCurrent()) return;
       setPreview(null);
       setPreviewEntries([]);
       setMessage({
@@ -151,21 +193,18 @@ export function SecretsScreen() {
             : "No pudimos leer el archivo.",
       });
     } finally {
-      setBusy(false);
+      finishTransfer();
     }
   };
 
   const applyImport = async () => {
-    if (!preview) return;
-    setBusy(true);
-    setMessage(null);
-    setResults(null);
-    setProgress("Aplicando importación…");
+    if (!preview || !beginTransfer("Aplicando importación…")) return;
     try {
       const names = new Map(
         previewEntries.map((entry) => [entry.flowId, entry.name]),
       );
       const { results: imported } = await api.importSecrets(preview);
+      if (!isCurrent()) return;
       const outcomes: ImportResult[] = imported.map((result) => ({
         flowId: result.flowId,
         name: names.get(result.flowId) ?? result.flowId,
@@ -189,6 +228,7 @@ export function SecretsScreen() {
       setPreview(null);
       setPreviewEntries([]);
     } catch (exception) {
+      if (!isCurrent()) return;
       setMessage({
         kind: "alert",
         text:
@@ -197,8 +237,7 @@ export function SecretsScreen() {
             : "No pudimos importar los secretos.",
       });
     } finally {
-      setBusy(false);
-      setProgress(null);
+      finishTransfer();
     }
   };
 

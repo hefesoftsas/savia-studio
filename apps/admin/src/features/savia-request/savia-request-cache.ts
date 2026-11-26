@@ -26,7 +26,16 @@ export function writeSaviaRequestSnapshot(
   scope: string | undefined,
   snapshot: SaviaRequestSnapshot,
 ): void {
-  snapshots.set(saviaRequestCacheKey(scope), snapshot);
+  const key = saviaRequestCacheKey(scope);
+  const { flow } = snapshot;
+  if (!flow?.variables.some((variable) => variable.secret && variable.value)) {
+    snapshots.set(key, snapshot);
+    return;
+  }
+  const variables = flow.variables.map((variable) =>
+    variable.secret && variable.value ? { ...variable, value: "" } : variable,
+  );
+  snapshots.set(key, { ...snapshot, flow: { ...flow, variables } });
 }
 
 /** Limpia el ámbito anterior al cambiar de tenant/permisos/sesión. */

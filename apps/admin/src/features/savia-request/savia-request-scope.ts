@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePermissions } from "ra-core";
+import type { ApiClient } from "@/api/api-client";
 import type { AuthPermissions } from "@/auth/auth-session";
+import { getLogoutPending, useLogoutPending } from "@/auth/logout-progress";
+import {
+  getSessionGeneration,
+  useSessionGeneration,
+} from "@/auth/session-scope";
 import { useAppServices } from "@/features/assistant/assistant-context";
 import { useCurrentTenant } from "@/features/tenants/use-current-tenant";
 
@@ -112,22 +118,31 @@ export type TenantOptionsState = {
  * La lista se conserva en memoria mientras la sesión y los permisos sigan
  * siendo los mismos: entrar y salir de la ruta no repite la consulta.
  */
-let cachedTenantOptions: TenantOption[] | null = null;
-let cachedTenantClient: unknown = null;
+type TenantOptionsRead = {
+  client: ApiClient;
+  generation: number;
+  state: TenantOptionsState;
+};
+
+let cachedTenantOptions: TenantOptionsRead | null = null;
 
 export function clearCachedTenantOptions(): void {
   cachedTenantOptions = null;
-  cachedTenantClient = null;
+}
+
+function isTenantOptionsReadFor(
+  read: TenantOptionsRead | null,
+  client: ApiClient,
+  generation: number,
+): read is TenantOptionsRead {
+  return read?.client === client && read.generation === generation;
 }
 
 export function useTenantOptions(enabled: boolean): TenantOptionsState {
-  const [state, setState] = useState<TenantOptionsState>(() =>
-    enabled && cachedTenantOptions
-      ? { status: "ready", options: cachedTenantOptions }
-      : { status: "idle", options: [] },
-  );
-
-  let apiClient: { get: (path: string) => Promise<unknown> } | undefined;
+  const [read, setRead] = useState<TenantOptionsRead | null>(null);
+  const generation = useSessionGeneration();
+  const logoutPending = useLogoutPending();
+  let apiClient: ApiClient | undefined;
   try {
     // eslint-disable-next-line react-hooks/rules-of-hooks
     apiClient = useAppServices()?.apiClient;
@@ -136,24 +151,23 @@ export function useTenantOptions(enabled: boolean): TenantOptionsState {
     // Outside services provider (e.g. unit tests).
   }
 
+  const client = enabled && !logoutPending ? apiClient : undefined;
   useEffect(() => {
-    if (!enabled || !apiClient) return;
-    // Reutiliza la lista conservada si el cliente (sesión) no cambió.
-    if (cachedTenantOptions && cachedTenantClient === apiClient) {
-      setState({ status: "ready", options: cachedTenantOptions });
+    if (
+      !client ||
+      isTenantOptionsReadFor(cachedTenantOptions, client, generation)
+    )
       return;
-    }
-    let cancelled = false;
-    setState((previous) =>
-      previous.status === "ready" && previous.options.length
-        ? previous
-        : { status: "loading", options: [] },
-    );
-    apiClient
-      .get("/v1/tenants")
+    const controller = new AbortController();
+    const isCurrent = () =>
+      !controller.signal.aborted &&
+      generation === getSessionGeneration() &&
+      !getLogoutPending();
+    client
+      .get<{ data?: unknown }>("/v1/tenants", { signal: controller.signal })
       .then((response) => {
-        if (cancelled) return;
-        const rows = (response as { data?: unknown })?.data;
+        if (!isCurrent()) return;
+        const rows = response?.data;
         const options = (Array.isArray(rows) ? rows : [])
           .filter(
             (row): row is { id: number; name: string; kind: string } =>
@@ -169,19 +183,29 @@ export function useTenantOptions(enabled: boolean): TenantOptionsState {
             scope: scopeForTenantId(row.id),
           }))
           .sort((left, right) => left.name.localeCompare(right.name));
-        cachedTenantOptions = options;
-        cachedTenantClient = apiClient;
-        setState({ status: "ready", options });
+        cachedTenantOptions = {
+          client,
+          generation,
+          state: { status: "ready", options },
+        };
+        setRead(cachedTenantOptions);
       })
       .catch(() => {
-        if (!cancelled) setState({ status: "error", options: [] });
+        if (isCurrent())
+          setRead({
+            client,
+            generation,
+            state: { status: "error", options: [] },
+          });
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, apiClient]);
+    return () => controller.abort();
+  }, [client, generation]);
 
-  return state;
+  if (!client) return { status: "idle", options: [] };
+  if (isTenantOptionsReadFor(read, client, generation)) return read.state;
+  if (isTenantOptionsReadFor(cachedTenantOptions, client, generation))
+    return cachedTenantOptions.state;
+  return { status: "loading", options: [] };
 }
 
 export type SaviaRequestScopeState = {

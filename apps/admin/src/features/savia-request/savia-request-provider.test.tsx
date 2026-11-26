@@ -1,4 +1,5 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
@@ -8,7 +9,10 @@ import {
   SaviaRequestProvider,
   useSaviaRequestWorkspace,
 } from "./savia-request-provider";
-import { clearAllSaviaRequestSnapshots } from "./savia-request-cache";
+import {
+  clearAllSaviaRequestSnapshots,
+  writeSaviaRequestSnapshot,
+} from "./savia-request-cache";
 import type { RequestFlow } from "./types";
 
 vi.mock("ra-core", async (importOriginal) => ({
@@ -54,8 +58,16 @@ const hogar: RequestFlow = {
   steps: [{ ...autos.steps[0], id: "cotizar-hogar", name: "Cotizar hogar" }],
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function WorkspaceProbe() {
-  const { flow, stepIndex, selectFlow, openSecrets, updateDraft, view } =
+  const { dirty, flow, stepIndex, selectFlow, openSecrets, updateDraft, view } =
     useSaviaRequestWorkspace();
   const location = useLocation();
   const navigate = useNavigate();
@@ -65,6 +77,7 @@ function WorkspaceProbe() {
       <p data-testid="active-view">{view}</p>
       <p data-testid="active-step">{stepIndex}</p>
       <p data-testid="selection-url">{location.pathname + location.search}</p>
+      <p data-testid="draft-status">{dirty ? "unsaved" : "saved"}</p>
       <button
         onClick={() =>
           flow ? updateDraft({ ...flow, name: "Autos editado" }) : undefined
@@ -85,11 +98,23 @@ function WorkspaceProbe() {
       >
         Navegar hogar directamente
       </button>
+      <button
+        onClick={() => navigate("/bookings?tab=reservations&date=2026-11-25")}
+        type="button"
+      >
+        Abrir Citas
+      </button>
+      <button onClick={() => navigate(-1)} type="button">
+        Volver a la página anterior
+      </button>
+      <button onClick={() => navigate("/savia-request")} type="button">
+        Abrir Savia Request sin selección
+      </button>
     </>
   );
 }
 
-function renderProvider(initialEntry: string) {
+function renderProvider(initialEntry: string, extra?: ReactNode) {
   const get = vi.fn(async (path: string) => {
     if (path.endsWith("/flows")) {
       return [
@@ -112,6 +137,7 @@ function renderProvider(initialEntry: string) {
       <AppServicesProvider services={services}>
         <SaviaRequestProvider>
           <WorkspaceProbe />
+          {extra}
         </SaviaRequestProvider>
       </AppServicesProvider>
     </MemoryRouter>,
@@ -157,6 +183,85 @@ describe("SaviaRequestProvider", () => {
     );
   });
 
+  it.each([false, true])(
+    "keeps the latest route when an older selection finishes saving, back navigation = %s",
+    async (goBack) => {
+      const user = userEvent.setup();
+      const original = "/savia-request?flow=autos&step=0";
+      const bookings = "/bookings?tab=reservations&date=2026-11-25";
+      const { put } = renderProvider(original);
+      const { promise, resolve } = deferred<{ ok: true }>();
+      put.mockReturnValueOnce(promise);
+
+      await screen.findByText("Autos");
+      await user.click(screen.getByRole("button", { name: "Editar autos" }));
+      await user.click(
+        screen.getByRole("button", { name: "Seleccionar hogar" }),
+      );
+      expect(put).toHaveBeenCalledWith(
+        "/v1/savia-request/api/flows/autos",
+        expect.objectContaining({ name: "Autos editado" }),
+      );
+      await user.click(screen.getByRole("button", { name: "Abrir Citas" }));
+      expect(screen.getByTestId("selection-url")).toHaveTextContent(bookings);
+      if (goBack)
+        await user.click(
+          screen.getByRole("button", { name: "Volver a la página anterior" }),
+        );
+
+      await act(async () => {
+        resolve({ ok: true });
+        await promise;
+      });
+      expect(screen.getByTestId("selection-url")).toHaveTextContent(
+        goBack ? original : bookings,
+      );
+      expect(screen.getByTestId("active-flow")).toHaveTextContent(
+        "Autos editado",
+      );
+      expect(screen.getByTestId("draft-status")).toHaveTextContent(/^saved$/);
+      expect(put).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["select", "clear"] as const)(
+    "ignores a delayed %s action from the previous screen",
+    async (mode) => {
+      const user = userEvent.setup();
+      const { promise, resolve } = deferred<void>();
+      function DeferredAction() {
+        const { selectFlow, clearSelection } = useSaviaRequestWorkspace();
+        return (
+          <button
+            type="button"
+            onClick={() =>
+              void promise.then(() =>
+                mode === "select" ? selectFlow("hogar") : clearSelection(),
+              )
+            }
+          >
+            Start request action
+          </button>
+        );
+      }
+      renderProvider("/savia-request?flow=autos&step=0", <DeferredAction />);
+      await screen.findByText("Autos");
+      await user.click(
+        screen.getByRole("button", { name: "Start request action" }),
+      );
+      await user.click(screen.getByRole("button", { name: "Abrir Citas" }));
+
+      await act(async () => {
+        resolve();
+        await promise;
+      });
+      expect(screen.getByTestId("selection-url")).toHaveTextContent(
+        "/bookings?tab=reservations&date=2026-11-25",
+      );
+      expect(screen.getByTestId("active-flow")).toHaveTextContent("Autos");
+    },
+  );
+
   it("saves a dirty flow before loading a selection from the URL", async () => {
     const user = userEvent.setup();
     const { put } = renderProvider("/savia-request?flow=autos&step=0");
@@ -174,6 +279,120 @@ describe("SaviaRequestProvider", () => {
       ),
     );
     expect(await screen.findByTestId("active-flow")).toHaveTextContent("Hogar");
+  });
+
+  it("switches flows from the sidebar after returning to a cached workspace", async () => {
+    const user = userEvent.setup();
+    renderProvider("/savia-request?flow=autos&step=0");
+
+    await screen.findByText("Autos");
+    await user.click(screen.getByRole("button", { name: "Abrir Citas" }));
+    await user.click(
+      screen.getByRole("button", { name: "Volver a la página anterior" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Seleccionar hogar" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("active-flow")).toHaveTextContent("Hogar"),
+    );
+    expect(screen.getByTestId("selection-url")).toHaveTextContent(
+      "/savia-request?flow=hogar&step=0",
+    );
+  });
+
+  it("does not restore an unrelated cached flow while loading a deep link", async () => {
+    writeSaviaRequestSnapshot(undefined, {
+      flows: [autos],
+      folders: [],
+      flow: autos,
+      stepIndex: 0,
+      error: null,
+      updatedAt: Date.now(),
+    });
+    const pending = deferred<RequestFlow>();
+    const { get } = renderProvider("/savia-request?flow=hogar&step=0");
+    const read = get.getMockImplementation()!;
+    get.mockImplementation((path) =>
+      path.endsWith("/flows/hogar") ? pending.promise : read(path),
+    );
+
+    await waitFor(() =>
+      expect(get).toHaveBeenCalledWith("/v1/savia-request/api/flows/hogar"),
+    );
+    expect(screen.getByTestId("active-flow")).toHaveTextContent("sin flow");
+    await act(async () => pending.resolve(hogar));
+    expect(screen.getByTestId("active-flow")).toHaveTextContent("Hogar");
+  });
+
+  it("saves the retained draft before opening a different flow from a direct link", async () => {
+    const user = userEvent.setup();
+    const { put } = renderProvider("/savia-request?flow=autos&step=0");
+
+    await screen.findByText("Autos");
+    await user.click(screen.getByRole("button", { name: "Editar autos" }));
+    await user.click(screen.getByRole("button", { name: "Abrir Citas" }));
+    await user.click(
+      screen.getByRole("button", { name: "Navegar hogar directamente" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("active-flow")).toHaveTextContent("Hogar"),
+    );
+    expect(put).toHaveBeenCalledWith(
+      "/v1/savia-request/api/flows/autos",
+      expect.objectContaining({ name: "Autos editado" }),
+    );
+  });
+
+  it("keeps new edits when a requested flow finishes loading", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<RequestFlow>();
+    const { get } = renderProvider("/savia-request?flow=autos&step=0");
+    const read = get.getMockImplementation()!;
+    get.mockImplementation((path) =>
+      path.endsWith("/flows/hogar") ? pending.promise : read(path),
+    );
+
+    await screen.findByText("Autos");
+    await user.click(screen.getByRole("button", { name: "Abrir Citas" }));
+    await user.click(
+      screen.getByRole("button", { name: "Navegar hogar directamente" }),
+    );
+    await waitFor(() =>
+      expect(get).toHaveBeenCalledWith("/v1/savia-request/api/flows/hogar"),
+    );
+    await user.click(screen.getByRole("button", { name: "Editar autos" }));
+    await act(async () => pending.resolve(hogar));
+
+    expect(screen.getByTestId("active-flow")).toHaveTextContent(
+      "Autos editado",
+    );
+    expect(screen.getByTestId("draft-status")).toHaveTextContent("unsaved");
+    expect(screen.getByTestId("selection-url")).toHaveTextContent(
+      "/savia-request?flow=autos&step=0",
+    );
+  });
+
+  it("selects an available flow when the cached one is no longer listed", async () => {
+    const user = userEvent.setup();
+    const { get } = renderProvider("/savia-request?flow=autos&step=0");
+    await screen.findByText("Autos");
+    await user.click(screen.getByRole("button", { name: "Abrir Citas" }));
+
+    const read = get.getMockImplementation()!;
+    get.mockImplementation(async (path) =>
+      path.endsWith("/flows") ? [hogar] : read(path),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Abrir Savia Request sin selección" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("active-flow")).toHaveTextContent("Hogar"),
+    );
+    expect(screen.getByTestId("selection-url")).toHaveTextContent(
+      "/savia-request?flow=hogar&step=0",
+    );
   });
 
   it("keeps the secretos view without selecting a flow", async () => {

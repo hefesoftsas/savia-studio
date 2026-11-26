@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   ChevronRight,
   FileCode2,
@@ -10,6 +17,10 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  getSessionGeneration,
+  useSessionGeneration,
+} from "@/auth/session-scope";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -26,7 +37,7 @@ import { cn } from "@/lib/utils";
 import { SidebarFlowsSkeleton } from "@/components/admin/page-skeletons";
 import { useSaviaRequestWorkspace } from "./savia-request-provider";
 import { SaviaRequestBundleRow } from "./savia-request-bundle-row";
-import { DeleteDialog, type DeleteAction } from "./editor/delete-dialog";
+import { DeleteDialog, useDeleteConfirmation } from "./editor/delete-dialog";
 import type { FlowSummary } from "./types";
 
 type FolderNode = {
@@ -98,6 +109,7 @@ export function SaviaRequestSidebar({
     active,
     api,
     busy,
+    error,
     flow,
     flows,
     folders,
@@ -106,13 +118,27 @@ export function SaviaRequestSidebar({
     openSecrets,
     view,
   } = useSaviaRequestWorkspace();
+  const sessionGeneration = useSessionGeneration();
+  const folderScope = useMemo(
+    () => ({ api, sessionGeneration }),
+    [api, sessionGeneration],
+  );
+  const currentFolderScope = useRef<typeof folderScope | null>(null);
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [folderFormOpen, setFolderFormOpen] = useState(false);
-  const [creatingFolder, setCreatingFolder] = useState(false);
-  const [folderPath, setFolderPath] = useState("");
-  const [folderError, setFolderError] = useState("");
-  const [deletion, setDeletion] = useState<DeleteAction | null>(null);
+  type FolderForm = {
+    scope: typeof folderScope;
+    path: string;
+    saved: boolean;
+    pending: boolean;
+    error?: string;
+  };
+  const [folderForm, setFolderForm] = useState<FolderForm>();
+  const form = folderForm?.scope === folderScope ? folderForm : undefined;
+  const { deletion, confirmDeletion, closeDeletion } = useDeleteConfirmation(
+    api,
+    active,
+  );
   const normalizedQuery = normalize(query.trim());
   const filteredFlows = useMemo(
     () =>
@@ -136,6 +162,16 @@ export function SaviaRequestSidebar({
     () => buildTree(visibleFolders, filteredFlows),
     [filteredFlows, visibleFolders],
   );
+
+  useLayoutEffect(() => {
+    currentFolderScope.current = folderScope;
+    setFolderForm(undefined);
+    setQuery("");
+    setExpanded(new Set());
+    return () => {
+      currentFolderScope.current = null;
+    };
+  }, [folderScope]);
 
   useEffect(() => {
     if (!flow) return;
@@ -165,36 +201,50 @@ export function SaviaRequestSidebar({
     });
   const createFolder = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const path = folderPath.trim();
-    if (!path) {
-      setFolderError("Escribe la ruta de la carpeta.");
+    const isCurrent = () =>
+      currentFolderScope.current === folderScope &&
+      sessionGeneration === getSessionGeneration();
+    if (!form || busy || form.pending || !isCurrent()) return;
+    if (!form.path.trim()) {
+      setFolderForm({ ...form, error: "Escribe la ruta de la carpeta." });
       return;
     }
-    setFolderError("");
-    setCreatingFolder(true);
+    let attempt: FolderForm = { ...form, pending: true, error: undefined };
+    setFolderForm(attempt);
     try {
-      await api.createFolder(path);
+      if (!attempt.saved) {
+        const { path } = await api.createFolder(form.path.trim());
+        if (!isCurrent()) return;
+        attempt = { ...attempt, path, saved: true };
+        setFolderForm(attempt);
+      }
       await refreshNavigation();
-      setExpanded((current) => new Set([...current, ...pathAncestors(path)]));
-      setFolderPath("");
-      setFolderFormOpen(false);
-    } catch (exception) {
-      setFolderError(
-        exception instanceof Error
-          ? exception.message
-          : "No pudimos crear la carpeta.",
+      if (!isCurrent()) return;
+      setExpanded(
+        (current) => new Set([...current, ...pathAncestors(attempt.path)]),
       );
-    } finally {
-      setCreatingFolder(false);
+      setFolderForm(undefined);
+    } catch (exception) {
+      if (!isCurrent()) return;
+      setFolderForm({
+        ...attempt,
+        pending: false,
+        error: attempt.saved
+          ? "La carpeta se creó, pero no pudimos actualizar la lista."
+          : exception instanceof Error
+            ? exception.message
+            : "No pudimos crear la carpeta.",
+      });
     }
   };
   const removeFolder = (path: string) => {
-    setDeletion({
+    confirmDeletion({
       title: "Eliminar carpeta",
       description: `¿Eliminar la carpeta «${path}»?`,
-      run: async () => {
+      run: async (isCurrent) => {
         await api.removeFolder(path);
         await refreshNavigation();
+        if (!isCurrent()) return;
         setExpanded(
           (current) =>
             new Set(
@@ -212,9 +262,7 @@ export function SaviaRequestSidebar({
     <SidebarGroup
       className={cn(
         "py-2 group-data-[collapsible=icon]:hidden",
-        nested
-          ? "border-0 px-0"
-          : "border-sidebar-border/70 border-t",
+        nested ? "border-0 px-0" : "border-sidebar-border/70 border-t",
       )}
     >
       <div
@@ -234,11 +282,17 @@ export function SaviaRequestSidebar({
         )}
         <Button
           aria-label="Crear carpeta"
-          disabled={busy || creatingFolder}
-          onClick={() => {
-            setFolderError("");
-            setFolderFormOpen(true);
-          }}
+          disabled={busy || form?.pending}
+          onClick={() =>
+            setFolderForm(
+              form ?? {
+                scope: folderScope,
+                path: "",
+                saved: false,
+                pending: false,
+              },
+            )
+          }
           size="icon"
           type="button"
           variant="ghost"
@@ -270,48 +324,50 @@ export function SaviaRequestSidebar({
               value={query}
             />
           </div>
-          {folderFormOpen ? (
+          {form ? (
             <form className="mb-2 grid gap-1.5" onSubmit={createFolder}>
               <SidebarInput
                 aria-label="Ruta de la carpeta"
                 autoFocus
-                disabled={busy || creatingFolder}
-                onChange={(event) => setFolderPath(event.target.value)}
+                disabled={busy || form.pending || form.saved}
+                onChange={(event) =>
+                  setFolderForm({
+                    ...form,
+                    path: event.target.value,
+                    error: undefined,
+                  })
+                }
                 placeholder="Ej.: Cotizaciones/Autos"
                 type="text"
-                value={folderPath}
+                value={form.path}
               />
-              {folderError ? (
+              {form.error ? (
                 <p className="text-xs text-destructive" role="alert">
-                  {folderError}
+                  {form.error}
                 </p>
               ) : null}
               <div className="flex gap-1.5">
-                <Button
-                  disabled={busy || creatingFolder}
-                  size="sm"
-                  type="submit"
-                >
-                  Crear
+                <Button disabled={busy || form.pending} size="sm" type="submit">
+                  {form.saved ? "Actualizar lista" : "Crear"}
                 </Button>
                 <Button
-                  disabled={busy || creatingFolder}
-                  onClick={() => {
-                    setFolderFormOpen(false);
-                    setFolderPath("");
-                    setFolderError("");
-                  }}
+                  disabled={busy || form.pending}
+                  onClick={() => setFolderForm(undefined)}
                   size="sm"
                   type="button"
                   variant="ghost"
                 >
-                  Cancelar
+                  {form.saved ? "Cerrar" : "Cancelar"}
                 </Button>
               </div>
             </form>
           ) : null}
           {busy && flows.length === 0 ? (
             <SidebarFlowsSkeleton count={3} />
+          ) : error && flows.length === 0 && folders.length === 0 ? (
+            <p className="px-2 py-3 text-xs leading-5 text-destructive">
+              No pudimos cargar los flows.
+            </p>
           ) : tree.flows.length === 0 && tree.children.length === 0 ? (
             <p className="px-2 py-3 text-xs leading-5 text-muted-foreground">
               {query.trim()
@@ -367,7 +423,7 @@ export function SaviaRequestSidebar({
         </SidebarMenu>
       </div>
       {deletion ? (
-        <DeleteDialog action={deletion} onClose={() => setDeletion(null)} />
+        <DeleteDialog action={deletion} onClose={closeDeletion} />
       ) : null}
     </SidebarGroup>
   );

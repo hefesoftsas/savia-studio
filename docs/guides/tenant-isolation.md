@@ -13,6 +13,62 @@ Savia Request sends canonical `tenant:<id>` scopes for every operation, includin
 bulk secret export and import. Older UI selections using `agency:<id>` are read
 as the same tenant and rechecked against the user's memberships; they are never
 sent to the API. Empty scope remains the platform-only shared catalog.
+The platform tenant picker keeps its list in memory for the current API client
+and authenticated session. It clears previous options while a new list loads,
+and pending responses cannot refill the picker during logout.
+Changing tenants or sessions, or leaving the bulk secrets screen, discards the
+import preview and prevents pending exports from downloading. An import already
+submitted to the server can finish in its original scope.
+
+An empty masked variable preserves its saved secret. Supply a value when changing
+the Secret checkbox for a configured variable, including an inherited default.
+A new secret field can be saved empty and configured later. An empty tenant
+secret can inherit a platform secret when that key has one. The editor waits
+for changed variables to save before switching flows. Savia commits the flow
+definition and variable changes together. If the save fails, the editor keeps
+the draft for correction and retry.
+Validation errors explain which field or step needs attention before the flow
+or any accompanying variables are saved.
+If the navigation refresh fails temporarily after a successful save or reload,
+the editor keeps the confirmed flow and updates its entry in the list. A denied
+read clears workspace data even when another navigation request has already
+reported a temporary failure.
+After saving, Savia masks the secret again and displays the persisted variable
+configuration. Typed secrets stay in the active draft until acknowledged.
+In-memory navigation snapshots exclude secret values.
+Renaming a configured secret requires a value for the new key. The editor
+keeps the original on the server until you supply a value and save.
+
+Running a request sends the operation input with that run. Save the flow
+explicitly to keep those values as its default input or to declare new input
+keys. Restore flow input returns the operation editor to the input defined by
+the selected flow.
+Flows open in simulated mode by default. Real mode applies to the current
+selection, and opening a result from history keeps the selected execution mode.
+The DANE catalog lookup uses real mode because it reads the official catalog.
+Changing the flow, route, or session closes pending deletion confirmations.
+A deletion confirmed before navigation may finish on the server. The editor
+keeps the current selection when that earlier response arrives.
+Savia Request offers to create the first flow once the catalog confirms it is
+empty. If the initial catalog or selected flow fails to load, Retry reloads
+the current selection.
+When flow creation reports a failure, retrying checks for the same flow before
+writing again. After creation is confirmed, retrying a catalog load opens the
+created flow.
+After duplicating a flow, Savia Request opens the confirmed copy. If loading
+fails, retry the selection to reopen that copy. A tenant copy lists inherited
+platform secrets as empty fields so you can configure tenant-owned values.
+Restore is available for flows and variable overrides with a platform default.
+Saving a tenant copy marks it as customized in the editor as soon as the write
+is confirmed. Restoring a flow clears temporary operation input and loads the
+platform version directly. After a confirmed flow or variable restore, if
+loading the updated flow fails, retry to reopen it for editing. A restore that
+finishes after changing flows leaves the new selection and its draft intact.
+Step bodies and scripts are read-only while the editor is busy.
+If the default disappears before confirmation, the tenant configuration is
+preserved. Tenant-only flows and variables can be deleted using Delete.
+Folder drafts belong to the selected tenant and session. After the server
+confirms a folder was created, Update list retries loading the tree if needed.
 
 Studio routes use `/v1/studio/<tenantId>/api/*`; navigation uses `tenantId`.
 
