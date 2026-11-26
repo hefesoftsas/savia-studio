@@ -50,6 +50,7 @@ async function localDevelopmentCommands({
 printf '%s|%s|%s|%s|%s|%s|%s|auth-secret=%s\\n' "$MCP_TRANSPORT" "$MCP_HOST" "$SAVIA_API_URL" "$SAVIA_MCP_URL" "$OPENROUTER_API_KEY" "$SAVIA_MCP_SHARED_SECRET" "$*" "$BETTER_AUTH_SECRET" >> "$TMPDIR/commands.txt"
 printf 'jira-reporting=%s\\n' "$NANGO_JIRA_REPORTING_CONNECTION_ID" >> "$TMPDIR/commands.txt"
 printf 'bridge=%s|%s\\n' "$SAVIA_INTERNAL_BRIDGE_KEY" "$*" >> "$TMPDIR/commands.txt"
+printf 'local-admin-api=%s|%s\\n' "$SAVIA_DEV_USE_LOCAL_API" "$*" >> "$TMPDIR/commands.txt"
 stay_running() {
   trap 'exit 0' TERM
   while :; do sleep 0.05; done
@@ -213,6 +214,10 @@ test("starts the application locally with the private Savia request Worker", asy
   assert.match(
     commands,
     /\|\|\|http:\/\/127\.0\.0\.1:8789\/mcp\|\|\|--filter @savia\/admin exec vite --host 127\.0\.0\.1 --port 5174 --strictPort/,
+  );
+  assert.match(
+    commands,
+    /^local-admin-api=true\|--filter @savia\/admin exec vite/m,
   );
 });
 

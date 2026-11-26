@@ -64,8 +64,11 @@ Workers. It owns `apps/api/.wrangler/state` to avoid SQLite locks during reload.
 Keep that state directory dedicated to this runtime. The launcher generates
 Worker configurations and private `.dev.vars` under
 `apps/api/.wrangler/local-runtime` from local files and `infra/secrets/`.
-It preserves the originals and conceals their values. Admin calls the API
-through the Vite origin during development.
+It preserves the originals and conceals their values. With `pnpm dev`, Admin
+calls the local API through the Vite origin, even if a shell variable or
+`.env.local` specifies another API URL. To choose a different API for
+standalone frontend work, start Vite directly as described in the
+[local Office setup](docs/office-editing.md#local-setup).
 
 Run the reset script without arguments to preview changes to generated
 Miniflare data.

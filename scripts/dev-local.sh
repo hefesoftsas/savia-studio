@@ -208,7 +208,8 @@ fi
 
 start_process API env "SAVIA_PUBLIC_ORIGIN=$admin_origin" "SAVIA_INTERNAL_BRIDGE_KEY=$identity_bridge_key" "SAVIA_DISABLE_CAPTCHA=1" "SAVIA_MOCK_QUOTES=${SAVIA_MOCK_QUOTES:-1}" pnpm exec node scripts/dev-api-runtime.mjs
 wait_for_service API http://127.0.0.1:8787/health api_is_ready
-start_process Admin pnpm --filter @savia/admin exec vite --host "${SAVIA_DEV_HOST:-127.0.0.1}" \
+start_process Admin env SAVIA_DEV_USE_LOCAL_API=true \
+  pnpm --filter @savia/admin exec vite --host "${SAVIA_DEV_HOST:-127.0.0.1}" \
   --port "$admin_port" --strictPort
 
 while [ -n "$processes" ]; do
