@@ -303,9 +303,11 @@ one native backup-gate check. Full CI uses the three standard API shards. Other
 shared code and unrelated mixed changes retain full validation.
 
 A push to `main` may reuse CI from a merged same-repository pull request for
-changes to application source and tests, Pulumi scripts and tests, and the
-Auth initialization helper and its tests. A pull request can combine these
-paths. CI compares GitHub's associated PR and successful workflow attempt
+changes to application source and tests, Pulumi scripts and tests, the Auth
+initialization helper and its tests, and the named Admin frontend build paths
+in `scripts/preview-ci-reuse.mjs`. Changes to those build paths also require
+all six Admin test shards and the Core and Apps type check to pass in the PR.
+CI compares GitHub's associated PR and successful workflow attempt
 with the exact Git tree and first parent recorded by a step in the PR
 classification job. That attempt must complete both contract jobs successfully.
 Missing evidence, changed workflow or dependency files, and a different base
