@@ -31,7 +31,10 @@ function offlineShellPlugin(): Plugin {
   };
 }
 
-const devApiTarget = process.env.SAVIA_DEV_API_URL || "http://127.0.0.1:8787";
+const useLocalApi = process.env.SAVIA_DEV_USE_LOCAL_API === "true";
+const devApiTarget =
+  (useLocalApi ? undefined : process.env.SAVIA_DEV_API_URL) ||
+  "http://127.0.0.1:8787";
 // Keep the browser's public origin for CSRF checks, authentication redirects,
 // and editor socket URLs, including the default local API on a different port.
 const devChangeOrigin = false;
@@ -39,6 +42,10 @@ const devChangeOrigin = false;
 export default defineConfig({
   envDir:
     process.env.SAVIA_ADMIN_IGNORE_ENV_FILES === "true" ? false : undefined,
+  // The full-stack launcher sends browser requests through the local proxy.
+  define: useLocalApi
+    ? { "import.meta.env.VITE_SAVIA_API_URL": "undefined" }
+    : undefined,
   plugins: [
     compactBrandIcons(),
     {

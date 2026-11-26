@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveConfig } from "vite";
+import { createServer, resolveConfig } from "vite";
 import { expect, it, vi } from "vitest";
 
 it("builds an isolated Preview without the checkout's API URL or Flows assets", async () => {
@@ -73,6 +73,68 @@ it("ignores local dotenv in the isolated plugin editor build and keeps explicit 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.each(["dotenv", "environment"])(
+  "uses the local stack API in Vite despite a URL override from %s",
+  async (source) => {
+    const root = await mkdtemp(join(tmpdir(), "savia-admin-local-"));
+    const remoteApiUrl = "https://other-api.example.invalid";
+    const editorUrl = "https://editor.example.invalid";
+    let server: Awaited<ReturnType<typeof createServer>> | undefined;
+    try {
+      await writeFile(
+        join(root, ".env.local"),
+        (source === "dotenv" ? `VITE_SAVIA_API_URL=${remoteApiUrl}\n` : "") +
+          `VITE_PLUGIN_EDITOR_RUNTIME_URL=${editorUrl}\n`,
+      );
+      await writeFile(
+        join(root, "probe.ts"),
+        "export const api = import.meta.env.VITE_SAVIA_API_URL ?? window.location.origin;",
+      );
+      vi.stubEnv(
+        "VITE_SAVIA_API_URL",
+        source === "environment" ? remoteApiUrl : undefined,
+      );
+      vi.stubEnv("VITE_PLUGIN_EDITOR_RUNTIME_URL", undefined);
+      vi.stubEnv("SAVIA_ADMIN_IGNORE_ENV_FILES", undefined);
+      vi.stubEnv("SAVIA_DEV_API_URL", remoteApiUrl);
+      vi.stubEnv("SAVIA_DEV_USE_LOCAL_API", "true");
+      const input = {
+        root,
+        configFile: fileURLToPath(
+          new URL("../vite.config.ts", import.meta.url),
+        ),
+        logLevel: "silent" as const,
+      };
+      server = await createServer({
+        ...input,
+        server: { middlewareMode: true, hmr: false, watch: null },
+      });
+      expect(server.config.server.proxy?.["/api"]).toMatchObject({
+        target: "http://127.0.0.1:8787",
+        changeOrigin: false,
+      });
+      const module = await server.transformRequest("/probe.ts");
+      expect(module?.code).toContain('"VITE_SAVIA_API_URL": undefined');
+      expect(module?.code).not.toContain(remoteApiUrl);
+      expect(server.config.env.VITE_PLUGIN_EDITOR_RUNTIME_URL).toBe(editorUrl);
+
+      vi.stubEnv("SAVIA_DEV_USE_LOCAL_API", undefined);
+      const standalone = await resolveConfig(input, "serve");
+      expect(standalone.server.proxy?.["/api"]).toMatchObject({
+        target: remoteApiUrl,
+      });
+      expect(standalone.env.VITE_SAVIA_API_URL).toBe(remoteApiUrl);
+      expect(
+        standalone.define?.["import.meta.env.VITE_SAVIA_API_URL"],
+      ).toBeUndefined();
+    } finally {
+      await server?.close();
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 it.each([
   { command: "serve" as const, enabled: "0", disabled: true },
