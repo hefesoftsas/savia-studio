@@ -292,6 +292,7 @@ export async function downloadCrm(
   url: string,
   name: string,
   expectedType?: "text/csv",
+  { useBodyDeadline = true }: { useBodyDeadline?: boolean } = {},
 ) {
   const response = await studioFetch(
     url,
@@ -322,9 +323,10 @@ export async function downloadCrm(
     void response.body?.cancel().catch(() => undefined);
     throw new Error("No se recibió un archivo CSV válido.");
   }
-  const file = expectedType
-    ? await readStudioBody(response, (input) => input.blob())
-    : await response.blob();
+  const file =
+    expectedType && useBodyDeadline
+      ? await readStudioBody(response, (input) => input.blob())
+      : await response.blob();
   if (expectedType && !file.size)
     throw new Error("No se recibió un archivo CSV válido.");
   const blob = URL.createObjectURL(file);
