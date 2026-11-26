@@ -82,12 +82,15 @@ test("the frontend warmup plans exact main pushes before requiring build inputs"
   assert.equal(plan("0".repeat(40)), "needed=true\n");
   const hostedRevision = "b".repeat(40);
   assert.equal(plan(backend, hostedRevision), "needed=true\n");
-  commit(
+  const pinned = commit(
     "deployment/hosted-plugins.json",
     JSON.stringify({ revision: hostedRevision }),
   );
   assert.equal(plan(backend, hostedRevision), "needed=false\n");
   assert.equal(plan(backend, "false"), "needed=true\n");
+  commit("apps/admin/src/view.tsx", "export const value = 3;\n");
+  assert.equal(plan(pinned), "needed=true\n");
+  assert.equal(plan(pinned, hostedRevision), "needed=false\n");
   commit(
     "deployment/hosted-plugins.json",
     JSON.stringify({ revision: "c".repeat(40) }),
