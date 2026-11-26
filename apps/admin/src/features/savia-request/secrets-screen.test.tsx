@@ -219,8 +219,10 @@ describe("SecretsScreen", () => {
     async (change) => {
       const { post, refreshScope } = renderSecretsScreen();
       const user = userEvent.setup();
+      const fileInput = await screen.findByLabelText("Archivo de secretos");
+      await waitFor(() => expect(fileInput).toBeEnabled());
       await user.upload(
-        await screen.findByLabelText("Archivo de secretos"),
+        fileInput,
         new File([JSON.stringify(transferFixture)], "secretos.json", {
           type: "application/json",
         }),

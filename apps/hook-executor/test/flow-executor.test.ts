@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { newQuickJSWASMModuleFromVariant } from "quickjs-emscripten-core";
 import variant from "@jitl/quickjs-wasmfile-release-sync";
 import {
@@ -213,25 +213,32 @@ describe("Flows QuickJS guests", () => {
 
   it("times out pending tools and safely ignores late completions", async () => {
     let complete!: (value: string) => void;
-    const dispatcher: FlowToolDispatcher = {
-      call() {
-        return new Promise((resolve) => {
-          complete = resolve;
-        });
-      },
-    };
-    const result = await execute(
-      "return await codemode.pending({});",
-      dispatcher,
-      { timeoutMs: 10 },
-    );
-    expect(result.error).toMatch(/timed out/i);
-    complete('{"result":"late"}');
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(await execute("return 42;", noTools)).toEqual({
-      result: 42,
-      logs: [],
+    const tool = new Promise<string>((resolve) => {
+      complete = resolve;
     });
+    const call = vi.fn(() => tool);
+    await engine;
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const execution = execute(
+        "return await codemode.pending({});",
+        { call },
+        { timeoutMs: 10 },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(call).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect((await execution).error).toMatch(/timed out/i);
+      complete('{"result":"late"}');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await execute("return 42;", noTools)).toEqual({
+        result: 42,
+        logs: [],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not keep an unawaited tool callback alive after returning", async () => {
