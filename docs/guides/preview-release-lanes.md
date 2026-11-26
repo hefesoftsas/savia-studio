@@ -4,6 +4,10 @@ Shared Preview remains `https://savia-preview.hefesoft.com`. Successful CI for a
 push to `main` triggers the existing release workflow. The workflow checks out
 the exact tested commit and rejects superseded or foreign-repository runs.
 
+CI and automatic Preview use GitHub Actions that declare the Node.js 24 runner
+runtime. Their project commands still use Node.js 22 and the configured pnpm
+version. The Preview upload and download actions retain ZIP artifacts.
+
 ## Compatible plugin updates
 
 The fast lane accepts existing `packages/plugin-*` or `store-ports/*` packages

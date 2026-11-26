@@ -35,7 +35,7 @@ jobs:
       store_plugins_changed: ${{ steps.plan.outputs.store_plugins_changed }}
     steps:
       - name: Check out tested source and history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
@@ -47,7 +47,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
 
@@ -83,7 +83,7 @@ jobs:
     steps:
       - name: Check out source
         if: ${{ success() && !cancelled() }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
@@ -101,13 +101,13 @@ jobs:
 
       - name: Set up pnpm
         if: ${{ success() && !cancelled() }}
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
         if: ${{ success() && !cancelled() }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -221,7 +221,7 @@ jobs:
 
       - name: Download exact same-run Preview release artifact
         if: ${{ success() && !cancelled() && steps.find_retry_release.outputs.found == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7.0.0
         with:
           artifact-ids: ${{ steps.find_retry_release.outputs.artifact_id }}
           path: ${{ runner.temp }}/preview-runtime-custody/retry-input
@@ -329,7 +329,7 @@ jobs:
 
       - name: Retain immutable Preview release for same-run retry
         if: ${{ success() && !cancelled() && steps.restore_release.outputs.restored != 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-runtime-release-${{ github.run_id }}
           path: ${{ runner.temp }}/preview-runtime-custody/retained/*.enc
@@ -458,7 +458,7 @@ jobs:
 
       - name: Retain encrypted command diagnostics
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-command-diagnostics
           path: ${{ runner.temp }}/preview-command-diagnostics.enc
@@ -467,7 +467,7 @@ jobs:
 
       - name: Retain encrypted managed recovery archive
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-runtime-recovery
           path: ${{ runner.temp }}/savia-runtime/recovery/flows-release-backup.enc
@@ -496,7 +496,7 @@ jobs:
 
       - name: Publish runtime component evidence
         if: ${{ success() && !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-runtime
           path: ${{ runner.temp }}/preview-runtime.json
@@ -523,17 +523,17 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out tested source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -604,7 +604,7 @@ jobs:
 
       - name: Publish office component evidence
         if: ${{ success() && !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-office
           path: ${{ runner.temp }}/preview-office.json
@@ -632,17 +632,17 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out tested source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -712,7 +712,7 @@ jobs:
 
       - name: Publish store component evidence
         if: ${{ success() && !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-store
           path: ${{ runner.temp }}/preview-store.json
@@ -732,17 +732,17 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out tested source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -796,7 +796,7 @@ jobs:
 
       - name: Preserve the plugin recovery checkpoint
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-plugin-recovery
           path: ${{ runner.temp }}/preview-plugin-recovery.json
@@ -813,7 +813,7 @@ jobs:
           NODE
 
       - name: Publish plugin promotion evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-selective-plugins
           path: ${{ runner.temp }}/preview-selective-plugins.json
@@ -837,7 +837,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Check out tested source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
@@ -858,7 +858,7 @@ jobs:
           NODE
 
       - name: Publish promotion evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: preview-release
           path: ${{ runner.temp }}/preview-release.json

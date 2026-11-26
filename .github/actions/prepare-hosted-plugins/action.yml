@@ -22,7 +22,7 @@ runs:
         echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
     - name: Check out first-party plugin sources
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5.1.0
       with:
         repository: hefesoftsas/savia-plugins
         ref: ${{ steps.release.outputs.revision }}
