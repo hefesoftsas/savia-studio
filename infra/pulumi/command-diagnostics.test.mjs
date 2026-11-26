@@ -183,6 +183,12 @@ test("public failures expose only allowlisted diagnostics and safe metadata", as
       "INSPECT_PRIVATE_DIAGNOSTICS",
     ],
     [
+      "D1 queue overload",
+      'D1QueueOverloaded [Error]: D1 query failed (429): [{"code":7429,"message":"private response"}]',
+      "D1_OVERLOADED",
+      "RETRY_WITH_BACKOFF",
+    ],
+    [
       "D1 response limit",
       "Refusing to finish backup with unreadable table plugin_store_artifacts: D1 query failed (400): [{code:7500,message:D1 query result exceeded the maximum response size limit of 50 MB}]",
       "D1_RESPONSE_TOO_LARGE",

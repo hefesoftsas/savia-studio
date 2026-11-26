@@ -138,6 +138,12 @@ function Probe({
   );
 }
 
+function waitForFlowName(name: string) {
+  return waitFor(() =>
+    expect(screen.getByTestId("flow-name")).toHaveTextContent(name),
+  );
+}
+
 function servicesWith(apiClient: unknown) {
   return { apiClient } as unknown as AppServices;
 }
@@ -241,7 +247,7 @@ describe("SaviaRequestProvider concurrencia", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+    await waitForFlowName("Autos");
     await user.click(screen.getByRole("button", { name: "reload" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Denied");
@@ -314,7 +320,7 @@ describe("SaviaRequestProvider concurrencia", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+    await waitForFlowName("Autos");
     await user.click(screen.getByRole("button", { name: "dirty" }));
     await user.click(screen.getByRole("button", { name: "reload" }));
 
@@ -345,7 +351,7 @@ describe("SaviaRequestProvider concurrencia", () => {
           </AppServicesProvider>
         </MemoryRouter>,
       );
-      expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+      await waitForFlowName("Autos");
       get.mockResolvedValueOnce({ ...autos, name: "Fresh Autos" });
       get.mockRejectedValueOnce(
         denied
@@ -397,7 +403,7 @@ describe("SaviaRequestProvider concurrencia", () => {
           </AppServicesProvider>
         </MemoryRouter>,
       );
-      expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+      await waitForFlowName("Autos");
 
       reloading = true;
       await user.click(screen.getByRole("button", { name: "reload" }));
@@ -488,7 +494,7 @@ describe("SaviaRequestProvider concurrencia", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+    await waitForFlowName("Autos");
     await user.click(screen.getByRole("button", { name: "dirty" }));
     await user.click(screen.getByRole("button", { name: "save" }));
 
@@ -519,7 +525,7 @@ describe("SaviaRequestProvider concurrencia", () => {
         </AppServicesProvider>
       </MemoryRouter>,
     );
-    expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+    await waitForFlowName("Autos");
     await user.click(screen.getByRole("button", { name: "dirty" }));
     await user.click(screen.getByRole("button", { name: "save" }));
     expect(put).toHaveBeenCalledWith(
@@ -582,7 +588,7 @@ describe("SaviaRequestProvider concurrencia", () => {
       );
       const user = userEvent.setup();
       const { rerender } = render(renderTree());
-      expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+      await waitForFlowName("Autos");
       await user.click(screen.getByRole("button", { name: "dirty" }));
       deferReload = outcome === "is denied during reload";
       await user.click(
@@ -661,7 +667,7 @@ describe("SaviaRequestProvider concurrencia", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+    await waitForFlowName("Autos");
     await user.click(
       screen.getByRole("button", { name: "pending navigation" }),
     );
@@ -721,7 +727,7 @@ describe("SaviaRequestProvider concurrencia", () => {
       );
       const { rerender } = render(renderTree());
 
-      expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+      await waitForFlowName("Autos");
       await user.click(
         screen.getByRole("button", { name: "pending navigation" }),
       );
@@ -792,7 +798,7 @@ describe("SaviaRequestProvider concurrencia", () => {
       expect(get).toHaveBeenCalledWith(expect.stringContaining("/flows/autos")),
     );
     await user.click(screen.getByRole("button", { name: "ir" }));
-    expect(await screen.findByTestId("flow-name")).toHaveTextContent("Hogar");
+    await waitForFlowName("Hogar");
     // La respuesta tardía de autos no reemplaza a hogar.
     autosDetail.resolve(autos);
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -818,7 +824,7 @@ describe("SaviaRequestProvider concurrencia", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+    await waitForFlowName("Autos");
     foldersSlow.resolve(["Cotizaciones"]);
   });
 
@@ -899,7 +905,7 @@ describe("SaviaRequestProvider concurrencia", () => {
     );
 
     // Contenido conservado visible de inmediato...
-    expect(await screen.findByTestId("flow-name")).toHaveTextContent("Autos");
+    await waitForFlowName("Autos");
     // ...y la URL refleja la selección tras revalidar una sola vez.
     await waitFor(() =>
       expect(get).toHaveBeenCalledWith(expect.stringContaining("/folders")),

@@ -54,7 +54,7 @@ function summarizeMigration(record) {
   if (!migrationPath.test(stderr)) return null;
   const message =
     stderr.match(
-      /^(?:Error|TypeError|D1StatementRejected)(?: \[\w+\])?: (.*)$/m,
+      /^(?:Error|TypeError|D1StatementRejected|D1QueueOverloaded)(?: \[\w+\])?: (.*)$/m,
     )?.[1] ?? "";
   const http = message.match(/^D1 query failed \(([1-5]\d{2})\): (.*)$/);
   if (http) {

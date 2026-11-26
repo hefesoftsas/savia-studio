@@ -21,6 +21,14 @@ function fixture() {
     `import {DatabaseSync} from 'node:sqlite';
 const db=new DatabaseSync(${JSON.stringify(file)});db.exec('PRAGMA foreign_keys=ON');
 let concurrentBatchCommitted = false;
+let overloadReported = false;
+const overloaded = (code) => {
+  const wait = process.env.D1_RETRY_AFTER;
+  return Response.json({success:false, errors:[{code,message:'D1 request rejected'}]}, {
+    status:429,
+    ...(wait ? {headers:{'retry-after':wait}} : {}),
+  });
+};
 if (process.env.STALL_D1_BODY === '1') {
   AbortSignal.timeout = () => {
     const controller = new AbortController();
@@ -30,6 +38,19 @@ if (process.env.STALL_D1_BODY === '1') {
 }
 globalThis.fetch=async (_url,options)=>{
   const {sql,batch}=JSON.parse(options.body);
+  const persistentOverload = process.env.D1_PERSISTENT_OVERLOAD === '1';
+  if (sql?.startsWith('CREATE TABLE IF NOT EXISTS _savia_migrations') && process.env.D1_LEDGER_OVERLOAD && (!overloadReported || persistentOverload)) {
+    overloadReported = true;
+    if (persistentOverload) console.log('fixture: ledger request overloaded');
+    return overloaded(Number(process.env.D1_LEDGER_OVERLOAD));
+  }
+  if (batch && process.env.D1_BATCH_OVERLOAD_ONCE === '1' && !overloadReported) {
+    overloadReported = true;
+    return overloaded(7429);
+  }
+  if (batch && process.env.D1_OVERLOAD_AFTER_BATCH === '1' && concurrentBatchCommitted && batch.at(-1).sql.includes('0001_initial.sql')) {
+    throw new Error('already recorded migration was replayed');
+  }
   if (batch && process.env.STALL_D1_BODY === '1') {
     if (!options.signal) throw new Error('no D1 request deadline');
     return {ok:true,json:()=>new Promise((_,reject)=>{
@@ -61,6 +82,10 @@ globalThis.fetch=async (_url,options)=>{
       return {results:db.prepare(statement).all(),success:true};
     });
     if (batch) db.exec('COMMIT');
+    if (batch && process.env.D1_OVERLOAD_AFTER_BATCH === '1' && !concurrentBatchCommitted) {
+      concurrentBatchCommitted = true;
+      return overloaded(7429);
+    }
     if (batch && process.env.CONCURRENT_D1_BATCH === '1' && !concurrentBatchCommitted) {
       concurrentBatchCommitted = true;
       return {ok:false,status:400,json:async()=>({
@@ -271,6 +296,76 @@ test("retired history is rejected before changing application data", () => {
     f.close();
   }
 });
+
+test("retries the migration history initialization on D1 queue overload", () => {
+  const f = fixture();
+  try {
+    const result = f.run({ D1_LEDGER_OVERLOAD: "7429" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Applied 0001_initial\.sql/);
+  } finally {
+    f.close();
+  }
+});
+
+test("retries an overloaded batch when its migration was still pending", () => {
+  const f = fixture();
+  try {
+    const result = f.run({ D1_BATCH_OVERLOAD_ONCE: "1" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Applied 0001_initial\.sql/);
+  } finally {
+    f.close();
+  }
+});
+
+test("checks D1 migration history before replaying a batch after overload", () => {
+  const f = fixture();
+  try {
+    const result = f.run({ D1_OVERLOAD_AFTER_BATCH: "1" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Already applied 0001_initial\.sql/);
+    assert.match(result.stdout, /Applied 0002_bootstrap\.sql/);
+  } finally {
+    f.close();
+  }
+});
+
+test("fails immediately on an HTTP 429 without the D1 overload code", () => {
+  const f = fixture();
+  try {
+    const result = f.run({ D1_LEDGER_OVERLOAD: "7406" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /D1 query failed \(429\).*7406/);
+    assert.doesNotMatch(result.stdout, /Applied /);
+  } finally {
+    f.close();
+  }
+});
+
+for (const [retryAfter, requests] of [
+  ["", 3],
+  ["15", 1],
+]) {
+  test(`stops D1 overload after ${requests} requests with Retry-After ${retryAfter || "absent"}`, () => {
+    const f = fixture();
+    try {
+      const result = f.run({
+        D1_LEDGER_OVERLOAD: "7429",
+        D1_PERSISTENT_OVERLOAD: "1",
+        D1_RETRY_AFTER: retryAfter,
+      });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /D1 query failed \(429\).*7429/);
+      assert.equal(
+        result.stdout.match(/fixture: ledger request overloaded/g)?.length,
+        requests,
+      );
+    } finally {
+      f.close();
+    }
+  });
+}
 
 test("ends a migration when the D1 response body stalls", () => {
   const f = fixture();
