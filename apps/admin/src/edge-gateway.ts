@@ -10,6 +10,7 @@ import {
   parseTenantSlugFromHostname,
 } from "@savia/tenant-host/tenant-host";
 import { companionDownloadsResponse } from "./companion-downloads-catalog";
+import { SERVICE_ROUTE_EXACT, SERVICE_ROUTE_PREFIX } from "./service-routes";
 
 export type GatewayFetcher = {
   fetch(request: Request): Response | Promise<Response>;
@@ -219,15 +220,7 @@ export function tenantSlugFromRequest(
 
 export function isServicePath(pathname: string): boolean {
   return (
-    pathname.startsWith("/api/") ||
-    pathname.startsWith("/v1/") ||
-    pathname === "/webhooks/whatsapp" ||
-    pathname.startsWith("/s/") ||
-    pathname.startsWith("/.well-known/") ||
-    pathname === "/mcp" ||
-    pathname === "/health" ||
-    pathname === "/docs" ||
-    pathname === "/openapi.json"
+    SERVICE_ROUTE_PREFIX.test(pathname) || SERVICE_ROUTE_EXACT.test(pathname)
   );
 }
 

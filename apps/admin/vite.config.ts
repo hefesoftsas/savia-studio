@@ -1,5 +1,9 @@
 import { companionDownloadsResponse } from "./src/companion-downloads-catalog.ts";
 import { PUBLIC_VISITOR_ROUTE_DENYLIST } from "./src/pwa/deployment-recovery.ts";
+import {
+  SERVICE_ROUTE_EXACT,
+  SERVICE_ROUTE_PREFIX,
+} from "./src/service-routes.ts";
 import { pluginDevelopmentReload } from "./build/plugin-development.ts";
 import { officePlugin } from "./build/office-plugin.ts";
 import { collectOfflineShellAssets } from "./build/offline-shell-assets.ts";
@@ -111,10 +115,9 @@ export default defineConfig({
         navigateFallback: "index.html",
         navigateFallbackDenylist: [
           /^\/downloads\//,
-          /^\/api/,
-          /^\/v1/,
+          SERVICE_ROUTE_PREFIX,
+          SERVICE_ROUTE_EXACT,
           ...PUBLIC_VISITOR_ROUTE_DENYLIST,
-          /^\/s\/p(?:\/|\?|$)/,
           /^\/register(?:\/|\?|$)/,
           /^\/office(?:\/|\?|$)/,
           /^\/plugin-editor(?:\.html)?(?:\/|\?|$)/,
@@ -249,6 +252,10 @@ export default defineConfig({
         target: devApiTarget,
         changeOrigin: devChangeOrigin,
         ws: true,
+      },
+      [SERVICE_ROUTE_EXACT.source]: {
+        target: devApiTarget,
+        changeOrigin: devChangeOrigin,
       },
     },
   },

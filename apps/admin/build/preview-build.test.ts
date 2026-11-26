@@ -1,5 +1,8 @@
 // @vitest-environment node
+import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -135,6 +138,59 @@ it.each(["dotenv", "environment"])(
     }
   },
 );
+
+it("proxies direct API routes through the Admin development server", async () => {
+  const root = await mkdtemp(join(tmpdir(), "savia-admin-proxy-"));
+  const api = createHttpServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(
+      JSON.stringify({ url: request.url, host: request.headers.host }),
+    );
+  });
+  let server: Awaited<ReturnType<typeof createServer>> | undefined;
+  try {
+    await writeFile(
+      join(root, "index.html"),
+      "<html><head></head><body>Admin fixture</body></html>",
+    );
+    api.listen(0, "127.0.0.1");
+    await once(api, "listening");
+    const apiPort = (api.address() as AddressInfo).port;
+    vi.stubEnv("SAVIA_DEV_API_URL", `http://127.0.0.1:${apiPort}`);
+    vi.stubEnv("SAVIA_DEV_USE_LOCAL_API", undefined);
+    server = await createServer({
+      root,
+      configFile: fileURLToPath(new URL("../vite.config.ts", import.meta.url)),
+      logLevel: "silent",
+      server: { host: "127.0.0.1", port: 0, hmr: false, watch: null },
+    });
+    await server.listen();
+    const port = (server.httpServer!.address() as AddressInfo).port;
+    const host = `127.0.0.1:${port}`;
+    const options = { signal: AbortSignal.timeout(5000) };
+    for (const path of [
+      "/health",
+      "/docs?theme=dark",
+      "/openapi.json",
+      "/mcp",
+      "/webhooks/whatsapp",
+      "/s/b/0123456789abcdef",
+    ]) {
+      const response = await fetch(`http://${host}${path}`, options);
+      expect(response.headers.get("content-type"), path).toBe(
+        "application/json",
+      );
+      expect(await response.json(), path).toEqual({ url: path, host });
+    }
+    const page = await fetch(`http://${host}/docs-guide`, options);
+    expect(await page.text()).toContain("Admin fixture");
+  } finally {
+    await server?.close();
+    await api[Symbol.asyncDispose]();
+    vi.unstubAllEnvs();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 it.each([
   { command: "serve" as const, enabled: "0", disabled: true },

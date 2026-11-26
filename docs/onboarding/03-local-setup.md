@@ -179,6 +179,8 @@ Open `http://127.0.0.1:5173/` and log in with the bootstrap admin
 (`BETTER_AUTH_BOOTSTRAP_*` in `apps/auth/wrangler.jsonc`; see
 `ensureBootstrapAdministrator` in `apps/auth/src/index.ts`). The interactive
 API reference lives at `http://127.0.0.1:8787/docs` (Scalar).
+You can also use the Admin port for `/docs`, `/openapi.json`, and `/health`.
+Vite forwards those requests to the API.
 
 ## Typical issues
 
