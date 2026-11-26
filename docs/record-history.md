@@ -24,6 +24,9 @@ User attribution comes from the authenticated write, not the record owner. Workf
 
 D1 triggers capture selected deltas in the same transaction as committed changes. Ordinary CRUD, bulk changes, imports, workflows, public forms, offline pushes, related-record bundles and schema migrations use this capture. Failed transactions leave no history. Retried offline and bundle operations reuse their existing receipts and do not capture another event. Schema migrations use the field selection active before publication.
 
+Imports that copy rows with `INSERT … SELECT` retain the authenticated actor
+when the statement includes SQL comments.
+
 Strings are stored up to 2048 characters per side, explicitly marked as truncated. Full source values are compared to detect changes even beyond the stored prefix. At most 50 selected fields and bounded text keep one history entry below the size of two unrestricted records. This is an inspection trail, not a backup of complete documents.
 
 Retention is fixed when an event is captured. Changing the duration applies to future events and never extends existing expiry. Disabling tracking stops new capture while existing events remain readable until their original expiry. Reads hide expired entries immediately. Scheduled maintenance physically deletes at most 500 expired entries per invocation using an expiry index, including history from idle or disabled collections; physical cleanup may lag if expiration volume exceeds that batch. Hard deletion of a record also deletes its history.
