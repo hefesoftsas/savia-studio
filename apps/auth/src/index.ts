@@ -493,15 +493,24 @@ async function ensureSchema(
   }
 }
 
+async function checkAuthSchema(
+  auth: ReturnType<typeof createBetterAuth>,
+): Promise<void> {
+  const context = await auth.$context;
+  await context.explicitSchemaCheck?.();
+}
+
 /** Initialize native auth schema without creating users, sessions or OAuth clients. */
 export async function initializeAuthSchema(
   environment: AuthWorkerEnvironment,
   dependencies: AuthDependencies = {},
 ): Promise<void> {
-  await ensureSchema(
-    createBetterAuth(environment, dependencies),
-    environment.AUTH_DB,
-  );
+  const auth = createBetterAuth(environment, dependencies, {
+    validateSchema: false,
+  });
+  void auth.$context.catch(() => undefined);
+  await ensureSchema(auth, environment.AUTH_DB);
+  await checkAuthSchema(auth);
 }
 
 async function ensureLocalSeedUser(
@@ -1115,8 +1124,7 @@ export function createAuthHandler(
     await initializePendingEmailVerificationSchema(environment);
     await initializeEmailRegistrationSchema(environment);
     await initializeFederatedEmailVerificationSchema(environment);
-    const context = await auth.$context;
-    await context.explicitSchemaCheck?.();
+    await checkAuthSchema(auth);
     const bootstrap = await ensureAuthBootstrap(auth, environment);
     const fingerprint = await authConfigurationFingerprint(environment);
     const readiness = {
@@ -1269,8 +1277,10 @@ export function createAuthHandler(
           seedOAuthResources: false,
         });
       } else {
-        // Native startup verifies the database under its deployment lock first.
-        auth = instance ??= createBetterAuth(environment, dependencies);
+        // Native startup migrates and verifies the schema under its deployment lock.
+        auth = instance ??= createBetterAuth(environment, dependencies, {
+          validateSchema: false,
+        });
         // Better Auth begins plugin initialization immediately, before this
         // request reaches the first $context await. Observe an early rejection
         // so it cannot become unhandled while schema/bootstrap work completes;
@@ -1278,6 +1288,7 @@ export function createAuthHandler(
         void auth.$context.catch(() => undefined);
         const schemaStarted = performance.now();
         await ensureSchema(auth, environment.AUTH_DB);
+        await checkAuthSchema(auth);
         timings.auth_schema = performance.now() - schemaStarted;
         const bootstrapStarted = performance.now();
         bootstrap = await ensureAuthBootstrap(auth, environment);
