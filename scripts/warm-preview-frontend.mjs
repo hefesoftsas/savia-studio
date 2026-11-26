@@ -39,6 +39,7 @@ try {
     ).origin;
     const buildEnv = {
       ...env,
+      SAVIA_ADMIN_IGNORE_ENV_FILES: "true",
       SAVIA_PLUGIN_EDITOR_DEPLOYMENT_URL: origin,
       VITE_PLUGIN_EDITOR_RUNTIME_URL: `${origin}/plugin-editor`,
     };

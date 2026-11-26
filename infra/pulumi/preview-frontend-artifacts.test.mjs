@@ -13,7 +13,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   restorePreviewFrontendArtifact,
   stagePreviewFrontendArtifact,
@@ -85,6 +86,56 @@ async function fixture(t) {
     pnpmVersion: "11.24.0",
   };
 }
+
+test("Preview warmup isolates both frontend builds and stages the matching proof", async (t) => {
+  const input = await fixture(t);
+  const bin = join(input.root, "test-bin");
+  await mkdir(bin);
+  await writeFile(
+    join(bin, "pnpm"),
+    `#!/bin/sh
+case "$*" in
+  "--version") printf '11.24.0\\n' ;;
+  "--filter @savia/admin run build:assets"|"--filter @savia/admin run build:plugin-editor")
+    test "$SAVIA_ADMIN_IGNORE_ENV_FILES" = true ;;
+  *) exit 2 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
+  const script = fileURLToPath(
+    new URL("../../scripts/warm-preview-frontend.mjs", import.meta.url),
+  );
+  const output = join(input.root, "workflow-output");
+  const warmupEnv = {
+    ...process.env,
+    PATH: [bin, process.env.PATH].join(delimiter),
+    GITHUB_EVENT_NAME: "push",
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_SHA: input.revision,
+    GITHUB_REPOSITORY: input.repository,
+    GITHUB_OUTPUT: output,
+    PREVIEW_PUSH_BASE: input.revision,
+    PREVIEW_PLUGIN_EDITOR_ORIGIN: env.SAVIA_PLUGIN_EDITOR_DEPLOYMENT_URL,
+    SAVIA_ADMIN_IGNORE_ENV_FILES: "false",
+  };
+  await execFileAsync(process.execPath, [script, input.artifact], {
+    cwd: input.root,
+    env: warmupEnv,
+  });
+  assert.equal(await readFile(output, "utf8"), "ready=true\n");
+  await clearGeneratedOutputs(input.root);
+  await restorePreviewFrontendArtifact({
+    ...input,
+    env: {
+      ...warmupEnv,
+      SAVIA_ADMIN_IGNORE_ENV_FILES: "true",
+      SAVIA_PLUGIN_EDITOR_DEPLOYMENT_URL:
+        warmupEnv.PREVIEW_PLUGIN_EDITOR_ORIGIN,
+      VITE_PLUGIN_EDITOR_RUNTIME_URL: `${warmupEnv.PREVIEW_PLUGIN_EDITOR_ORIGIN}/plugin-editor`,
+    },
+  });
+});
 
 test("stages and restores the exact public Preview frontend outputs", async (t) => {
   const input = await fixture(t);
@@ -201,6 +252,18 @@ test("rebuilds Preview frontend assets when the Flows build setting changes", as
     code: "ENOENT",
   });
   await restorePreviewFrontendArtifact({ ...input, env: enabled });
+});
+
+test("rejects an artifact compiled with a different dotenv policy", async (t) => {
+  const input = await fixture(t);
+  const isolated = { ...env, SAVIA_ADMIN_IGNORE_ENV_FILES: "true" };
+  await stagePreviewFrontendArtifact({ ...input, env: isolated });
+  await clearGeneratedOutputs(input.root);
+  await assert.rejects(
+    restorePreviewFrontendArtifact({ ...input, env }),
+    /metadata does not match/,
+  );
+  await restorePreviewFrontendArtifact({ ...input, env: isolated });
 });
 
 test("rejects symlinks and unexpected artifact files", async (t) => {

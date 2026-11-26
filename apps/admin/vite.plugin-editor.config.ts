@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 export default defineConfig({
   base: "/",
   publicDir: false,
+  envDir:
+    process.env.SAVIA_ADMIN_IGNORE_ENV_FILES === "true" ? false : undefined,
   define: { "import.meta.env.SAVIA_ISOLATED_PLUGIN_EDITOR_BUILD": "true" },
   build: {
     outDir: "dist-plugin-editor",
