@@ -33,15 +33,15 @@ const type = (d: string, p: string) => {
 // SQLite compares JSON numbers (including booleans) numerically, then text.
 const rank = (d: string, p: string) =>
   `(CASE WHEN ${node(d, p)} IS NULL OR jsonb_typeof(${node(d, p)})='null' THEN NULL WHEN jsonb_typeof(${node(d, p)})='number' THEN 1 WHEN jsonb_typeof(${node(d, p)})='boolean' THEN 1 ELSE 2 END)`;
-const numeric = (d: string, p: string) =>
-  `(CASE WHEN ${rank(d, p)}=1 THEN (${text(d, p)})::numeric END)`;
 /** The three non-NULL scalar keys used for JSON ordering and btree indexes. */
-export const postgresJsonSortParts = (document: string, path: string) =>
-  [
-    `COALESCE(${rank(document, path)},0)`,
-    `COALESCE(${numeric(document, path)},0)`,
-    `(CASE WHEN ${rank(document, path)}=2 THEN ${text(document, path)} ELSE '' END) COLLATE "C"`,
+export const postgresJsonSortParts = (document: string, path: string) => {
+  const value = rawNode(document, path);
+  return [
+    `savia_core.studio_json_sort_rank(${value})`,
+    `savia_core.studio_json_sort_number(${value})`,
+    `savia_core.studio_json_sort_text(${value}) COLLATE "C"`,
   ] as const;
+};
 export const postgresDialect: SqlDialect = {
   name: "postgres",
   quoteIdentifier,
@@ -67,7 +67,7 @@ export const postgresDialect: SqlDialect = {
       throw new Error("Unsupported JSON comparison value");
     const isNumber = typeof value !== "string",
       r = isNumber ? 1 : 2;
-    const expr = isNumber ? numeric(d, p) : text(d, p);
+    const expr = isNumber ? sortNumber : text(d, p);
     if (equal) {
       const numericValue = typeof value === "boolean" ? Number(value) : value;
       const expectedRank = isNumber ? 1 : 2;

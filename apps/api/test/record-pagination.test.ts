@@ -86,6 +86,17 @@ it("keeps numbered page jumps compatible", async () => {
   expect(result.total).toBe(7);
 });
 
+it.each(["Infinity", "9007199254740991", "9007199254740992"])(
+  "rejects a page with an unsafe offset before querying records (%s)",
+  async (page) => {
+    const response = await request(`/records/items?perPage=3&page=${page}`);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      error: "Paginación inválida.",
+    });
+  },
+);
+
 it("invalidates cached sorted pages and summaries immediately after a mutation", async () => {
   const sorted = "/records/items?sort=name&order=ASC&perPage=3";
   const before: any = await (await request(sorted)).json();

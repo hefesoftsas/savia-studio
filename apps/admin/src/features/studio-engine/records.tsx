@@ -61,6 +61,7 @@ import { formatRetryTime } from "@/api/retry-after";
 import { recordPath } from "./record-path";
 import { getListObjectsQueryKey } from "./generated/studio";
 import { getStudioRuntime } from "./runtime";
+import { invalidateStudioRealtimeEvent } from "./studio-realtime";
 import {
   fieldEntries,
   getPipeline,
@@ -375,6 +376,7 @@ export default function Records({
   const t = useMessages(recordsMessages);
 
   const capabilities = collectionCapabilities(object);
+  const isLinkedCollection = Boolean(object.config.studio?.collection);
   const canConfigureSourceForm =
     !capabilities.schema && !capabilities.customFields;
   const managedCustomer = object.config.studio?.business === "managed-customer";
@@ -450,8 +452,10 @@ export default function Records({
   const appliedDefaultFor = useRef<string | null>(null);
   const [exportingCsv, setExportingCsv] = useState(false);
   const exportInProgress = useRef(false);
-  const client = useQueryClient(),
-    pipeline = getPipeline(object);
+  const client = useQueryClient();
+  const pipeline = isLinkedCollection ? undefined : getPipeline(object);
+  const mode = pipeline ? s.mode : "table";
+  const stage = isLinkedCollection ? "" : s.stage;
   const views = useQuery({
     queryKey: ["views", object.name],
     queryFn: () => api(`/views/${object.name}`),
@@ -515,14 +519,14 @@ export default function Records({
   };
   const querySearch = useDebouncedSearch(s.q);
   const csvSearchPending = capabilities.search !== false && s.q !== querySearch;
-  const querySettings = { ...s, q: querySearch };
+  const querySettings = { ...s, q: querySearch, stage };
   const summary = useQuery({
     queryKey: [
       "summary",
       object.name,
       querySearch,
       s.searchField,
-      s.stage,
+      stage,
       s.filters,
       s.group,
       trash,
@@ -616,7 +620,7 @@ export default function Records({
         ? {}
         : {
             filters: JSON.stringify(s.filters),
-            ...(s.stage ? { stage: s.stage } : {}),
+            ...(stage ? { stage } : {}),
           }),
       ...(capabilities.sort === false
         ? {}
@@ -808,9 +812,9 @@ export default function Records({
               patch({ mode: "table" });
             }}
             showPipelineToggle={Boolean(pipeline)}
-            mode={s.mode}
+            mode={mode}
             onModeChange={(mode) => patch({ mode })}
-            stage={s.stage}
+            stage={stage}
             onStageChange={(stage) => patch({ stage })}
             pipelineFieldLabel={
               pipeline?.field
@@ -872,10 +876,10 @@ export default function Records({
               ))}
             </div>
           )}
-          {s.mode === "pipeline" && pipeline && !trash ? (
+          {mode === "pipeline" && pipeline && !trash ? (
             <div className="kanban">
               {(object.config.fields[pipeline.field].options ?? [])
-                .filter((o) => !s.stage || o.value === s.stage)
+                .filter((o) => !stage || o.value === stage)
                 .map((o) => (
                   <PipelineColumn
                     key={String(o.value)}
@@ -886,7 +890,7 @@ export default function Records({
                     onOpen={onOpen}
                   />
                 ))}
-              {!s.stage && (
+              {!stage && (
                 <PipelineColumn
                   object={object}
                   settings={querySettings}
@@ -2098,19 +2102,42 @@ function RecordsFooter({
     </div>
   );
 }
-export function PipelineColumn({
-  object,
-  settings,
-  stage,
-  label,
-  onOpen,
-}: {
+const pipelinePageSize = 20;
+
+type PipelineColumnProps = {
   object: StudioObject;
   settings: Settings;
   stage: string;
   label: string;
   onOpen: (r: StudioRecord) => void;
-}) {
+};
+
+export function PipelineColumn({ settings, ...column }: PipelineColumnProps) {
+  const requestParams = new URLSearchParams({
+    ...params(settings),
+    emptyStage: String(!column.stage),
+    stage: column.stage,
+    perPage: String(pipelinePageSize),
+    sort: settings.sort.field,
+    order: settings.sort.order,
+  }).toString();
+
+  return (
+    <PipelineColumnPage
+      key={JSON.stringify([column.object.name, requestParams])}
+      {...column}
+      requestParams={requestParams}
+    />
+  );
+}
+
+function PipelineColumnPage({
+  object,
+  stage,
+  label,
+  onOpen,
+  requestParams,
+}: Omit<PipelineColumnProps, "settings"> & { requestParams: string }) {
   const labelLocale = useAppLocale();
   const uiLocale = intlLocale(labelLocale);
 
@@ -2119,48 +2146,40 @@ export function PipelineColumn({
   const [page, setPage] = useState(1);
   const pipeline = getPipeline(object)!;
   const client = useQueryClient();
-  const filters = settings.filters;
   const query = useQuery({
-    queryKey: [
-      "pipeline",
-      object.name,
-      stage,
-      settings.q,
-      settings.searchField,
-      settings.filters,
-      page,
-      settings.sort,
-    ],
-    queryFn: () =>
-      api(
-        `/records/${object.name}?` +
-          new URLSearchParams({
-            ...params(settings),
-            filters: JSON.stringify(filters),
-            emptyStage: String(!stage),
-            stage,
-            page: String(page),
-            perPage: "20",
-            sort: settings.sort.field,
-            order: settings.sort.order,
-          }),
-      ),
+    queryKey: ["pipeline", object.name, requestParams, page],
+    queryFn: () => api(`/records/${object.name}?${requestParams}&page=${page}`),
   });
-  useEffect(
-    () => setPage(1),
-    [settings.q, settings.searchField, settings.filters],
-  );
+  const total = query.data?.total;
+  const lastPage =
+    typeof total === "number"
+      ? Math.max(1, Math.ceil(total / pipelinePageSize))
+      : undefined;
+  useEffect(() => {
+    if (
+      query.isSuccess &&
+      !query.isFetching &&
+      lastPage !== undefined &&
+      page > lastPage
+    )
+      setPage((current) => Math.min(current, lastPage));
+  }, [lastPage, page, query.isFetching, query.isSuccess]);
   async function move(record: StudioRecord, next: string) {
+    const runtime = getStudioRuntime();
     try {
+      if (String(record[pipeline.field] ?? "") === next) return;
       await api(recordPath(object.name, record.id), "PATCH", {
         [pipeline.field]: next || null,
         _version: record._version,
       });
-      await client.invalidateQueries();
     } catch (e) {
       toast.error((e as Error).message);
-      await query.refetch();
     }
+    await invalidateStudioRealtimeEvent(
+      client,
+      { topic: "records", collection: object.name, id: record.id },
+      runtime,
+    );
   }
   return (
     <section
@@ -2172,13 +2191,14 @@ export function PipelineColumn({
           const r = JSON.parse(
             e.dataTransfer.getData("application/x-savia-record"),
           );
-          if (r.object === object.name) void move(r.record, stage);
+          if (r.object === object.name && typeof r.record?.id === "string")
+            void move(r.record, stage);
         } catch {}
       }}
     >
       <header>
         <strong>{label}</strong>
-        <span>{query.data?.total ?? 0}</span>
+        <span>{total ?? 0}</span>
       </header>
       {query.error ? <p role="alert">{query.error.message}</p> : null}
       {query.isPending ? (
@@ -2268,7 +2288,7 @@ export function PipelineColumn({
         <Button
           size="sm"
           variant="ghost"
-          disabled={page * 20 >= (query.data?.total ?? 0)}
+          disabled={query.isFetching || page >= (lastPage ?? 1)}
           onClick={() => setPage(page + 1)}
         >
           {t("Siguiente")}

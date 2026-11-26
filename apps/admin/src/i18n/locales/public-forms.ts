@@ -16,6 +16,11 @@ export const publicFormsMessages = {
     "The submission limit has been reached. Try later.",
     "O limite de envios foi atingido. Tente mais tarde.",
   ],
+  "Se alcanzó el límite de envíos. Inténtalo después de %{time}.": [
+    "Se alcanzó el límite de envíos. Inténtalo después de %{time}.",
+    "The submission limit has been reached. Try again after %{time}.",
+    "O limite de envios foi atingido. Tente novamente após %{time}.",
+  ],
   "No se pudo validar el envío. Revisa los campos y completa de nuevo la verificación.":
     [
       "No se pudo validar el envío. Revisa los campos y completa de nuevo la verificación.",
@@ -34,10 +39,16 @@ export const publicFormsMessages = {
       "The form is unavailable. Ask the person who shared it for a new link.",
       "O formulário está indisponível. Peça um novo link a quem o compartilhou.",
     ],
-  "No se pudo cargar el formulario. Revisa tu conexión y recarga la página.": [
-    "No se pudo cargar el formulario. Revisa tu conexión y recarga la página.",
-    "Unable to load the form. Check your connection and reload the page.",
-    "Não foi possível carregar o formulário. Verifique sua conexão e recarregue a página.",
+  "No se pudo cargar el formulario. Revisa tu conexión y vuelve a intentarlo.":
+    [
+      "No se pudo cargar el formulario. Revisa tu conexión y vuelve a intentarlo.",
+      "Unable to load the form. Check your connection and try again.",
+      "Não foi possível carregar o formulário. Verifique sua conexão e tente novamente.",
+    ],
+  "Reintentar carga": [
+    "Reintentar carga",
+    "Retry loading",
+    "Tentar carregar novamente",
   ],
   "Cargando formulario…": [
     "Cargando formulario…",
@@ -60,12 +71,17 @@ export const publicFormsMessages = {
       "Unable to complete verification. Check your connection and try again.",
       "Não foi possível concluir a verificação. Verifique sua conexão e tente novamente.",
     ],
-  "No se pudo cargar la verificación. Revisa tu conexión y recarga la página.":
+  "No se pudo cargar la verificación. Revisa tu conexión y vuelve a intentarlo.":
     [
-      "No se pudo cargar la verificación. Revisa tu conexión y recarga la página.",
-      "Unable to load verification. Check your connection and reload the page.",
-      "Não foi possível carregar a verificação. Verifique sua conexão e recarregue a página.",
+      "No se pudo cargar la verificación. Revisa tu conexión y vuelve a intentarlo.",
+      "Unable to load verification. Check your connection and try again.",
+      "Não foi possível carregar a verificação. Verifique sua conexão e tente novamente.",
     ],
+  "Reintentar verificación": [
+    "Reintentar verificación",
+    "Retry verification",
+    "Tentar verificação novamente",
+  ],
   "No pudimos confirmar el envío. Puedes reintentar el mismo envío.": [
     "No pudimos confirmar el envío. Puedes reintentar el mismo envío.",
     "We could not confirm the submission. You can retry the same submission.",
@@ -92,6 +108,17 @@ export const publicFormsMessages = {
     "Submission recorded",
     "Envio registrado",
   ],
+  "Cotización no completada": [
+    "Cotización no completada",
+    "Quote not completed",
+    "Cotação não concluída",
+  ],
+  "Contacta a quien compartió el enlace antes de volver a enviar la solicitud.":
+    [
+      "Contacta a quien compartió el enlace antes de volver a enviar la solicitud.",
+      "Contact the person who shared the link before sending the request again.",
+      "Entre em contato com quem compartilhou o link antes de enviar a solicitação novamente.",
+    ],
   "Este envío ya fue recibido o está en proceso. No lo vuelvas a enviar.": [
     "Este envío ya fue recibido o está en proceso. No lo vuelvas a enviar.",
     "This submission has already been received or is being processed. Do not submit it again.",
@@ -380,21 +407,13 @@ export const publicFormsMessages = {
     "The public link is invalid.",
     "O link público é inválido.",
   ],
-  "COTIZACIONES": [
-    "COTIZACIONES",
-    "QUOTES",
-    "COTAÇÕES",
-  ],
+  COTIZACIONES: ["COTIZACIONES", "QUOTES", "COTAÇÕES"],
   "Cotizador por pasos": [
     "Cotizador por pasos",
     "Step-by-step quote",
     "Cotação passo a passo",
   ],
-  "Cotizador": [
-    "Cotizador",
-    "Quote",
-    "Cotador",
-  ],
+  Cotizador: ["Cotizador", "Quote", "Cotador"],
   Vehículo: ["Vehículo", "Vehicle", "Veículo"],
   "Solicitante y conductor": [
     "Solicitante y conductor",
@@ -489,6 +508,12 @@ export const publicFormsMessages = {
   ],
   Limpiar: ["Limpiar", "Clear", "Limpar"],
   "Sin respuesta": ["Sin respuesta", "No response", "Sem resposta"],
+  "Consulta finalizada": [
+    "Consulta finalizada",
+    "Check complete",
+    "Consulta concluída",
+  ],
+  "En espera": ["En espera", "Waiting", "Em espera"],
   "Ej. TESTCAR": ["Ej. TESTCAR", "E.g. TESTCAR", "Ex.: TESTCAR"],
   "Ej. 123456": ["Ej. 123456", "E.g. 123456", "Ex.: 123456"],
   "Ej. 2024": ["Ej. 2024", "E.g. 2024", "Ex.: 2024"],

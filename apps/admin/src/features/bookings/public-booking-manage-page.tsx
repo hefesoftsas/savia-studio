@@ -5,6 +5,7 @@ import { bookingMessages } from "./booking-messages";
 import { PublicBookingAvailability } from "./public-booking-availability";
 import { PublicBookingSummary } from "./public-booking-summary";
 import {
+  canRetryPublicBookingLoad,
   publicBookingRequest as publicRequest,
   type PublicBookingApiError as ApiError,
 } from "./public-booking-request";
@@ -41,9 +42,13 @@ type ManageBootstrap = {
 };
 function timeForZone(iso: string, zone: string, locale: string) {
   return new Intl.DateTimeFormat(locale, {
-    dateStyle: "medium",
-    timeStyle: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
     timeZone: zone,
+    timeZoneName: "short",
   }).format(new Date(iso));
 }
 
@@ -60,10 +65,13 @@ function PublicBookingManagementLink({ token }: { token: string }) {
   const managePath = `/api/public/bookings/manage/${encodeURIComponent(token)}`;
   const [bootstrap, setBootstrap] = useState<ManageBootstrap>();
   const [loading, setLoading] = useState(true);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [canRetryLoad, setCanRetryLoad] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [conferenceRefreshError, setConferenceRefreshError] = useState("");
+  const [refreshError, setRefreshError] = useState("");
+  const [needsVerification, setNeedsVerification] = useState(false);
   const [closedDeadline, setClosedDeadline] = useState<number>();
   const [rescheduling, setRescheduling] = useState(false);
   const [reviewing, setReviewing] = useState(false);
@@ -79,24 +87,25 @@ function PublicBookingManagementLink({ token }: { token: string }) {
   const refreshSequence = useRef(0);
 
   useEffect(() => {
-    let active = true;
-    void publicRequest<ManageBootstrap>(managePath)
+    const controller = new AbortController();
+    void publicRequest<ManageBootstrap>(managePath, {
+      signal: controller.signal,
+    })
       .then((data) => {
-        if (active) {
+        if (!controller.signal.aborted) {
           setBootstrap(data);
           setDisplayTimeZone(data.timeZone);
         }
       })
-      .catch(() => {
-        if (active) setBootstrap(undefined);
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted)
+          setCanRetryLoad(canRetryPublicBookingLoad(error));
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       });
-    return () => {
-      active = false;
-    };
-  }, [managePath]);
+    return () => controller.abort();
+  }, [managePath, loadAttempt]);
 
   useEffect(() => {
     if (rescheduling) stepHeading.current?.focus();
@@ -173,21 +182,28 @@ function PublicBookingManagementLink({ token }: { token: string }) {
     setError(message);
   }
 
+  function requireVerification() {
+    closeRescheduleReview();
+    setRefreshError("");
+    setNeedsVerification(true);
+  }
+
   async function refreshAppointment() {
     if (!bootstrap) return;
     const previous = bootstrap.reservation;
     const request = ++refreshSequence.current;
     setRefreshing(true);
-    setConferenceRefreshError("");
+    setRefreshError("");
     try {
       const data = await publicRequest<ManageBootstrap>(managePath);
+      if (request !== refreshSequence.current) return;
       if (
-        request !== refreshSequence.current ||
         data.reservation.id !== previous.id ||
         data.reservation.version < previous.version
       )
-        return;
+        throw new Error("The appointment refresh returned stale data");
       updateBootstrap(data);
+      setNeedsVerification(false);
 
       const moved =
         data.reservation.status === "confirmed" &&
@@ -200,7 +216,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         closeRescheduleReview(moved ? appointmentMoved : "");
     } catch {
       if (request === refreshSequence.current)
-        setConferenceRefreshError(
+        setRefreshError(
           t("The appointment could not be refreshed. Try again."),
         );
     } finally {
@@ -235,7 +251,8 @@ function PublicBookingManagementLink({ token }: { token: string }) {
   );
 
   async function cancel() {
-    if (!bootstrap || busy || !checkChangeDeadline()) return;
+    if (!bootstrap || busy || needsVerification || !checkChangeDeadline())
+      return;
     invalidateRefresh();
     setBusy(true);
     setError("");
@@ -259,26 +276,28 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         () => undefined,
       );
       if (
-        current?.reservation?.id === bootstrap.reservation.id &&
-        current.reservation.version >= bootstrap.reservation.version
+        current?.reservation?.id !== bootstrap.reservation.id ||
+        current.reservation.version < bootstrap.reservation.version
       ) {
-        updateBootstrap(current);
-        if (current.reservation.status === "cancelled") {
-          setRescheduleConfirmation(undefined);
-          closeRescheduleReview();
-          return;
-        }
-        if (
-          Date.parse(current.reservation.startsAt) !==
-          Date.parse(bootstrap.reservation.startsAt)
-        ) {
-          closeRescheduleReview(appointmentMoved);
-          return;
-        }
-        if (!current.canReschedule) {
-          closeRescheduleReview(failureMessage);
-          return;
-        }
+        requireVerification();
+        return;
+      }
+      updateBootstrap(current);
+      if (current.reservation.status === "cancelled") {
+        setRescheduleConfirmation(undefined);
+        closeRescheduleReview();
+        return;
+      }
+      if (
+        Date.parse(current.reservation.startsAt) !==
+        Date.parse(bootstrap.reservation.startsAt)
+      ) {
+        closeRescheduleReview(appointmentMoved);
+        return;
+      }
+      if (!current.canReschedule) {
+        closeRescheduleReview(failureMessage);
+        return;
       }
       setError(failureMessage);
     } finally {
@@ -293,6 +312,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
       Date.parse(selection.slot.startsAt) ===
         Date.parse(bootstrap.reservation.startsAt) ||
       busy ||
+      needsVerification ||
       !checkChangeDeadline()
     )
       return;
@@ -326,7 +346,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
       const failureMessage = t(
         "This booking could not be rescheduled. Refresh the times and retry.",
       );
-      if (status !== undefined && status < 500 && !conflict) {
+      if (status !== undefined && status < 500 && status !== 408 && !conflict) {
         setError(failureMessage);
         return;
       }
@@ -338,7 +358,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         current?.reservation?.id !== bootstrap.reservation.id ||
         current.reservation.version < bootstrap.reservation.version
       ) {
-        setError(failureMessage);
+        requireVerification();
         return;
       }
       updateBootstrap(current);
@@ -403,12 +423,27 @@ function PublicBookingManagementLink({ token }: { token: string }) {
     );
   if (!bootstrap || !reservation)
     return (
-      <main className="mx-auto max-w-2xl px-4 py-10">
+      <main className="mx-auto grid max-w-2xl gap-3 px-4 py-10">
         <p role="alert" className="text-sm text-destructive">
-          {t(
-            "This booking link could not be loaded. Ask the booking owner for help.",
-          )}
+          {canRetryLoad
+            ? t("Booking settings could not be loaded.")
+            : t(
+                "This booking link could not be loaded. Ask the booking owner for help.",
+              )}
         </p>
+        {canRetryLoad && (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-fit"
+            onClick={() => {
+              setLoading(true);
+              setLoadAttempt((attempt) => attempt + 1);
+            }}
+          >
+            {t("Retry")}
+          </Button>
+        )}
       </main>
     );
 
@@ -454,22 +489,24 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         conference={reservation.conference}
         status={reservation.status}
       />
-      {reservation.status === "confirmed" &&
-        reservation.conference?.status === "pending" && (
-          <Button
-            type="button"
-            variant="outline"
-            disabled={refreshing || busy}
-            onClick={() => void refreshAppointment()}
-          >
-            {refreshing
-              ? t("Refreshing appointment…")
-              : t("Refresh appointment")}
-          </Button>
-        )}
-      {conferenceRefreshError && (
+      {(needsVerification ||
+        (reservation.status === "confirmed" &&
+          reservation.conference?.status === "pending")) && (
+        <Button
+          type="button"
+          variant="outline"
+          disabled={refreshing || busy}
+          onClick={() => void refreshAppointment()}
+        >
+          {refreshing ? t("Refreshing appointment…") : t("Refresh appointment")}
+        </Button>
+      )}
+      {(refreshError || needsVerification) && (
         <p role="alert" className="text-sm text-destructive">
-          {conferenceRefreshError}
+          {refreshError ||
+            t(
+              "We could not verify the change. Refresh the appointment before making another change.",
+            )}
         </p>
       )}
       {rescheduleConfirmation &&
@@ -502,7 +539,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
             <Button
               type="button"
               variant="outline"
-              disabled={busy}
+              disabled={busy || needsVerification}
               onClick={() => {
                 setSelection(undefined);
                 setDisplayTimeZone(bootstrap.timeZone);
@@ -518,7 +555,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
           <Button
             type="button"
             variant="destructive"
-            disabled={busy || !canChange}
+            disabled={busy || needsVerification || !canChange}
             onClick={() => void cancel()}
           >
             {t("Cancel reservation")}
@@ -569,6 +606,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
                 value={selection}
                 onChange={setSelection}
                 onReadyChange={setSlotsReady}
+                onAvailabilityUnavailable={() => void refreshAppointment()}
                 refreshKey={availabilityRefreshKey}
                 hideHeading
                 excludedStartAt={reservation.startsAt}

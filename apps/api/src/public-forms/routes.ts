@@ -10,6 +10,8 @@ import {
   objectNameSchema,
   publishPublicForm,
   publishSchema,
+  PublicSubmissionReplayConflict,
+  PublicSubmissionDailyLimitError,
   submissionSchema,
   submitPublicForm,
   tenantKey,
@@ -478,23 +480,40 @@ export function registerPublicFormRoutes(
         .first<{ state: string; response: string | null }>();
       if (!submission)
         throw new HTTPException(404, { message: "Public form unavailable." });
-      // Return only the committed public receipt, with its original result policy.
-      return c.json(
-        {
-          ...(submission.state === "complete" && submission.response
-            ? { state: "complete", receipt: JSON.parse(submission.response) }
-            : {}),
-          ...(await options.quote.quoteStatus({
-            db,
-            tenant: row.tenant_id,
-            tenantId: Number(row.tenant_id.slice("tenant:".length)),
-            objectName: row.object_name,
-            snapshot: JSON.parse(row.snapshot),
-            submission: c.req.valid("param").submissionId,
-          })),
-        },
-        200,
-      );
+      if (submission.state === "failed")
+        return c.json({ state: "failed" }, 200);
+      // Progress is optional after the public receipt has been committed.
+      const completed =
+        submission.state === "complete" && submission.response
+          ? { state: "complete", receipt: JSON.parse(submission.response) }
+          : undefined;
+      try {
+        const { items } = await options.quote.quoteStatus({
+          db,
+          tenant: row.tenant_id,
+          tenantId: Number(row.tenant_id.slice("tenant:".length)),
+          objectName: row.object_name,
+          snapshot: JSON.parse(row.snapshot),
+          submission: c.req.valid("param").submissionId,
+        });
+        return c.json(
+          {
+            items: row.return_result
+              ? items
+              : items.map(({ flowId, label, provider, status }) => ({
+                  flowId,
+                  label,
+                  provider,
+                  status,
+                })),
+            ...completed,
+          },
+          200,
+        );
+      } catch (error) {
+        if (!completed) throw error;
+        return c.json(completed, 200);
+      }
     },
   );
   app.openapi(
@@ -555,20 +574,34 @@ export function registerPublicFormRoutes(
           content: { "application/json": { schema: submissionSchema } },
         },
       },
-      responses: { 200: jsonResponse },
+      responses: { 200: jsonResponse, 409: jsonResponse, 429: jsonResponse },
     }),
     async (c) => {
       const row = await activePublicForm(db, c.req.valid("param").token);
-      return c.json(
-        await submitPublicForm(
-          db,
-          options,
-          row,
-          c.req.valid("json"),
-          c.req.header("cf-connecting-ip") ?? "unknown",
-        ),
-        200,
-      );
+      try {
+        return c.json(
+          await submitPublicForm(
+            db,
+            options,
+            row,
+            c.req.valid("json"),
+            c.req.header("cf-connecting-ip") ?? "unknown",
+          ),
+          200,
+        );
+      } catch (error) {
+        if (error instanceof PublicSubmissionDailyLimitError)
+          return c.json(
+            { error: { code: error.code, message: error.message } },
+            429,
+            { "Retry-After": error.retryAfter },
+          );
+        if (!(error instanceof PublicSubmissionReplayConflict)) throw error;
+        return c.json(
+          { error: { code: error.code, message: error.message } },
+          409,
+        );
+      }
     },
   );
 }

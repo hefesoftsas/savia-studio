@@ -1,6 +1,8 @@
+import { withRequestTimeout } from "@/api/request-timeout";
 import { useMessages } from "@/i18n/core";
 import { publicFormsMessages } from "@/i18n/locales/public-forms";
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -100,7 +102,10 @@ function validateWizardFields(
     }
     if (field.type === "number") {
       const n = Number(raw);
-      if (!Number.isFinite(n)) {
+      if (
+        !Number.isFinite(n) ||
+        (CURRENCY_FIELDS.has(field.name) && !/^\d+$/.test(String(raw)))
+      ) {
         fail(field);
         continue;
       }
@@ -134,20 +139,8 @@ function validateWizardFields(
     }
     if (field.type === "email" && !EMAIL_PATTERN.test(text)) fail(field);
     if (field.name === "applicant_birthDate") {
-      const birth = new Date(text);
-      if (
-        !/^\d{4}-\d{2}-\d{2}$/.test(text) ||
-        !Number.isFinite(birth.getTime()) ||
-        birth.toISOString().slice(0, 10) !== text ||
-        birth.getTime() > now.getTime()
-      ) {
-        fail(field);
-        continue;
-      }
-      let age = now.getFullYear() - birth.getFullYear();
-      const month = now.getMonth() - birth.getMonth();
-      if (month < 0 || (month === 0 && now.getDate() < birth.getDate())) age--;
-      if (age <= 15) fail(field);
+      const age = ageOf(text, now);
+      if (age === null || age <= 15) fail(field);
     }
   }
   return errors;
@@ -195,9 +188,25 @@ const CURRENCY_FIELDS = new Set([
 ]);
 
 function formatCurrency(raw: string): string {
-  const digits = raw.replace(/[^0-9]/g, "").slice(0, 12);
-  if (!digits) return "";
-  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return /^\d+$/.test(raw) ? raw.replace(/\B(?=(\d{3})+(?!\d))/g, ".") : raw;
+}
+
+function normalizeCurrencyEdit(
+  raw: string,
+  previous: string,
+  event: InputEvent,
+) {
+  const value = raw.trim();
+  const editedGrouping =
+    /^\d{4,}$/.test(previous) &&
+    (event.inputType?.startsWith("delete") ||
+      (event.inputType === "insertText" && /^\d+$/.test(event.data ?? "")));
+  if (
+    /^\d{1,3}(?:\.\d{3})+$/.test(value) ||
+    (editedGrouping && /^[\d.]+$/.test(value))
+  )
+    return value.replaceAll(".", "");
+  return value;
 }
 
 /**
@@ -221,44 +230,75 @@ function CityAutocomplete({
 }) {
   const t = useMessages(publicFormsMessages);
   const [suggestions, setSuggestions] = useState<CityMatch[]>([]);
-  const [open, setOpen] = useState(false);
+  const [highlighted, setHighlighted] = useState(-1);
   const [loading, setLoading] = useState(false);
-  const alive = useRef(true);
+  const input = useRef<HTMLInputElement>(null);
   const timer = useRef<number | undefined>(undefined);
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-      window.clearTimeout(timer.current);
-    };
+  const activeSearch = useRef<AbortController | undefined>(undefined);
+  const cancelSearch = useCallback(() => {
+    window.clearTimeout(timer.current);
+    activeSearch.current?.abort();
   }, []);
+  useEffect(() => cancelSearch, [cancelSearch]);
   // A stale dropdown must never linger over the waiting state or receipt:
   // the whole step is disabled while quoting.
   useEffect(() => {
-    if (disabled) setOpen(false);
-  }, [disabled]);
+    if (!disabled) return;
+    cancelSearch();
+    setSuggestions([]);
+    setHighlighted(-1);
+    setLoading(false);
+  }, [disabled, cancelSearch]);
+  const open = !disabled && suggestions.length > 0;
   const listId = `quote-${field.name}-cities`;
+  const highlightedId =
+    open && highlighted >= 0 ? `${listId}-${highlighted}` : undefined;
+
+  useEffect(() => {
+    if (highlightedId)
+      document
+        .getElementById(highlightedId)
+        ?.scrollIntoView?.({ block: "nearest" });
+  }, [highlightedId]);
+
+  function clearSearch() {
+    cancelSearch();
+    setSuggestions([]);
+    setHighlighted(-1);
+    setLoading(false);
+  }
+
+  function applyCityCode(code: string) {
+    onChange(code);
+    clearSearch();
+    input.current?.focus();
+  }
 
   function search(next: string) {
     onChange(next);
-    window.clearTimeout(timer.current);
+    clearSearch();
     // A digit-only value is already a city code: keep it verbatim instead of
     // searching it as a name fragment.
-    if (next.trim().length < 2 || /^\d+$/.test(next.trim())) {
-      setSuggestions([]);
-      setOpen(false);
-      return;
-    }
+    const query = next.trim();
+    if (query.length < 2 || /^\d+$/.test(query)) return;
+    const request = new AbortController();
+    activeSearch.current = request;
     timer.current = window.setTimeout(async () => {
       setLoading(true);
       try {
-        const response = await fetch(
-          `${endpoint}/cities?search=${encodeURIComponent(next.trim())}`,
-          { credentials: "omit", cache: "no-store" },
+        const data = await withRequestTimeout(
+          async (signal) => {
+            const response = await fetch(
+              `${endpoint}/cities?search=${encodeURIComponent(query)}`,
+              { credentials: "omit", cache: "no-store", signal },
+            );
+            if (response.ok)
+              return (await response.json()) as { matches?: unknown };
+          },
+          5000,
+          request.signal,
         );
-        if (!alive.current) return;
-        if (response.ok) {
-          const data = (await response.json()) as { matches?: unknown };
+        if (data && !request.signal.aborted) {
           const matches = Array.isArray(data.matches)
             ? (data.matches as Record<string, unknown>[])
                 .filter(
@@ -278,21 +318,25 @@ function CityAutocomplete({
                       : "",
                 }))
             : [];
-          if (!alive.current) return;
           setSuggestions(matches);
-          setOpen(true);
         }
       } catch {
         // City codes stay manual when the reference lookup is unreachable.
       } finally {
-        if (alive.current) setLoading(false);
+        if (!request.signal.aborted) setLoading(false);
       }
     }, 300);
   }
 
   return (
-    <div className="public-quote-city">
+    <div
+      className="public-quote-city"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) clearSearch();
+      }}
+    >
       <Input
+        ref={input}
         id={`quote-${field.name}`}
         name={field.name}
         type="text"
@@ -302,27 +346,30 @@ function CityAutocomplete({
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? `quote-${field.name}-error` : undefined}
         onChange={(e) => search(e.target.value)}
-        onFocus={() => {
-          if (!disabled && suggestions.length) setOpen(true);
-        }}
-        onBlur={() => {
-          window.setTimeout(() => {
-            if (alive.current) setOpen(false);
-          }, 150);
-        }}
         onKeyDown={(e) => {
-          if (e.key === "Escape") setOpen(false);
-          else if (
-            e.key === "Enter" &&
-            suggestions.length > 0 &&
-            suggestions[0]
-          ) {
+          if (e.nativeEvent.isComposing) return;
+          if (e.key === "Escape") {
+            clearSearch();
+            return;
+          }
+          if (!open || loading) return;
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
             e.preventDefault();
-            onChange(suggestions[0].code);
-            setSuggestions([]);
-            setOpen(false);
+            const last = suggestions.length - 1;
+            setHighlighted((current) =>
+              e.key === "ArrowDown"
+                ? Math.min(current + 1, last)
+                : current < 0
+                  ? last
+                  : Math.max(current - 1, 0),
+            );
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            applyCityCode(suggestions[Math.max(highlighted, 0)].code);
           }
         }}
+        role="combobox"
+        aria-activedescendant={highlightedId}
         aria-expanded={open}
         aria-controls={listId}
         aria-autocomplete="list"
@@ -334,12 +381,7 @@ function CityAutocomplete({
           className="public-quote-city-clear"
           aria-label={t("Limpiar ciudad seleccionada")}
           title={t("Limpiar")}
-          onClick={() => {
-            onChange("");
-            setSuggestions([]);
-            setOpen(false);
-            document.getElementById(`quote-${field.name}`)?.focus();
-          }}
+          onClick={() => applyCityCode("")}
         >
           <span aria-hidden="true">×</span>
         </button>
@@ -358,23 +400,24 @@ function CityAutocomplete({
           {t("Consultando…")}
         </p>
       )}
-      {open && !disabled && !loading && suggestions.length > 0 && (
+      {open && !loading && (
         <ul
           id={listId}
           role="listbox"
           aria-label={t("Ciudades sugeridas")}
           className="public-quote-suggestions"
         >
-          {suggestions.map((suggestion) => (
-            <li key={suggestion.code} role="option" aria-selected="false">
+          {suggestions.map((suggestion, index) => (
+            <li
+              key={suggestion.code}
+              id={`${listId}-${index}`}
+              role="option"
+              aria-selected={index === highlighted}
+            >
               <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
-                  onChange(suggestion.code);
-                  setSuggestions([]);
-                  setOpen(false);
-                }}
+                onClick={() => applyCityCode(suggestion.code)}
               >
                 <span>
                   {suggestion.city} ({suggestion.department})
@@ -406,14 +449,18 @@ function ageOf(birth: string, now: Date = new Date()): number | null {
     date.toISOString().slice(0, 10) !== birth
   )
     return null;
-  let age = now.getFullYear() - date.getFullYear();
-  const month = now.getMonth() - date.getMonth();
-  if (month < 0 || (month === 0 && now.getDate() < date.getDate())) age--;
+  // The date-only birth string is parsed as UTC; read its civil date intact.
+  let age = now.getFullYear() - date.getUTCFullYear();
+  const month = now.getMonth() - date.getUTCMonth();
+  if (month < 0 || (month === 0 && now.getDate() < date.getUTCDate())) age--;
   return age >= 0 ? age : null;
 }
 
 function birthDateFromAge(age: number, now: Date = new Date()): string {
-  return `${now.getFullYear() - age}-06-15`;
+  const beforeJune15 =
+    now.getMonth() < 5 || (now.getMonth() === 5 && now.getDate() < 15);
+  const birthYear = now.getFullYear() - age - Number(beforeJune15);
+  return `${birthYear}-06-15`;
 }
 
 /**
@@ -468,10 +515,12 @@ export function PublicQuoteForm({
     captchaElementRef,
     captcha,
     captchaError,
+    retryVerification,
     error,
     pending,
     uncertain,
     duplicate,
+    failed,
     receipt,
   } = controller;
 
@@ -507,8 +556,7 @@ export function PublicQuoteForm({
     return () => window.clearInterval(timer);
   }, [controller.pending, lastStep]);
 
-  // Fetch provider progress once, then refresh when the user returns to this
-  // tab. The submit response stays the source of truth.
+  // Read progress while submitting and briefly after an uncertain response.
   useEffect(() => {
     if (
       (!controller.pending && !controller.uncertain && !controller.receipt) ||
@@ -520,41 +568,80 @@ export function PublicQuoteForm({
     const submissionId = controller.submissionId;
     let stopped = false;
     let inFlight = false;
+    let retryTimer: number | undefined;
+    let remainingRetries = 5;
+    const request = new AbortController();
     const load = async () => {
       if (inFlight || stopped) return;
+      window.clearTimeout(retryTimer);
       inFlight = true;
+      let shouldRetry = false;
       try {
-        const response = await fetch(
-          `${endpoint}/status/${encodeURIComponent(submissionId)}`,
-          { credentials: "omit", cache: "no-store" },
+        const status = await withRequestTimeout(
+          async (signal) => {
+            const response = await fetch(
+              `${endpoint}/status/${encodeURIComponent(submissionId)}`,
+              { credentials: "omit", cache: "no-store", signal },
+            );
+            if (!response.ok)
+              return { ok: false as const, status: response.status };
+            const data = (await response.json()) as {
+              items?: unknown;
+              state?: string;
+              receipt?: unknown;
+            };
+            return { ok: true as const, data };
+          },
+          5000,
+          request.signal,
         );
-        if (stopped || !response.ok) return;
-        const data = (await response.json()) as {
-          items?: unknown;
-          state?: string;
-          receipt?: unknown;
-        };
-        if (!stopped && Array.isArray(data.items))
+        if (stopped) return;
+        if (!status.ok) {
+          shouldRetry =
+            status.status === 408 ||
+            status.status >= 500 ||
+            (controller.pending && status.status === 404);
+          return;
+        }
+        const { data } = status;
+        if (data.state === "failed") {
+          controller.failFromStatus(submissionId);
+          return;
+        }
+        if (Array.isArray(data.items))
           setProgress(parseStatusItems(data.items));
-        if (!stopped && data.state === "complete" && !controller.receipt) {
+        if (data.state === "complete" && !controller.receipt) {
           controller.completeFromStatus(submissionId, data.receipt);
         }
+        shouldRetry = data.state !== "complete";
       } catch {
-        // Keep the previous progress; the submit lifecycle reports errors.
+        shouldRetry = true;
       } finally {
         inFlight = false;
+        if (!stopped && shouldRetry) {
+          if (controller.pending) {
+            retryTimer = window.setTimeout(refreshVisible, 5000);
+          } else if (controller.uncertain && remainingRetries > 0) {
+            remainingRetries -= 1;
+            retryTimer = window.setTimeout(refreshVisible, 2000);
+          }
+        }
       }
     };
     const refreshVisible = () => {
       if (document.visibilityState !== "hidden" && navigator.onLine)
         void load();
     };
-    if (!controller.pending) void load();
+    if (controller.pending)
+      retryTimer = window.setTimeout(refreshVisible, 5000);
+    else void load();
     window.addEventListener("focus", refreshVisible);
     window.addEventListener("online", refreshVisible);
     document.addEventListener("visibilitychange", refreshVisible);
     return () => {
       stopped = true;
+      window.clearTimeout(retryTimer);
+      request.abort();
       window.removeEventListener("focus", refreshVisible);
       window.removeEventListener("online", refreshVisible);
       document.removeEventListener("visibilitychange", refreshVisible);
@@ -584,7 +671,7 @@ export function PublicQuoteForm({
     });
   }
   const [lookupNotice, setLookupNotice] = useState("");
-  const lastLookedUpPlate = useRef("");
+  const lastAttemptedPlate = useRef("");
 
   function update(name: string, value: string | boolean) {
     setValues((prev) => ({ ...prev, [name]: value }));
@@ -609,7 +696,7 @@ export function PublicQuoteForm({
     });
     setLookupFields([]);
     setLookupNotice("");
-    lastLookedUpPlate.current = "";
+    lastAttemptedPlate.current = "";
     clearFieldError("vehicle_plate");
   }
 
@@ -629,61 +716,62 @@ export function PublicQuoteForm({
       document.getElementById("quote-vehicle_plate")?.focus();
       return;
     }
+    lastAttemptedPlate.current = rawPlate;
     setLookingUp(true);
     setLookupNotice("");
     try {
-      const response = await fetch(`${endpoint}/vehicle-lookup`, {
-        method: "POST",
-        credentials: "omit",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plate: rawPlate }),
-      });
-      if (!response.ok) {
+      const result = await withRequestTimeout(async (signal) => {
+        const response = await fetch(`${endpoint}/vehicle-lookup`, {
+          method: "POST",
+          signal,
+          credentials: "omit",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ plate: rawPlate }),
+        });
+        if (!response.ok)
+          return { ok: false as const, status: response.status };
+        const data = (await response.json()) as {
+          plate?: unknown;
+          referenceCode?: unknown;
+          productionYear?: unknown;
+          declaredValue?: unknown;
+          accessoriesValue?: unknown;
+        };
+        return { ok: true as const, data };
+      }, 10_000);
+      if (!result.ok) {
         setLookupNotice(
-          response.status === 404
+          result.status === 404
             ? t("No se encontraron datos para esa placa.")
             : t("No se pudo consultar la placa."),
         );
         return;
       }
-      const data = (await response.json()) as {
-        plate?: unknown;
-        referenceCode?: unknown;
-        productionYear?: unknown;
-        declaredValue?: unknown;
-        accessoriesValue?: unknown;
-      };
+      const { data } = result;
       if (data.plate !== rawPlate) {
         setLookupNotice(t("No se encontraron datos para esa placa."));
         return;
       }
-      const filled: Array<[string, unknown]> = [
+      const fields: Array<[string, unknown]> = [
         ["vehicle_referenceCode", data.referenceCode],
         ["vehicle_productionYear", data.productionYear],
         ["vehicle_declaredValue", data.declaredValue],
         ["vehicle_accessoriesValue", data.accessoriesValue],
       ];
-      const names: string[] = [];
-      setValues((prev) => {
-        const next: Record<string, string | boolean> = {
-          ...prev,
-          vehicle_plate: rawPlate,
-        };
-        for (const [name, value] of filled) {
-          if (
-            value !== undefined &&
-            value !== null &&
-            String(value).trim() !== ""
-          ) {
-            next[name] = String(value);
-            names.push(name);
-          }
-        }
-        return next;
-      });
-      setLookupFields(names);
-      lastLookedUpPlate.current = rawPlate;
+      const autofill: Record<string, string> = {};
+      for (const [name, value] of fields) {
+        const text = String(value ?? "").trim();
+        if (
+          text &&
+          (lookupFields.includes(name) || !String(values[name] ?? "").trim())
+        )
+          autofill[name] = text;
+      }
+      setValues((prev) => ({ ...prev, vehicle_plate: rawPlate, ...autofill }));
+      setLookupFields((prev) => [
+        ...new Set([...prev, ...Object.keys(autofill)]),
+      ]);
     } catch {
       setLookupNotice(t("No se pudo consultar la placa."));
     } finally {
@@ -698,7 +786,7 @@ export function PublicQuoteForm({
     if (
       plate &&
       plate.length >= 3 &&
-      plate !== lastLookedUpPlate.current &&
+      plate !== lastAttemptedPlate.current &&
       !lookingUp
     ) {
       void lookupPlate();
@@ -769,12 +857,17 @@ export function PublicQuoteForm({
     setLookingUp(false);
     setLookupFields([]);
     setLookupNotice("");
-    lastLookedUpPlate.current = "";
+    lastAttemptedPlate.current = "";
     controller.startNew();
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (pending || lookingUp) return;
+    if (!lastStep) {
+      goNext();
+      return;
+    }
     if (!formRef.current?.reportValidity()) return;
     const errors = validateWizardFields(definition.fields, values, t);
     if (Object.keys(errors).length) {
@@ -834,6 +927,9 @@ export function PublicQuoteForm({
   const current = steps[step] ?? steps[0];
 
   if (receipt) {
+    const finishedProgress = progress?.filter(
+      (item) => item.status !== "pending",
+    );
     return (
       <section
         aria-labelledby="public-quote-success"
@@ -851,8 +947,8 @@ export function PublicQuoteForm({
         <p className="public-form-reference">{receipt.reference}</p>
         {receipt.result !== undefined ? (
           <PublicReceiptResult result={receipt.result} />
-        ) : progress?.length ? (
-          <PublicComparison items={progress} />
+        ) : finishedProgress?.length ? (
+          <PublicComparison items={finishedProgress} />
         ) : null}
         <div className="public-quote-notice-actions">
           <Button
@@ -866,6 +962,21 @@ export function PublicQuoteForm({
             {t("Iniciar otro envío")}
           </Button>
         </div>
+      </section>
+    );
+  }
+
+  if (failed) {
+    return (
+      <section className="public-quote-notice" role="status">
+        <QuoteLogo src={definition.logoImage} alt={definition.title} />
+        <p className="public-quote-eyebrow">{eyebrow}</p>
+        <h2>{t("Cotización no completada")}</h2>
+        <p>
+          {t(
+            "Contacta a quien compartió el enlace antes de volver a enviar la solicitud.",
+          )}
+        </p>
       </section>
     );
   }
@@ -1044,7 +1155,11 @@ export function PublicQuoteForm({
                           onChange={(e) =>
                             update(
                               field.name,
-                              e.target.value.replace(/[^0-9]/g, ""),
+                              normalizeCurrencyEdit(
+                                e.target.value,
+                                String(values[field.name] ?? ""),
+                                e.nativeEvent as InputEvent,
+                              ),
                             )
                           }
                         />
@@ -1133,11 +1248,21 @@ export function PublicQuoteForm({
             hidden={step !== steps.length - 1}
           />
           {step === steps.length - 1 && captchaError && (
-            <p role="alert" className="public-form-error">
-              {Object.hasOwn(publicFormsMessages, captchaError)
-                ? t(captchaError as keyof typeof publicFormsMessages)
-                : captchaError}
-            </p>
+            <div className="grid justify-items-start gap-2">
+              <p role="alert" className="public-form-error">
+                {Object.hasOwn(publicFormsMessages, captchaError)
+                  ? t(captchaError as keyof typeof publicFormsMessages)
+                  : captchaError}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={retryVerification}
+                disabled={pending}
+              >
+                {t("Reintentar verificación")}
+              </Button>
+            </div>
           )}
           {step === steps.length - 1 && visibleError && (
             <p role="alert" className="public-form-error">
@@ -1195,12 +1320,12 @@ export function PublicQuoteForm({
                 {t("Anterior")}
               </Button>
             )}
-            {step < steps.length - 1 && (
-              <Button type="button" onClick={goNext}>
+            {!lastStep && (
+              <Button type="submit" disabled={pending || lookingUp}>
                 {t("Siguiente paso")}
               </Button>
             )}
-            {step === steps.length - 1 && (
+            {lastStep && (
               <Button type="submit" disabled={!captcha || pending}>
                 {pending
                   ? t("Enviando…")

@@ -157,53 +157,71 @@ it.each([
   });
 });
 
-it("keeps the selection pending when availability cannot be verified", async () => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => {
-      throw new Error("offline");
-    }),
-  );
-  const onChange = vi.fn();
-  const onReadyChange = vi.fn();
-  render(
-    <StoreContextProvider value={memoryStore({ locale: "en" })}>
-      <AppLocaleProvider>
-        <PublicBookingAvailability
-          token="personal-token"
-          catalog={{
-            id: "page-id",
-            timeZone: "America/Bogota",
-            horizonDays: 30,
-            leadMinutes: 0,
-          }}
-          serviceId="consult"
-          professionalId="pro-1"
-          displayTimeZone="America/Bogota"
-          onTimeZoneChange={vi.fn()}
-          value={{
-            professionalId: "pro-1",
-            serviceId: "consult",
-            displayTimeZone: "America/Bogota",
-            slot: {
-              startsAt: "2026-10-05T14:00:00Z",
-              endsAt: "2026-10-05T14:30:00Z",
-            },
-          }}
-          onChange={onChange}
-          onReadyChange={onReadyChange}
-        />
-      </AppLocaleProvider>
-    </StoreContextProvider>,
-  );
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Available times could not be loaded",
-  );
-  expect(onReadyChange).toHaveBeenCalledWith(false);
-  expect(onReadyChange).not.toHaveBeenCalledWith(true);
-  expect(onChange).not.toHaveBeenCalled();
-  expect(screen.queryByText("No available times")).not.toBeInTheDocument();
-});
+it.each(["offline", "rate-limited"])(
+  "keeps the selection pending when availability cannot be verified (%s)",
+  async (failure) => {
+    const retryAt = new Date("2026-10-03T12:01:00Z");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (failure === "rate-limited")
+          return new Response(null, {
+            status: 429,
+            headers: { "Retry-After": retryAt.toUTCString() },
+          });
+        throw new Error("offline");
+      }),
+    );
+    const onChange = vi.fn();
+    const onReadyChange = vi.fn();
+    render(
+      <StoreContextProvider value={memoryStore({ locale: "en" })}>
+        <AppLocaleProvider>
+          <PublicBookingAvailability
+            token="personal-token"
+            catalog={{
+              id: "page-id",
+              timeZone: "America/Bogota",
+              horizonDays: 30,
+              leadMinutes: 0,
+            }}
+            serviceId="consult"
+            professionalId="pro-1"
+            displayTimeZone="America/Bogota"
+            onTimeZoneChange={vi.fn()}
+            value={{
+              professionalId: "pro-1",
+              serviceId: "consult",
+              displayTimeZone: "America/Bogota",
+              slot: {
+                startsAt: "2026-10-05T14:00:00Z",
+                endsAt: "2026-10-05T14:30:00Z",
+              },
+            }}
+            onChange={onChange}
+            onReadyChange={onReadyChange}
+          />
+        </AppLocaleProvider>
+      </StoreContextProvider>,
+    );
+    const alert = await screen.findByRole("alert");
+    if (failure === "rate-limited") {
+      expect(alert).toHaveTextContent("Too many booking requests.");
+      expect(alert).toHaveTextContent(
+        new Intl.DateTimeFormat("en-US", {
+          dateStyle: "short",
+          timeStyle: "medium",
+        }).format(retryAt),
+      );
+    } else {
+      expect(alert).toHaveTextContent("Available times could not be loaded");
+    }
+    expect(onReadyChange).toHaveBeenCalledWith(false);
+    expect(onReadyChange).not.toHaveBeenCalledWith(true);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByText("No available times")).not.toBeInTheDocument();
+  },
+);
 
 it("verifies a preselected time once per zone and keeps its UTC identity", async () => {
   const loadAvailability = vi.fn(async () =>

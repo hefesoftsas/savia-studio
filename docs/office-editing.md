@@ -9,6 +9,9 @@ revision metadata in D1. Connected Google Drive and OneDrive documents are store
 by their provider; Savia persists private document references in D1. No browser
 database is used for either workflow.
 
+Office editor links bypass the administrative service worker's navigation
+fallback, including `/office` and `/office/` links with document parameters.
+
 ## User workflow
 
 Open **Office suite** from the sidebar to create a Document (DOCX), Spreadsheet

@@ -1537,16 +1537,20 @@ export default function PluginIde({
                       }
                       onSearch={openSearch}
                       onError={setEditorError}
-                      fetchCompletion={async (prefix, suffix) => {
+                      fetchCompletion={async (prefix, suffix, signal) => {
                         try {
                           const result = await apiClient.post<{
                             completion: string;
-                          }>("/api/assistant/plugin-completion", {
-                            tenantId,
-                            filename: "entry.tsx",
-                            prefix,
-                            suffix,
-                          });
+                          }>(
+                            "/api/assistant/plugin-completion",
+                            {
+                              tenantId,
+                              filename: "entry.tsx",
+                              prefix,
+                              suffix,
+                            },
+                            { signal },
+                          );
                           return result.completion?.trim()
                             ? result.completion
                             : null;
@@ -1608,6 +1612,7 @@ export default function PluginIde({
                                       fetchCompletion: async (
                                         prefix,
                                         suffix,
+                                        signal,
                                       ) => {
                                         try {
                                           const result = await apiClient.post<{
@@ -1620,6 +1625,7 @@ export default function PluginIde({
                                               prefix,
                                               suffix,
                                             },
+                                            { signal },
                                           );
                                           return result.completion?.trim()
                                             ? result.completion

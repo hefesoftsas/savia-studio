@@ -1,4 +1,8 @@
 import { Component, useEffect, useState, type ReactNode } from "react";
+import {
+  getOnlineStatus,
+  subscribeOnlineStatus,
+} from "../offline/connectivity-status";
 import { isModuleLoadError, reloadApplication } from "./deployment-recovery";
 import { registerPwaServiceWorker } from "./register-service-worker";
 import { PwaSpinner } from "./pwa-splash";
@@ -104,28 +108,42 @@ export function DeploymentUpdateNotice({
     let controller = workers.controller;
     let pending = false;
     let reloading = false;
-    const edited = new Set<Element>();
+    let releaseConnectivity: (() => void) | undefined;
+    const edited = new Set<WeakRef<Element>>();
+    const trackedEdits = new WeakSet<Element>();
+    const discardClosedEdits = () => {
+      for (const reference of edited) {
+        const element = reference.deref();
+        if (element?.isConnected) continue;
+        edited.delete(reference);
+        if (element) trackedEdits.delete(element);
+      }
+    };
     const rememberEdit = (event: Event) => {
-      if (event.target instanceof Element) edited.add(event.target);
+      const element = event.target;
+      if (!(element instanceof Element) || trackedEdits.has(element)) return;
+      discardClosedEdits();
+      trackedEdits.add(element);
+      edited.add(new WeakRef(element));
     };
     const apply = () => {
       if (
         !pending ||
         reloading ||
         document.visibilityState !== "visible" ||
-        navigator.onLine === false
+        !getOnlineStatus()
       )
         return;
-      for (const element of edited) {
-        if (!element.isConnected) edited.delete(element);
-      }
+      discardClosedEdits();
       // Custom editors and embedded apps do not all expose dirty state. Keep
       // their current document until they close, even if they appear pristine.
       if (
         edited.size ||
         [
           ...document.querySelectorAll(
-            'form, textarea, [contenteditable]:not([contenteditable="false"]), iframe, [role="dialog"], [aria-busy="true"]',
+            `form, form input:not([type="hidden"]), form select, textarea,
+             [contenteditable]:not([contenteditable="false"]), iframe,
+             [role="dialog"], [aria-busy="true"]`,
           ),
         ].some((element) => {
           for (
@@ -133,11 +151,21 @@ export function DeploymentUpdateNotice({
             node;
             node = node.parentElement
           ) {
+            if (
+              node !== element &&
+              node instanceof HTMLDetailsElement &&
+              !node.open &&
+              !node.querySelector(":scope > summary")?.contains(element)
+            )
+              return false;
             const style = window.getComputedStyle(node);
             if (
               node.hasAttribute("hidden") ||
               style.display === "none" ||
-              style.visibility === "hidden"
+              // Descendants can override an ancestor's CSS visibility.
+              (node === element &&
+                (style.visibility === "hidden" ||
+                  style.visibility === "collapse"))
             )
               return false;
           }
@@ -150,6 +178,8 @@ export function DeploymentUpdateNotice({
       const guard = new Event("beforeunload", { cancelable: true });
       if (!window.dispatchEvent(guard)) return;
       reloading = true;
+      releaseConnectivity?.();
+      releaseConnectivity = undefined;
       observer.disconnect();
       // This worker has already installed its shell. No second update request,
       // unregister, cache clearing, or recovery round trip is necessary.
@@ -161,8 +191,9 @@ export function DeploymentUpdateNotice({
       if (!next || next === controller) return;
       const replacement = !!controller;
       controller = next;
-      if (!replacement) return; // First installation must not reload the app.
+      if (!replacement || reloading) return;
       pending = true;
+      releaseConnectivity ??= subscribeOnlineStatus(apply);
       setAvailable(true);
       observer.observe(document.body, {
         childList: true,
@@ -172,6 +203,8 @@ export function DeploymentUpdateNotice({
           "aria-busy",
           "contenteditable",
           "role",
+          "type",
+          "open",
           "hidden",
           "style",
           "class",
@@ -184,8 +217,10 @@ export function DeploymentUpdateNotice({
     document.addEventListener("change", rememberEdit, true);
     document.addEventListener("visibilitychange", apply);
     window.addEventListener("online", apply);
-    registerPwaServiceWorker();
+    const stopCheckingUpdates = registerPwaServiceWorker();
     return () => {
+      stopCheckingUpdates?.();
+      releaseConnectivity?.();
       observer.disconnect();
       workers.removeEventListener("controllerchange", changed);
       document.removeEventListener("input", rememberEdit, true);

@@ -578,18 +578,44 @@ async function digest(value: string) {
     (byte) => byte.toString(16).padStart(2, "0"),
   ).join("");
 }
+export class PublicSubmissionReplayConflict extends HTTPException {
+  readonly code = "PUBLIC_SUBMISSION_ALREADY_REGISTERED";
+
+  constructor(message: string) {
+    super(409, { message });
+  }
+}
+
+export class PublicSubmissionDailyLimitError extends HTTPException {
+  readonly code = "PUBLIC_SUBMISSION_DAILY_LIMIT";
+  readonly retryAfter: string;
+
+  constructor(day: string) {
+    super(429, { message: "Daily submission limit reached." });
+    this.retryAfter = new Date(
+      Date.parse(`${day}T00:00:00Z`) + 86_400_000,
+    ).toUTCString();
+  }
+}
+
 function replay(
   existing: SubmissionRow,
   fingerprint: string,
   captchaHash: string,
+  legacyLocalHash?: string,
 ) {
   if (
     existing.fingerprint !== fingerprint ||
-    existing.captcha_hash !== captchaHash
+    (existing.captcha_hash !== captchaHash &&
+      existing.captcha_hash !== legacyLocalHash)
   )
-    reject("Submission identifier already used.", 409);
+    throw new PublicSubmissionReplayConflict(
+      "Submission identifier already used.",
+    );
   if (existing.state !== "complete" || !existing.response)
-    reject("Submission already accepted. Do not send it again.", 409);
+    throw new PublicSubmissionReplayConflict(
+      "Submission already accepted. Do not send it again.",
+    );
   return JSON.parse(existing.response);
 }
 export async function submitPublicForm(
@@ -631,14 +657,22 @@ export async function submitPublicForm(
           : [sortedValues, identity.proof],
       ),
     ),
-    captchaHash = await digest(identity.key);
+    proofHash = await digest(identity.key);
+  // Local development uses a fixed proof value, so only real challenges must
+  // remain unique across unrelated submissions.
+  const legacyLocalHash =
+    configuration.provider === "disabled" ? proofHash : undefined;
+  const captchaHash = legacyLocalHash
+    ? await digest(`local:${link.id}:${input.submissionId}:${proofHash}`)
+    : proofHash;
   const existing = await db
     .prepare(
       "SELECT fingerprint,captcha_hash,state,response FROM public_form_submissions WHERE form_id=? AND submission_id=?",
     )
     .bind(link.id, input.submissionId)
     .first<SubmissionRow>();
-  if (existing) return replay(existing, fingerprint, captchaHash);
+  if (existing)
+    return replay(existing, fingerprint, captchaHash, legacyLocalHash);
   try {
     await verifyCaptcha(options, {
       token: input.token,
@@ -668,6 +702,7 @@ export async function submitPublicForm(
       `INSERT INTO public_form_submissions(form_id,submission_id,tenant_id,ip_hash,day,fingerprint,captcha_hash,state,created_at)
  SELECT ?,?,?,?,?,?,?,'reserved',? WHERE
  EXISTS(SELECT 1 FROM public_forms WHERE id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?) )
+ AND EXISTS(SELECT 1 FROM tenants WHERE id=? AND is_active=1)
  AND (SELECT count(*) FROM public_form_submissions WHERE form_id=? AND day=?)<?
  AND (SELECT count(*) FROM public_form_submissions WHERE tenant_id=? AND day=?)<1000
  AND (SELECT count(*) FROM public_form_submissions WHERE ip_hash=? AND day=?)<20
@@ -684,6 +719,7 @@ export async function submitPublicForm(
       now,
       link.id,
       now,
+      tenantIdFromKey(link.tenant_id),
       link.id,
       day,
       link.daily_limit,
@@ -700,11 +736,18 @@ export async function submitPublicForm(
       )
       .bind(link.id, input.submissionId)
       .first<SubmissionRow>();
-    if (repeated) return replay(repeated, fingerprint, captchaHash);
-    reject(
-      "Submission limit reached or form unavailable. Try again later.",
-      429,
-    );
+    if (repeated)
+      return replay(repeated, fingerprint, captchaHash, legacyLocalHash);
+    await activePublicForm(db, link.token);
+    if (
+      configuration.provider !== "disabled" &&
+      (await db
+        .prepare("SELECT 1 FROM public_form_submissions WHERE captcha_hash=?")
+        .bind(captchaHash)
+        .first())
+    )
+      reject("Verification was already used. Complete a new challenge.", 403);
+    throw new PublicSubmissionDailyLimitError(day);
   }
   try {
     await activePublicForm(db, link.token);

@@ -1,10 +1,4 @@
-import { format } from "prettier/standalone";
 import type { Plugin } from "prettier";
-import * as babel from "prettier/plugins/babel";
-import * as estree from "prettier/plugins/estree";
-import * as typescript from "prettier/plugins/typescript";
-import * as postcss from "prettier/plugins/postcss";
-import * as html from "prettier/plugins/html";
 
 const parsers: Record<string, string> = {
   typescript: "typescript",
@@ -15,13 +9,33 @@ const parsers: Record<string, string> = {
   css: "css",
   html: "html",
 };
+
+function loadFormattingPlugins(parser: string): Promise<Plugin[]> {
+  if (parser === "css")
+    return import("prettier/plugins/postcss").then((postcss) => [postcss]);
+
+  const javascriptPlugins = [
+    import("prettier/plugins/babel"),
+    // Prettier's estree plugin ships an empty declaration file in this release.
+    import("prettier/plugins/estree") as unknown as Promise<Plugin>,
+  ];
+  if (parser === "json") return Promise.all(javascriptPlugins);
+
+  // Keep embedded scripts, styles, and markup available to the other parsers.
+  return Promise.all([
+    ...javascriptPlugins,
+    import("prettier/plugins/typescript"),
+    import("prettier/plugins/postcss"),
+    import("prettier/plugins/html"),
+  ]);
+}
+
 export async function formatPluginDocument(text: string, language: string) {
   const parser = parsers[language];
   if (!parser) throw new Error(`Unsupported formatting language: ${language}`);
-  // Prettier's estree plugin ships an empty declaration file in this release.
-  return format(text, {
-    parser,
-    plugins: [babel, estree as unknown as Plugin, typescript, postcss, html],
-    tabWidth: 2,
-  });
+  const [{ format }, plugins] = await Promise.all([
+    import("prettier/standalone"),
+    loadFormattingPlugins(parser),
+  ]);
+  return format(text, { parser, plugins, tabWidth: 2 });
 }

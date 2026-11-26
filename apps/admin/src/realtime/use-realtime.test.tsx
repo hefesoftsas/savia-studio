@@ -1,5 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { act } from "react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppServicesProvider } from "@/features/assistant/assistant-context";
 import { useRealtimeTopics } from "./use-realtime";

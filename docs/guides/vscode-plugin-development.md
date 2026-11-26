@@ -10,6 +10,9 @@ in another tab to preserve the current draft.
 Admin deployments serve the packaged extension at
 `/downloads/savia-plugin-authoring-<version>.vsix` with a matching `.sha256` file;
 the download button follows the version in the extension manifest.
+To verify the download, put both files in the same directory and run
+`shasum -a 256 -c savia-plugin-authoring-<version>.vsix.sha256` with the downloaded
+version in the filename. On Linux, `sha256sum -c` also accepts the file.
 If that version is unavailable, the download returns HTTP 404. The download
 path bypasses the application shell, including when a service worker is active.
 Cloudflare static assets serve the full VSIX when a client requests a range.

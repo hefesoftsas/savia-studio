@@ -7,6 +7,7 @@ import { buildRecordPageSelection } from "./record-page-query";
 import {
   indexedRecordSort,
   recordIndexName,
+  recordPerformanceIndexEntryTooLarge,
   singleRecordEquality,
 } from "./record-performance";
 import { recordSearchCandidate } from "./record-search";
@@ -87,7 +88,10 @@ import { registerExtensions, type ExtensionOptions } from "./extensions";
 import { registerPluginStore, type PluginStoreOptions } from "./plugin-store";
 import { registerExtensionActions } from "./extension-actions";
 import { registerExtensionSummaries } from "./extension-summaries";
-import { registerWorkflows, type WorkflowOptions } from "@savia/flows-native/routes";
+import {
+  registerWorkflows,
+  type WorkflowOptions,
+} from "@savia/flows-native/routes";
 import {
   registerNotifications,
   type NotificationRouteOptions,
@@ -158,6 +162,17 @@ export function createStudioApp(
     await next();
   });
   app.onError((error, c) => {
+    if (recordPerformanceIndexEntryTooLarge(error))
+      return c.json(
+        {
+          error: {
+            code: "PERFORMANCE_INDEX_ENTRY_TOO_LARGE",
+            message:
+              "An indexed value exceeds the database limit. Shorten the value or remove the performance index.",
+          },
+        },
+        422,
+      );
     if (databaseConflict(error))
       return c.json(
         {
@@ -489,6 +504,9 @@ export function createStudioApp(
         200,
         Math.max(1, Math.floor(Number(params.perPage) || 25)),
       );
+    const pageEnd = page * perPage;
+    if (!Number.isSafeInteger(pageEnd))
+      return fail("Paginación inválida.", 422);
     const sort = params.sort ?? "updated_at",
       order = params.order === "ASC" ? "ASC" : "DESC";
     if (
@@ -560,7 +578,7 @@ export function createStudioApp(
       sortName: sort,
       order,
       perPage,
-      offset: (page - 1) * perPage,
+      offset: pageEnd - perPage,
       cursor,
       nullSafeEqual: dialect.nullSafeEqual,
       sortParts,
@@ -687,32 +705,13 @@ export function createStudioApp(
           text: last._cursor_part_2 as string,
         }
       : (last?._cursor_value as RecordCursorValue | undefined);
-    const cursorValueSupported =
-      cursorValue === null ||
-      (typeof cursorValue === "string" && cursorValue.length <= 500) ||
-      (typeof cursorValue === "number" && Number.isFinite(cursorValue)) ||
-      (typeof cursorValue === "object" &&
-        cursorValue !== null &&
-        [0, 1, 2].includes(cursorValue.rank) &&
-        ((typeof cursorValue.number === "string" &&
-          cursorValue.number.length <= 3000 &&
-          /^-?\d+(?:\.\d+)?$/.test(cursorValue.number)) ||
-          (typeof cursorValue.number === "number" &&
-            Number.isFinite(cursorValue.number) &&
-            (!Number.isInteger(cursorValue.number) ||
-              Number.isSafeInteger(cursorValue.number)))) &&
-        typeof cursorValue.text === "string" &&
-        cursorValue.text.length <= 500);
     return c.json({
       data: rows.map(parseRecord),
       total: pageResult.total,
       page,
       perPage,
       nextCursor:
-        cursorSupported &&
-        cursorValueSupported &&
-        pageResult.results.length > perPage &&
-        last
+        cursorSupported && pageResult.results.length > perPage && last
           ? encodeRecordCursor(scope, cursorValue, String(last.id))
           : null,
     });

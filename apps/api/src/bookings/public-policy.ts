@@ -6,6 +6,29 @@ export type BookingReceipt = {
   request_hash: string;
   captcha_hash: string | null;
 };
+const activeBookingLink = `
+  SELECT 1 FROM tenant_booking_public_links l
+  JOIN tenants t ON t.id=l.tenant_id
+  WHERE l.id=? AND l.deleted_at IS NULL AND l.revoked_at IS NULL
+    AND (l.expires_at IS NULL OR l.expires_at>?)
+    AND t.kind='commercial' AND t.is_active=1
+`;
+
+export class BookingDailyLimitError extends HTTPException {
+  readonly code = "BOOKING_DAILY_LIMIT";
+  readonly retryAfter: string;
+
+  constructor(day: string) {
+    super(429, {
+      message:
+        "The daily booking limit was reached. Try again after midnight UTC.",
+    });
+    this.retryAfter = new Date(
+      Date.parse(`${day}T00:00:00Z`) + 86_400_000,
+    ).toUTCString();
+  }
+}
+
 export async function findBookingAdmission(
   db: D1Database,
   requestKey: string,
@@ -49,7 +72,7 @@ export async function admitBookingRequest(
     .prepare(
       `INSERT INTO tenant_booking_request_receipts(id,link_id,tenant_id,request_key,request_hash,ip_hash,day,captcha_hash,created_at)
     SELECT ?,?,?,?,?,?,?,?,? WHERE
-    EXISTS(SELECT 1 FROM tenant_booking_public_links l JOIN tenants t ON t.id=l.tenant_id WHERE l.id=? AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at>?) AND t.is_active=1)
+    EXISTS(${activeBookingLink})
     AND (SELECT count(*) FROM tenant_booking_request_receipts WHERE link_id=? AND day=?)<?
     AND (SELECT count(*) FROM tenant_booking_request_receipts WHERE tenant_id=? AND day=?)<1000
     AND (SELECT count(*) FROM tenant_booking_request_receipts WHERE ip_hash=? AND day=?)<20
@@ -92,6 +115,12 @@ export async function admitBookingRequest(
   if (inserted) return { receiptId: inserted.id, replay: false };
   const replay = await findBookingAdmission(db, requestKey, requestHash);
   if (replay) return { receiptId: replay.id, replay: true };
+  const active = await db
+    .prepare(activeBookingLink)
+    .bind(link.id, stamp)
+    .first();
+  if (!active)
+    throw new HTTPException(404, { message: "Booking page unavailable." });
   if (
     captchaIdentityHash &&
     (await db
@@ -104,17 +133,7 @@ export async function admitBookingRequest(
     throw new HTTPException(403, {
       message: "Verification was already used. Complete a new challenge.",
     });
-  const active = await db
-    .prepare(
-      "SELECT 1 FROM tenant_booking_public_links WHERE id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)",
-    )
-    .bind(link.id, stamp)
-    .first();
-  if (!active)
-    throw new HTTPException(404, { message: "Booking page unavailable." });
-  throw new HTTPException(429, {
-    message: "The daily booking limit was reached. Try again tomorrow.",
-  });
+  throw new BookingDailyLimitError(day);
 }
 
 /** Keep admission retries for seven days; bound each scheduled cleanup pass. */

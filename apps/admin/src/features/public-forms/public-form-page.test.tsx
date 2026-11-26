@@ -1,4 +1,5 @@
 import { AppLocaleProvider } from "@/i18n/app-locale-provider";
+import { REQUEST_TIMEOUT_MS } from "@/api/request-timeout";
 import {
   StoreContextProvider,
   memoryStore,
@@ -57,6 +58,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -110,32 +112,115 @@ it("uses only the anonymous definition and requires captcha before posting allow
   expect(reset).toHaveBeenCalledWith("widget-id");
   await waitFor(() => expect(remove).toHaveBeenCalledWith("widget-id"));
 });
-it("prevents duplicate clicks and reuses submission identity after an uncertain response", async () => {
+it("clears the previous verification error when starting a new submission", async () => {
   render(<PublicFormPage token="public-token" />);
   await fill();
   await solve();
-  let reject!: (error: Error) => void;
+  let finish!: (response: Response) => void;
   fetchMock.mockImplementationOnce(
     () =>
-      new Promise((_resolve, rejectPromise) => {
-        reject = rejectPromise;
+      new Promise<Response>((resolve) => {
+        finish = resolve;
       }),
   );
-  const button = screen.getByRole("button", { name: "Enviar solicitud" });
-  fireEvent.click(button);
-  fireEvent.click(button);
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-  await act(async () => reject(new Error("network")));
-  expect(await screen.findByRole("alert")).toHaveTextContent("confirmar");
-  expect(screen.getByRole("button", { name: /Reintentar/ })).toBeDisabled();
-  await solve();
-  fetchMock.mockResolvedValueOnce(new Response("{}", { status: 409 }));
-  fireEvent.click(screen.getByRole("button", { name: /Reintentar/ }));
-  expect(await screen.findByText(/ya fue recibido/)).toBeInTheDocument();
-  expect(JSON.parse(fetchMock.mock.calls[2][1].body).submissionId).toBe(
-    JSON.parse(fetchMock.mock.calls[1][1].body).submissionId,
-  );
+  fireEvent.click(screen.getByRole("button", { name: "Enviar solicitud" }));
+  act(() => (widget!["error-callback"] as () => void)());
+  expect(screen.getByRole("alert")).toHaveTextContent("verificación");
+  await act(async () => {
+    finish(Response.json({ ok: true, reference: "received-123" }));
+  });
+  await screen.findByText("received-123");
+  fireEvent.click(screen.getByRole("button", { name: "Iniciar otro envío" }));
+  expect(await screen.findByLabelText(/Nombre/)).toHaveValue("");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Enviar solicitud" }),
+  ).toBeDisabled();
 });
+
+it.each(["network failure", "request timeout"])(
+  "prevents duplicate clicks and reuses submission identity after a %s",
+  async (failure) => {
+    render(<PublicFormPage token="public-token" />);
+    await fill();
+    await solve();
+    let fail!: () => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve, reject) => {
+          fail = () => {
+            if (failure === "request timeout")
+              resolve(new Response(null, { status: 408 }));
+            else reject(new Error("network"));
+          };
+        }),
+    );
+    const button = screen.getByRole("button", { name: "Enviar solicitud" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(async () => fail());
+    expect(await screen.findByRole("alert")).toHaveTextContent("confirmar");
+    expect(screen.getByLabelText(/Nombre/)).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Reintentar/ })).toBeDisabled();
+    await solve();
+    fetchMock.mockResolvedValueOnce(
+      Response.json(
+        { error: { code: "PUBLIC_SUBMISSION_ALREADY_REGISTERED" } },
+        { status: 409 },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Reintentar/ }));
+    expect(await screen.findByText(/ya fue recibido/)).toBeInTheDocument();
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual(
+      JSON.parse(fetchMock.mock.calls[1][1].body),
+    );
+  },
+);
+it("shows when the daily submission limit resets and keeps the form values", async () => {
+  render(<PublicFormPage token="public-token" />);
+  await fill();
+  await solve();
+  const resetAt = new Date(Date.now() + 86_400_000).toUTCString();
+  fetchMock.mockResolvedValueOnce(
+    Response.json(
+      { error: { code: "PUBLIC_SUBMISSION_DAILY_LIMIT" } },
+      { status: 429, headers: { "Retry-After": resetAt } },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Enviar solicitud" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    new Intl.DateTimeFormat("es-CO", {
+      dateStyle: "short",
+      timeStyle: "medium",
+    }).format(new Date(resetAt)),
+  );
+  expect(screen.getByLabelText(/Nombre/)).toHaveValue("Ana");
+});
+
+it("does not present a changed form as an already registered submission", async () => {
+  render(<PublicFormPage token="public-token" />);
+  await fill();
+  await solve();
+  fetchMock.mockResolvedValueOnce(
+    Response.json(
+      {
+        error: {
+          code: "CRM_SYNC_ERROR",
+          message: "The form changed. Request a new link.",
+        },
+      },
+      { status: 409 },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Enviar solicitud" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Pide un enlace nuevo",
+  );
+  expect(screen.queryByText("Envío registrado")).not.toBeInTheDocument();
+  expect(screen.getByLabelText(/Nombre/)).toHaveValue("Ana");
+});
+
 it("removes its captcha widget on unmount and ignores expired captcha tokens", async () => {
   const view = render(<PublicFormPage token="public-token" />);
   await fill();
@@ -152,6 +237,41 @@ it("explains unavailable captcha configuration without starting admin requests",
   render(<PublicFormPage token="public-token" />);
   expect(await screen.findByRole("alert")).toHaveTextContent("temporalmente");
   expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+it.each(["headers", "body"])(
+  "ends a stalled definition request while waiting for %s and lets visitors retry",
+  async (stage) => {
+    vi.useFakeTimers();
+    const stalled = new Promise<never>(() => {});
+    fetchMock.mockImplementationOnce(() =>
+      stage === "headers"
+        ? stalled
+        : Promise.resolve({ ok: true, json: () => stalled }),
+    );
+    render(<PublicFormPage token="public-token" />);
+    expect(screen.getByRole("status")).toHaveTextContent("Cargando formulario");
+    const [url, init] = fetchMock.mock.calls[0];
+    await act(() => vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS));
+    expect(init.signal.aborted).toBe(true);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "No se pudo cargar el formulario",
+    );
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Reintentar carga" }));
+    expect(await screen.findByLabelText(/Nombre/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toBe(url);
+  },
+);
+it("asks for a new link when the current link is gone", async () => {
+  fetchMock.mockResolvedValueOnce(new Response(null, { status: 410 }));
+  render(<PublicFormPage token="public-token" />);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Pide un enlace nuevo",
+  );
+  expect(
+    screen.queryByRole("button", { name: "Reintentar carga" }),
+  ).not.toBeInTheDocument();
 });
 it("does not send injected fields and never renders nested result payloads", async () => {
   render(<PublicFormPage token="public-token" />);
@@ -180,10 +300,11 @@ it("does not send injected fields and never renders nested result payloads", asy
     "private_admin",
   );
 });
-it("shows a recovery message when the external captcha script fails", async () => {
+it("retries the external captcha script without losing the filled form", async () => {
   vi.stubGlobal("turnstile", undefined);
   render(<PublicFormPage token="public-token" />);
-  await screen.findByLabelText(/Nombre/);
+  const name = await screen.findByLabelText(/Nombre/);
+  fireEvent.change(name, { target: { value: "Ana" } });
   const script = await waitFor(() => {
     const value = document.querySelector(
       'script[src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"]',
@@ -193,11 +314,34 @@ it("shows a recovery message when the external captcha script fails", async () =
   });
   fireEvent.error(script!);
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "recarga la página",
+    "vuelve a intentarlo",
   );
   expect(
     screen.getByRole("button", { name: "Enviar solicitud" }),
   ).toBeDisabled();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reintentar verificación" }),
+  );
+  const newScript = document.querySelector(
+    `script[src="${(script as HTMLScriptElement).src}"]`,
+  );
+  expect(newScript).not.toBeNull();
+  expect(newScript).not.toBe(script);
+  vi.stubGlobal("turnstile", {
+    render: vi.fn((_element, options) => {
+      widget = options;
+      return "recovered-widget";
+    }),
+    reset,
+    remove,
+  });
+  fireEvent.load(newScript!);
+  await solve();
+  expect(screen.getByLabelText(/Nombre/)).toHaveValue("Ana");
+  expect(
+    screen.getByRole("button", { name: "Enviar solicitud" }),
+  ).toBeEnabled();
+  newScript?.remove();
 });
 it("renders only the public quote projection, never provider payloads", async () => {
   render(<PublicFormPage token="public-token" />);
@@ -436,10 +580,13 @@ it("switches public form chrome and captcha language while preserving entered bu
   fireEvent.change(input, { target: { value: "Ana business content" } });
   expect(screen.getByRole("button", { name: "Submit request" })).toBeDisabled();
   await waitFor(() => expect(widget?.language).toBe("en"));
+  act(() => (widget!["error-callback"] as () => void)());
+  expect(screen.getByRole("alert")).toHaveTextContent("verification");
   fireEvent.click(screen.getByText("ES"));
   await screen.findByRole("button", { name: "Enviar solicitud" });
   expect(screen.getByLabelText(/Nombre/)).toHaveValue("Ana business content");
   await waitFor(() => expect(widget?.language).toBe("es"));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   fireEvent.click(screen.getByText("PT"));
   await screen.findByRole("button", { name: "Enviar solicitação" });
   expect(screen.getByLabelText(/Nombre/)).toHaveValue("Ana business content");

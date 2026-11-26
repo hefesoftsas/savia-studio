@@ -268,12 +268,21 @@ must import and install the release. Reader credentials cannot publish.
 
 Projects are saved automatically on the server, scoped to the signed-in principal
 and workspace. **Create plugin** lists saved projects and offers a new project.
+The editor loads after you open, create, or import a project.
 Saved projects can be deleted from that list without deleting published releases.
 Each save uses optimistic versioning; a conflicting save leaves the draft intact
 and offers retry or saving a separate copy. A scoped browser recovery copy protects
 pending edits across reloads when local storage is available. The editor warns
-before unloading while a server save is still pending. Do not close the page until
+before unloading while a server save is still pending, including when undoing
+the edit that is being saved. If its response is lost, Retry saves the current
+draft with the last acknowledged version. Do not close the page until
 “Project saved” appears if browser recovery storage is unavailable.
+**Back to projects** waits for pending edits to reach the server before showing
+the refreshed project list.
+When the server has a newer draft, recovering offline edits creates a separate
+project. Project actions stay disabled while the copy saves. The editor then
+confirms the recovery. If saving fails, the recovery draft stays available and
+opening the project again retries it.
 
 The store project list groups releases by plugin ID and sorts semantic versions newest
 first. **Edit latest version** creates an editable project from the latest release.
@@ -345,6 +354,9 @@ for TS/TSX, JS/JSX, JSON, CSS and HTML, and **React snippets**
 (`savia.react-snippets`) for React components (`sfc`) and state (`useState`).
 Use **Format document** or Shift+Alt+F to format, and Ctrl+Space to open
 completion suggestions. Disable an extension to unregister its providers.
+The web editor loads Prettier on demand. JSON and CSS load only their required
+parsers. Formatting JavaScript, TypeScript, and HTML also loads parsers for
+embedded code, including scripts and styles in HTML.
 
 These reviewed bundled extensions are separate from extensions installed from
 the marketplace. A project manager can search the Open VSX registry or upload a
@@ -386,6 +398,15 @@ models, undo history, project search navigation, and the existing draft/preview
 publication flow. The isolated editor retains the plugin's React, JSX and
 `createRoot` declarations. A dedicated TypeScript worker provides completion
 from the current project files, including unsaved edits, without executing them.
+The first completion allows up to 20 seconds for the worker to load. Later
+requests time out after five seconds. After a timeout, the next completion
+starts a fresh worker.
+When the editor cancels an outdated completion, its response and timeout are
+discarded so the current request can continue on the same worker.
+The isolated editor also cancels inline suggestion requests when their editor
+token expires, when the entry file closes, or when the editor session ends.
+The standard editor cancels pending suggestions on an edit, a newer suggestion
+request, a switch to read-only mode, or when the editor closes.
 Project extension settings are saved in the backend and
 restored when reopening the project; they are not part of the plugin ZIP or
 browser recovery storage. Versions opened for inspection remain read-only.

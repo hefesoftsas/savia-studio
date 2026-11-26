@@ -135,7 +135,7 @@ function PublicApplicationContent({ pathname }: { pathname: string }) {
     /^\/public\/bookings\/([A-Za-z0-9_-]{20,128})\/?$/.exec(pathname);
   return (
     <>
-      <div className="flex justify-end gap-2 px-6 py-3">
+      <div className="flex justify-end gap-2 px-6 py-3 print:hidden">
         <label className="flex items-center gap-2 text-sm">
           {t("Idioma")}
           <select

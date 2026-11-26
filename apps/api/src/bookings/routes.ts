@@ -37,6 +37,7 @@ import {
   availabilityRangeQuerySchema,
   availabilityRangeSchema,
   publicSlotQuerySchema,
+  type BookingService,
   type BookingSettings,
 } from "./contracts";
 import {
@@ -52,7 +53,11 @@ import {
   getPublicAvailability,
   getBookingAvailability,
 } from "./public-availability";
-import { admitBookingRequest, findBookingAdmission } from "./public-policy";
+import {
+  admitBookingRequest,
+  BookingDailyLimitError,
+  findBookingAdmission,
+} from "./public-policy";
 import { digest, dateInZone, slotsForDate } from "./domain";
 import {
   candidates,
@@ -87,6 +92,19 @@ const conflict = () =>
   new HTTPException(409, {
     message: "That time is no longer available. Choose another time.",
   });
+function assertReschedulingService(row: BookingRow, service: BookingService) {
+  const originalDuration =
+    (Date.parse(row.ends_at) - Date.parse(row.starts_at)) / 60000;
+  if (
+    service.durationMinutes !== originalDuration ||
+    service.bufferMinutes !== row.buffer_minutes
+  )
+    throw new HTTPException(409, {
+      message:
+        "The service changed. Contact the business to update this reservation.",
+    });
+}
+
 const params = z.object({ tenantId: z.coerce.number().int().positive() });
 const objectResponse = z.record(z.string(), z.unknown());
 const reservationPageSize = 500;
@@ -165,7 +183,8 @@ export function registerBookingRoutes(
     c.header("Cache-Control", "no-store");
     c.header("X-Robots-Tag", "noindex, nofollow");
     c.header("Referrer-Policy", "no-referrer");
-    const window = Math.floor(now() / 60000),
+    const timestamp = now();
+    const window = Math.floor(timestamp / 60000),
       ip = c.req.header("cf-connecting-ip") ?? "unknown";
     const bucket = await digest(
       `${window}:${ip}:${c.req.method === "GET" ? "read" : "write"}:${c.req.path.split("/")[4] === "manage" ? c.req.path.split("/")[5] : c.req.path.split("/")[4]}`,
@@ -174,12 +193,19 @@ export function registerBookingRoutes(
       .prepare(
         "INSERT INTO tenant_booking_rate_limits(bucket,count,expires_at) VALUES(?,1,?) ON CONFLICT(bucket) DO UPDATE SET count=tenant_booking_rate_limits.count+1 RETURNING count",
       )
-      .bind(bucket, now() + 120000)
+      .bind(bucket, timestamp + 120000)
       .first<{ count: number }>();
     if (!row || row.count > (c.req.method === "GET" ? 120 : 20))
-      throw new HTTPException(429, {
-        message: "Too many booking requests. Try again shortly.",
-      });
+      return c.json(
+        {
+          error: {
+            code: "BOOKING_RATE_LIMIT",
+            message: "Too many booking requests. Try again shortly.",
+          },
+        },
+        429,
+        { "Retry-After": new Date((window + 1) * 60000).toUTCString() },
+      );
     if (
       options.captcha?.rateLimiter &&
       !(
@@ -611,7 +637,7 @@ export function registerBookingRoutes(
   async function slots(
     state: { tenantId: number; settings: BookingSettings },
     query: z.infer<typeof slotQuerySchema>,
-    exceptId?: string,
+    rescheduling?: BookingRow,
     refresh = false,
   ) {
     const professional = state.settings.professionals.find(
@@ -630,6 +656,7 @@ export function registerBookingRoutes(
     const eligible = await candidates(db, state.tenantId);
     if (!eligible.some((p) => p.principalId === professional.principalId))
       throw conflict();
+    if (rescheduling) assertReschedulingService(rescheduling, service);
     const center = Date.parse(`${query.date}T12:00:00Z`);
     if (Math.abs(center - now()) > 183 * 86400000)
       throw new HTTPException(422, {
@@ -642,7 +669,7 @@ export function registerBookingRoutes(
       professional.principalId,
       from,
       to,
-      exceptId,
+      rescheduling?.id,
       refresh,
     );
     return {
@@ -1573,21 +1600,32 @@ export function registerBookingRoutes(
           ip: c.req.header("cf-connecting-ip") ?? "unknown",
         });
         const config = captchaConfiguration(captcha);
-        await admitBookingRequest(db, {
-          link: state,
-          requestKey,
-          requestHash: hash,
-          ipHash: await digest(
-            config.secretKey +
-              ":" +
-              (c.req.header("cf-connecting-ip") ?? "unknown"),
-          ),
-          captchaIdentityHash:
-            config.provider === "disabled"
-              ? null
-              : await digest(captchaIdentity(captcha, input.captchaToken).key),
-          now: now(),
-        });
+        try {
+          await admitBookingRequest(db, {
+            link: state,
+            requestKey,
+            requestHash: hash,
+            ipHash: await digest(
+              config.secretKey +
+                ":" +
+                (c.req.header("cf-connecting-ip") ?? "unknown"),
+            ),
+            captchaIdentityHash:
+              config.provider === "disabled"
+                ? null
+                : await digest(
+                    captchaIdentity(captcha, input.captchaToken).key,
+                  ),
+            now: now(),
+          });
+        } catch (error) {
+          if (!(error instanceof BookingDailyLimitError)) throw error;
+          return c.json(
+            { error: { code: error.code, message: error.message } },
+            429,
+            { "Retry-After": error.retryAfter },
+          );
+        }
       }
       const result = await slots(
           state,
@@ -1710,15 +1748,7 @@ export function registerBookingRoutes(
       )
     )
       throw conflict();
-    if (
-      service.durationMinutes !==
-        (Date.parse(row.ends_at) - Date.parse(row.starts_at)) / 60000 ||
-      service.bufferMinutes !== row.buffer_minutes
-    )
-      throw new HTTPException(409, {
-        message:
-          "The service changed. Contact the business to update this reservation.",
-      });
+    assertReschedulingService(row, service);
     return { settings: state.settings, professional, service };
   }
   const management = "/api/public/bookings/manage/{token}";
@@ -1807,7 +1837,7 @@ export function registerBookingRoutes(
           professionalId: row.professional_id,
           date,
         },
-        row.id,
+        row,
       );
       return c.json({
         data: { slots: result.slots, timeZone: result.timeZone },
@@ -1873,7 +1903,7 @@ export function registerBookingRoutes(
             professionalId: row.professional_id,
             date: dateInZone(startsAt, state.settings.timeZone),
           },
-          row.id,
+          row,
           true,
         ),
         selected = result.slots.find((s) => s.startsAt === startsAt);
@@ -1902,15 +1932,6 @@ export function registerBookingRoutes(
           );
         throw conflict();
       }
-      if (
-        result.service.durationMinutes !==
-          (Date.parse(row.ends_at) - Date.parse(row.starts_at)) / 60000 ||
-        result.service.bufferMinutes !== row.buffer_minutes
-      )
-        throw new HTTPException(409, {
-          message:
-            "The service changed. Contact the business to update this reservation.",
-        });
       return c.json({
         data: await reservationView(
           db,

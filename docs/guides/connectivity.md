@@ -1,8 +1,9 @@
 # Browser connectivity
 
 The shared `useOnlineStatus` hook drives the offline banner, local sync controls
-and realtime subscriptions. Explicit app update/reload guards also use this
-verified state. A browser's `navigator.onLine` signal is a hint:
+and realtime subscriptions. The PWA uses this verified state to check for app
+updates and decide when a pending or explicit reload can run. A browser's
+`navigator.onLine` signal is a hint:
 embedded browsers and VPN configurations can report offline while Savia remains
 reachable.
 
@@ -12,12 +13,12 @@ request against the configured Savia API origin. Any HTTP response, including
 the operation that failed; they are not represented as a network disconnection.
 A network failure or an eight-second timeout retains the offline state.
 
-While the browser continues reporting offline, visible tabs retry once per
-minute to detect recovery without a browser event. Hidden tabs stop checks and
-abort pending requests; becoming visible checks again. Ordinary online sessions
-do not poll. All hook consumers share one in-memory request and timer, removed
-when the last consumer unmounts. Cancelled or superseded results cannot overwrite
-a newer online state. No credentials or external connectivity providers are used.
+If the browser continues reporting offline, a visible tab checks again on focus,
+visibility changes or browser connectivity events. Hidden tabs pause background
+checks and abort pending requests. All consumers share one in-memory request
+with an eight-second deadline, released when the last subscriber unmounts.
+Cancelled or superseded results cannot overwrite a newer online state. Checks
+use Savia's API without credentials.
 
 The recovery fallback can outlive the application root after a failed boot or
 chunk load. An explicit update temporarily retains the shared verifier and waits

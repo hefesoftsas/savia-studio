@@ -80,17 +80,29 @@ async function performProbe(
   }
 }
 
-/** Recovery can run after ApplicationRoot and its subscribers were unmounted. */
-export async function verifyOnlineStatus(): Promise<boolean> {
+/** Share a bounded check even when the application root has no subscribers. */
+export async function verifyOnlineStatus({
+  background = false,
+  signal,
+}: { background?: boolean; signal?: AbortSignal } = {}): Promise<boolean> {
+  if (signal?.aborted) return false;
   if (getOnlineStatus()) return true;
-  explicitVerifications += 1;
+  if (!background) explicitVerifications += 1;
   const unsubscribe = subscribeOnlineStatus(() => {});
-  try {
-    await probe(true);
-    return online;
-  } finally {
-    explicitVerifications -= 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (!background) explicitVerifications -= 1;
     unsubscribe();
+    signal?.removeEventListener("abort", release);
+  };
+  signal?.addEventListener("abort", release, { once: true });
+  try {
+    await probe(!background);
+    return !signal?.aborted && online;
+  } finally {
+    release();
   }
 }
 

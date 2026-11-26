@@ -41,7 +41,7 @@ test("all admin distribution builds prepare the VSIX through the common asset bu
   );
 });
 
-async function fixture(t, { validChecksum = true } = {}) {
+async function fixture(t, { validChecksum = true, separator = " *" } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "savia-vsix-stage-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const artifactsDir = path.join(root, "artifacts");
@@ -57,7 +57,7 @@ async function fixture(t, { validChecksum = true } = {}) {
   await fs.writeFile(path.join(artifactsDir, filename), bytes);
   await fs.writeFile(
     path.join(artifactsDir, `${filename}.sha256`),
-    `${validChecksum ? checksum : "0".repeat(64)} ${filename}\n`,
+    `${validChecksum ? checksum : "0".repeat(64)}${separator}${filename}\n`,
   );
   return {
     artifactsDir,
@@ -88,7 +88,7 @@ test("stages the manifest-versioned VSIX and checksum while preserving unrelated
       path.join(setup.downloadsDir, `${setup.filename}.sha256`),
       "utf8",
     ),
-    `${setup.checksum} ${setup.filename}\n`,
+    `${setup.checksum} *${setup.filename}\n`,
   );
   await assert.rejects(fs.stat(path.join(setup.downloadsDir, previous)), {
     code: "ENOENT",
@@ -96,6 +96,18 @@ test("stages the manifest-versioned VSIX and checksum while preserving unrelated
   assert.equal(
     await fs.readFile(path.join(setup.downloadsDir, "readme.txt"), "utf8"),
     "keep me",
+  );
+});
+
+test("publishes legacy input checksums in the standard verification format", async (t) => {
+  const setup = await fixture(t, { separator: " " });
+
+  await prepareVscodeDownload(setup);
+
+  const published = path.join(setup.downloadsDir, `${setup.filename}.sha256`);
+  assert.equal(
+    await fs.readFile(published, "utf8"),
+    `${setup.checksum} *${setup.filename}\n`,
   );
 });
 

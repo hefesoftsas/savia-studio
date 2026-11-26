@@ -283,31 +283,53 @@ it("finishes an in-flight page if its configured index is retired concurrently",
   expect(body.total).toBe(2000);
   expect(body.data[0].name).toBe("Person00001");
 });
-it("keeps long indexed text readable without issuing an unusable cursor", async () => {
-  expect(
-    (
-      await request("/objects", {
-        name: "long_text",
-        label: "Long text",
-        config: {
-          ...config,
-          performance: { indexes: [{ fields: ["name"], order: "ASC" }] },
-        },
-      })
-    ).status,
-  ).toBe(201);
-  await env.DB.batch(
-    ["a".repeat(501), "z"].map((name, i) =>
-      env.DB.prepare(
-        "INSERT INTO studio_records(tenant_id,id,object_name,data) VALUES (?,?,'long_text',?)",
-      ).bind(tenant, "long-" + i, JSON.stringify({ name })),
-    ),
-  );
-  const response = await request(
-    "/records/long_text?sort=name&order=ASC&perPage=1",
-  );
-  expect(response.status).toBe(200);
-  const page: any = await response.json();
-  expect(page.data[0].name).toHaveLength(501);
-  expect(page.nextCursor).toBeNull();
-});
+it.each([
+  { collection: "long_text", value: "a".repeat(501) },
+  { collection: "escaped_text", value: "\u0001".repeat(500) },
+])(
+  "keeps $collection readable without issuing an unusable cursor",
+  async ({ collection, value }) => {
+    expect(
+      (
+        await request("/objects", {
+          name: collection,
+          label: "Long text",
+          config: {
+            ...config,
+            performance: { indexes: [{ fields: ["name"], order: "ASC" }] },
+          },
+        })
+      ).status,
+    ).toBe(201);
+    await env.DB.batch(
+      [value, "z"].map((name, i) =>
+        env.DB.prepare(
+          "INSERT INTO studio_records(tenant_id,id,object_name,data) VALUES (?,?,?,?)",
+        ).bind(
+          tenant,
+          collection + "-" + i,
+          collection,
+          JSON.stringify({ name }),
+        ),
+      ),
+    );
+    const path = `/records/${collection}?sort=name&order=ASC&perPage=1`;
+    const response = await request(path);
+    expect(response.status).toBe(200);
+    const page = await response.json<{
+      data: { name: string }[];
+      nextCursor: string | null;
+      total: number;
+    }>();
+    expect(page.data[0].name).toBe(value);
+    expect(page.total).toBe(2);
+    expect(page.nextCursor).toBeNull();
+
+    const next = await request(path + "&page=2");
+    expect(next.status).toBe(200);
+    expect(await next.json()).toMatchObject({
+      data: [{ name: "z" }],
+      total: 2,
+    });
+  },
+);

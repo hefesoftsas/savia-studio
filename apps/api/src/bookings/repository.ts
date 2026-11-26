@@ -312,7 +312,7 @@ export async function createReservation(
   const link = publicLinkId
     ? guard(
         db,
-        "SELECT EXISTS(SELECT 1 FROM tenant_booking_public_links WHERE id=? AND tenant_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?) )",
+        "SELECT EXISTS(SELECT 1 FROM tenant_booking_public_links WHERE id=? AND tenant_id=? AND deleted_at IS NULL AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?) )",
         [publicLinkId, row.tenant_id, new Date(now).toISOString()],
       )
     : undefined;

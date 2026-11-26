@@ -65,6 +65,37 @@ const admission = (
     captchaIdentityHash: captchaHash,
     now: stamp,
   });
+it.each([false, true])(
+  "reports an unavailable link after deactivation with reused proof = %s",
+  async (reuseProof) => {
+    const link = await linkFixture(1);
+    const proof = crypto.randomUUID();
+    await admission(link, "first-ip", crypto.randomUUID(), now, proof);
+    await env.DB.prepare("UPDATE tenants SET is_active=0 WHERE id=?")
+      .bind(link.tenantId)
+      .run();
+
+    await expect(
+      admission(
+        link,
+        "second-ip",
+        crypto.randomUUID(),
+        now,
+        reuseProof ? proof : null,
+      ),
+    ).rejects.toMatchObject({
+      status: 404,
+      message: "Booking page unavailable.",
+    });
+    const receipts = await env.DB.prepare(
+      "SELECT id FROM tenant_booking_request_receipts WHERE link_id=?",
+    )
+      .bind(link.id)
+      .all();
+    expect(receipts.results).toHaveLength(1);
+  },
+);
+
 it("atomically admits only the last remaining link budget request", async () => {
   const link = await linkFixture(1);
   const result = await Promise.allSettled([admission(link), admission(link)]);

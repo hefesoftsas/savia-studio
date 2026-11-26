@@ -248,7 +248,11 @@ describe("extension editor bridge", () => {
         location.origin,
       ),
     );
-    expect(fetchCompletion).toHaveBeenCalledWith("const value = ", "");
+    expect(fetchCompletion).toHaveBeenCalledWith(
+      "const value = ",
+      "",
+      expect.any(AbortSignal),
+    );
 
     fetchCompletion.mockClear();
     view.rerender(<PluginVscodeEditor {...props} activeFile="src/app.tsx" />);
@@ -272,6 +276,68 @@ describe("extension editor bridge", () => {
       ),
     );
     expect(fetchCompletion).not.toHaveBeenCalled();
+  });
+
+  it("releases an inline completion slot when the iframe cancels and aborts pending requests on file change", async () => {
+    const responses: Array<(value: string | null) => void> = [];
+    const fetchCompletion = vi.fn(
+      (_prefix: string, _suffix: string, _signal: AbortSignal) =>
+        new Promise<string | null>((resolve) => responses.push(resolve)),
+    );
+    const props = {
+      files: { "entry.tsx": "before", "src/app.tsx": "source" },
+      activeFile: "entry.tsx",
+      extensions: [],
+      readOnly: false,
+      onChange: vi.fn(),
+      onSearch: vi.fn(),
+      onError: vi.fn(),
+      fetchCompletion,
+    };
+    const view = render(<PluginVscodeEditor {...props} />);
+    const iframe = view.container.querySelector("iframe")!;
+    const postMessage = vi
+      .spyOn(iframe.contentWindow!, "postMessage")
+      .mockImplementation(() => {});
+    const sendRequest = (requestId: string) =>
+      messageFrom(iframe, {
+        type: "savia-editor-completion",
+        requestId,
+        prefix: "const value = ",
+        suffix: "",
+      });
+    for (const requestId of ["1", "2", "3", "4"]) sendRequest(requestId);
+    sendRequest("beyond-limit");
+    expect(fetchCompletion).toHaveBeenCalledTimes(4);
+
+    messageFrom(iframe, {
+      type: "savia-editor-completion-cancel",
+      requestId: "1",
+    });
+    sendRequest("replacement");
+    expect(fetchCompletion).toHaveBeenCalledTimes(5);
+    expect(fetchCompletion.mock.calls[0][2].aborted).toBe(true);
+    expect(fetchCompletion.mock.calls[4][2].aborted).toBe(false);
+    responses[0]("outdated");
+    await Promise.resolve();
+    expect(postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({ value: "outdated" }),
+      }),
+      location.origin,
+    );
+
+    view.rerender(<PluginVscodeEditor {...props} activeFile="src/app.tsx" />);
+    expect(
+      fetchCompletion.mock.calls.every(([, , signal]) => signal.aborted),
+    ).toBe(true);
+
+    view.rerender(<PluginVscodeEditor {...props} />);
+    sendRequest("closing");
+    const closing = fetchCompletion.mock.lastCall![2];
+    expect(closing.aborted).toBe(false);
+    view.unmount();
+    expect(closing.aborted).toBe(true);
   });
 
   it("keeps proposal review hidden and prevents the hidden editor from writing", () => {

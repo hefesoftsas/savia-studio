@@ -18,10 +18,17 @@ If a Bookings link specifies a tab or date, both the organization picker and
 sign-in preserve those selections. Switching tabs updates the URL, so the
 browser's Back and Forward buttons restore the previous view.
 Changing the display language keeps unsaved booking settings in the open form.
-Saving unrelated booking settings keeps unsaved availability edits when the
-professional's saved schedule is unchanged. Availability controls pause while
+Saving weekly hours in either **Booking settings** or **Availability** updates
+untouched weekdays in the other editor. Weekdays edited in the other editor
+stay in its draft until you save or reset it. Availability controls pause while
 a save is in progress.
-Changing workspaces resets the booking form and its saving state. A response
+Each professional has a separate availability draft while Bookings is open.
+Switching professionals preserves pending hours and exceptions. Saving applies
+the selected professional's draft, so other professionals' drafts remain
+available. A newer saved schedule updates untouched exception dates and keeps
+pending additions, edits, and removals in the draft.
+Changing workspaces resets the booking form and its saving state. Leaving Bookings
+or choosing another workspace cancels any pending settings read. A response
 from the previous workspace applies only to the request that sent it.
 If your session expires in Bookings, signing in again opens the same view.
 On a dedicated hostname, Bookings waits for a valid workspace. If the server
@@ -35,8 +42,16 @@ Open **Bookings** in the tenant navigation. Administrators use a five-step setup
 
 Each professional has weekly availability and date exceptions. An exception replaces that day's weekly periods; an empty exception closes the day. Periods cannot overlap or cross midnight. Administrators can configure all professionals. A professional can update their own availability without changing services or other professionals.
 
+Availability validates weekly hours and exception periods before submitting.
+If an exception is invalid, the message identifies its date. The form keeps
+the draft for correction and shows the reason when the server rejects a save.
+Clearing a time keeps the period in the draft for editing. Use **Remove period**
+on the last interval to close the date.
+
 When clocks change, the service and buffer must fit in the actual elapsed time
 before the period ends. Missing or repeated local start times are skipped.
+If the closing time occurs twice, the period ends at its first occurrence.
+If the clock skips the closing time, the period ends at the clock change.
 All-day Google calendar conflicts use the first instant of each local date,
 including when midnight is skipped or repeated.
 Outlook events marked free or cancelled are ignored before checking their
@@ -53,12 +68,31 @@ New links default to a 30-day expiry and 25 admitted booking submissions per UTC
 Each link has independent revocation and deletion. Delete permanently removes the public link from the panel and invalidates its canonical and short URLs, including legacy team links; it does not delete reservations or their private management links. Personal links expose only enabled services assigned to their fixed professional; optional service-scoped links expose only that service. The server enforces this scope for the catalog, challenge, availability and reservation, including caller-submitted identifiers. Disabled professionals/services, removed membership, inactive tenants, expiry and unpublishing stop new bookings. Existing tenant-wide URLs remain team links and can be revoked or deleted through the same panel; they are never silently converted into personal links.
 
 Changing the display language on a public booking link keeps the selected time and contact details. A retry with the same booking details retains the original request key and confirmation language, including after edits that only change email capitalization or spaces around the contact details. Each public link keeps its own form and confirmation state.
+Deleting a link also stops submissions that are still in flight and have not
+yet saved a reservation.
+If the workspace is deactivated before a submission is admitted, the API
+reports that the booking page is unavailable.
+If submission fails because a link or booking option disappeared, the page
+checks the link again. It shows the available options and keeps the customer's
+contact details if the link still works, or asks the customer for a new link.
+If a temporary connection or server error prevents a public booking link or private management link from opening, choose **Retry** to load the same link.
+Public booking requests time out after 15 seconds, including while reading a response. If a booking submission times out, use the retry action to check its outcome with the original request key.
 Refreshing availability also preserves the request key when the same start
 instant is returned with an equivalent offset.
 A successful retry shows the stored time and status, including changes or
 cancellation made after the initial request.
+If you go back to the calendar after a request whose outcome is unknown,
+**Retry previous booking** uses the original details and request key even when
+the selected time now appears occupied.
+
+When the per-minute request limit is reached, the public calendar and booking
+form show when to retry if the server supplies a reset time.
 
 When the form reloads its CAPTCHA after a language change or a return from the calendar, complete the new verification before submitting. If verification fails to load, **Retry verification** reloads the CAPTCHA and keeps the selected time and contact details.
+When verification is rejected or the daily booking limit is reached, the form
+requires fresh verification for a retry with the same booking details.
+After a timeout or server error, retrying from the review step also uses fresh
+verification and preserves the original request key.
 
 Returning from the review step refreshes availability for the selected month. If availability cannot be loaded, retry to check the previously selected time. The form only lets you continue once it confirms that the time is still available.
 
@@ -84,7 +118,7 @@ If a cancellation request fails, the management page checks the appointment's cu
 
 Expiry and revocation do not delete reservations or invalidate their distinct private management links. Deleting a public link has the same preservation behavior. Management and cancellation policies below continue to apply.
 
-Public booking admission also limits each hashed client IP to 20 submissions and each tenant to 1,000 submissions per UTC day. Failed admitted attempts consume the budget; retrying identical details with the same request key reuses admission and does not consume it twice. Changing the payload under that key conflicts. Persistent minute limits and CAPTCHA remain in force; browsing calendar days does not consume submission budgets. Public body size is limited to 32 KiB. A bounded range contains at most 31 dates and fetches each calendar's busy intervals once, rather than making a provider request for each day. Unknown calendar availability stops booking with a retryable error.
+Public booking admission also limits each hashed client IP to 20 submissions and each tenant to 1,000 submissions per UTC day. When a daily limit is reached, the API sends the next UTC midnight in the `Retry-After` header, and the booking form shows that time in the customer's browser time zone. Failed admitted attempts consume the budget; retrying identical details with the same request key reuses admission and does not consume it twice. Changing the payload under that key conflicts. Persistent minute limits and CAPTCHA remain in force; browsing calendar days does not consume submission budgets. Public body size is limited to 32 KiB. A bounded range contains at most 31 dates. If working hours and booking rules leave candidate times, Savia checks each calendar once, from the earliest candidate through the final appointment and its buffer. Unknown calendar availability stops booking with a retryable error.
 
 ## Reservations and management
 
@@ -125,6 +159,18 @@ five-minute polling. See [My Day widgets](../my-day-widgets.md).
 The confirmation contains a private management link. Anyone possessing this link can view, cancel or reschedule that single reservation, so treat it as private. Customers can change a confirmed reservation before the tenant's cutoff. Cancelled reservations release their intervals. Rescheduling replaces the old occupancy atomically and keeps the old time if the new time conflicts. Changing a service's duration or buffer requires contacting the business before rescheduling an existing reservation. Administrators and assigned professionals can cancel through their authenticated agenda without the customer cutoff.
 
 Choose **Reschedule** from the private management page to use the same inline calendar, time buttons and display time zone as a new booking. The service and professional remain fixed to the reservation. Choose a different time, review the existing and proposed appointment, then confirm the change; navigating back or leaving the editor does not change the appointment. Successful changes refresh the reservation's revision and retain its private management link. A stale slot returns to refreshed availability; an identical retry after a lost success response checks the current appointment before claiming success.
+
+If the management page cannot verify the result of a cancellation or reschedule,
+choose **Refresh appointment**. Further changes are available once the page has
+loaded the current reservation and confirmed it can still be changed.
+
+If the server rejects availability while the calendar is open, the management
+page rechecks the appointment and closes the calendar if the appointment moved
+or can no longer be rescheduled.
+If the service duration or buffer changes, the API reports the changed service
+before checking connected calendar availability.
+The current and proposed times both show the applicable time zone designation
+so repeated local hours during daylight saving time changes can be distinguished.
 
 Private calendar availability is scoped to the reservation's token and is independent of public sharing-link expiry or revocation. It excludes that reservation's native occupied intervals while retaining all other appointments and external calendar busy periods. Rescheduling is unavailable after the cutoff or when the tenant, professional, service or original duration/buffer no longer permits it; the page explains how to contact the business. Viewing and eligible cancellation remain available under their existing rules. The link to book another appointment appears only when the tenant-wide public link remains available.
 

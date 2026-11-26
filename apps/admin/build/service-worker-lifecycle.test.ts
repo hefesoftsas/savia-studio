@@ -53,6 +53,9 @@ it("activates the generated replacement worker without waiting for old tabs to c
     // Cloudflare canonicalizes standalone HTML to an extensionless URL.
     // Both forms must reach that document instead of the admin shell.
     for (const path of [
+      "/office",
+      "/office?base=%2Fv1%2Foffice-documents&file=doc-1",
+      "/office/?base=%2Fv1%2Foffice-documents&file=doc-1",
       "/plugin-editor.html",
       "/plugin-editor",
       "/plugin-editor?version=2",
@@ -65,9 +68,12 @@ it("activates the generated replacement worker without waiting for old tabs to c
         path,
       ).toBe(true);
     }
-    expect(
-      navigationDenylist.some((pattern) => pattern.test("/plugin-studio")),
-    ).toBe(false);
+    for (const path of ["/plugin-studio", "/office-suite?tab=documents"]) {
+      expect(
+        navigationDenylist.some((pattern) => pattern.test(path)),
+        path,
+      ).toBe(false);
+    }
   } finally {
     await rm(output, { recursive: true, force: true });
   }

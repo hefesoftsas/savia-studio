@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useLookupIcon } from "./use-lookup-icon";
 import type { LucideIcon } from "lucide-react";
 
-const lucideIconLoaders = import.meta.glob<{ default: LucideIcon }>([
-  "@lucide-icon-dist/*.mjs",
-  "!@lucide-icon-dist/index.mjs",
-]);
+const lucideIconLoaders = import.meta.glob<{ default: LucideIcon }>(
+  ["@lucide-icon-dist/*.mjs", "!@lucide-icon-dist/index.mjs"],
+  // Keep configurable lookups lazy when an icon is also used by the app shell.
+  { query: "?savia-configurable-icon" },
+);
 
 const loaderByIconId = new Map<
   string,
@@ -38,23 +39,7 @@ export function LucideLookupIcon({
   name: string;
   className?: string;
 }) {
-  const [Icon, setIcon] = useState<LucideIcon | null>(
-    () => componentCache.get(name) ?? null,
-  );
-
-  useEffect(() => {
-    let active = true;
-    loadLucideIconComponent(name)
-      .then((component) => {
-        if (active) setIcon(() => component);
-      })
-      .catch(() => {
-        if (active) setIcon(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [name]);
+  const Icon = useLookupIcon(name, componentCache, loadLucideIconComponent);
 
   if (!Icon) {
     return <span className={className} aria-hidden="true" />;

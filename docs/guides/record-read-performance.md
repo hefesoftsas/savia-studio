@@ -15,7 +15,9 @@ policies and filtered queries use their actual predicates; a tenant-wide count
 is never substituted for a restricted count.
 
 Page queries select IDs before fetching JSON payloads. Numeric page jumps remain
-supported. Timestamp and ID sorts additionally return `nextCursor`; supplying it
+supported. Local and linked collection lists return HTTP 422 when the requested
+row position exceeds JavaScript's safe integer range. Timestamp and ID sorts
+additionally return `nextCursor`; supplying it
 seeks from the last record instead of discarding earlier pages. Tokens are bound
 to the tenant, collection, sort, filters and page size; all normal authorization
 predicates still apply. Cursors convey position, not access rights. Records with
@@ -96,7 +98,9 @@ large remote collection separately and validate D1 execution limits before
 rollout. Regular reads never perform schema changes or backfills.
 
 Configured indexed sorts support typed cursors, including numeric values,
-nulls, and repeated values. The ID breaks ties. Unconfigured sorts and random
+nulls, and repeated values. The ID breaks ties. If the encoded cursor would
+exceed the API limit, the page can still be followed using its page number.
+Unconfigured sorts and random
 page jumps retain the existing behavior. Indexes can accelerate matching
 filters, but an exact count over an arbitrary combination can still require
 scanning the matching index range.
@@ -118,15 +122,24 @@ page/count/summary paths. Arbitrary filters, unsupported orders, and restricted
 row summaries can still use the existing cache and query fallback.
 
 PostgreSQL uses native btree expression indexes with separate type-rank, numeric
-and text keys, preserving mixed JSON ordering and stable cursor ties. PostgreSQL
-triggers maintain counts and summaries in the same transaction as writes.
+and text keys, preserving mixed JSON ordering and stable cursor ties. Decimal
+sort keys and range filters use the same precision across PostgreSQL sessions.
+PostgreSQL triggers maintain counts and summaries in the same transaction as writes.
 Configuration/backfill locks record writes while publishing the new definitions;
 normal reads never build indexes or summaries. Configuration on a large table
 therefore needs a maintenance window. Whole-collection counters serialize writes
 to the same collection; measure concurrent writes as well as read improvements.
 
 PostgreSQL initialization installs configured indexes that were previously
-inactive. Its SQLite importer skips source derived tables, rebuilds native counts
+inactive and rebuilds configured JSON indexes after the sort-key migration.
+Compact sort-key functions allow indexes on up to three JSON fields without
+expanding the expression stored in the PostgreSQL catalog. PostgreSQL also
+limits the size of each B-tree entry. If a write or index publication returns
+`PERFORMANCE_INDEX_ENTRY_TOO_LARGE`, shorten the indexed values or remove the
+performance index before retrying. The failed operation leaves the existing
+records and index configuration intact.
+
+The SQLite importer skips source derived tables, rebuilds native counts
 and summaries from imported records/metadata, and creates configured indexes
 before committing. Authentication and record payloads are not rewritten for this
 acceleration. PostgreSQL still executes unconfigured or permission-restricted

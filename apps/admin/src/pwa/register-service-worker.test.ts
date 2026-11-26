@@ -1,11 +1,23 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
+import { subscribeOnlineStatus } from "../offline/connectivity-status";
 import {
   registerPwaServiceWorker,
   retireAdministrativeWorkerForPublicRoute,
 } from "./register-service-worker";
 
-afterEach(() => vi.restoreAllMocks());
+const stopObservers: Array<() => void> = [];
+function observeUpdates() {
+  const stop = registerPwaServiceWorker();
+  if (stop) stopObservers.push(stop);
+  return stop;
+}
+
+afterEach(() => {
+  for (const stop of stopObservers.splice(0)) stop();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 it("registers after lazy private bootstrap even when window load already fired", async () => {
   const register = vi.fn().mockResolvedValue({
     scope: "/",
@@ -16,7 +28,7 @@ it("registers after lazy private bootstrap even when window load already fired",
     configurable: true,
     value: { register },
   });
-  registerPwaServiceWorker();
+  observeUpdates();
   expect(register).toHaveBeenCalledOnce();
 });
 it("waits for load while the private page is still loading", () => {
@@ -29,11 +41,73 @@ it("waits for load while the private page is still loading", () => {
     configurable: true,
     value: { register },
   });
-  registerPwaServiceWorker();
+  observeUpdates();
   expect(register).not.toHaveBeenCalled();
   window.dispatchEvent(new Event("load"));
   window.dispatchEvent(new Event("load"));
   expect(register).toHaveBeenCalledOnce();
+});
+
+it("cancels registration when its observer closes before the page loads", () => {
+  const register = vi.fn().mockResolvedValue({
+    scope: "/",
+    update: vi.fn().mockResolvedValue(undefined),
+  });
+  vi.spyOn(document, "readyState", "get").mockReturnValue("loading");
+  Object.defineProperty(navigator, "serviceWorker", {
+    configurable: true,
+    value: { register },
+  });
+  observeUpdates()?.();
+  window.dispatchEvent(new Event("load"));
+  expect(register).not.toHaveBeenCalled();
+});
+
+it("ignores a registration that finishes after its observer closes", async () => {
+  vi.spyOn(document, "readyState", "get").mockReturnValue("complete");
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  const update = vi.fn().mockResolvedValue(undefined);
+  const registration = { scope: "/", update };
+  let finishRegistration!: (value: typeof registration) => void;
+  const register = vi.fn(
+    () =>
+      new Promise<typeof registration>((resolve) => {
+        finishRegistration = resolve;
+      }),
+  );
+  Object.defineProperty(navigator, "serviceWorker", {
+    configurable: true,
+    value: { register },
+  });
+  observeUpdates()?.();
+  finishRegistration(registration);
+  await Promise.resolve();
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(update).not.toHaveBeenCalled();
+});
+
+it("shares registration across a remount and removes version checks on cleanup", async () => {
+  vi.spyOn(document, "readyState", "get").mockReturnValue("complete");
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+  const update = vi.fn().mockResolvedValue(undefined);
+  const register = vi.fn().mockResolvedValue({ scope: "/", update });
+  Object.defineProperty(navigator, "serviceWorker", {
+    configurable: true,
+    value: { register },
+  });
+  observeUpdates()?.();
+  const stop = observeUpdates();
+  expect(register).toHaveBeenCalledOnce();
+  await Promise.resolve();
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(update).toHaveBeenCalledOnce();
+
+  stop?.();
+  clock.mockReturnValue(60_000);
+  window.dispatchEvent(new Event("online"));
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(update).toHaveBeenCalledOnce();
 });
 
 it("checks for updates on reconnect and visibility with a one-minute throttle", async () => {
@@ -45,7 +119,7 @@ it("checks for updates on reconnect and visibility with a one-minute throttle", 
     configurable: true,
     value: { register },
   });
-  registerPwaServiceWorker();
+  observeUpdates();
   await Promise.resolve();
   window.dispatchEvent(new Event("online"));
   document.dispatchEvent(new Event("visibilitychange"));
@@ -55,6 +129,79 @@ it("checks for updates on reconnect and visibility with a one-minute throttle", 
     updateViaCache: "none",
   });
 });
+
+it("checks for updates after verifying connectivity despite a browser offline hint", async () => {
+  vi.spyOn(document, "readyState", "get").mockReturnValue("complete");
+  const visibility = vi
+    .spyOn(document, "visibilityState", "get")
+    .mockReturnValue("hidden");
+  vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+  const fetcher = vi
+    .fn()
+    .mockResolvedValue(new Response(null, { status: 503 }));
+  vi.stubGlobal("fetch", fetcher);
+  const update = vi.fn().mockResolvedValue(undefined);
+  const register = vi.fn().mockResolvedValue({ scope: "/", update });
+  Object.defineProperty(navigator, "serviceWorker", {
+    configurable: true,
+    value: { register },
+  });
+  observeUpdates();
+  await Promise.resolve();
+  const release = subscribeOnlineStatus(() => {});
+  try {
+    visibility.mockReturnValue("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.waitFor(() => expect(update).toHaveBeenCalledOnce(), {
+      timeout: 300,
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(navigator.onLine).toBe(false);
+    expect(update).toHaveBeenCalledOnce();
+  } finally {
+    release();
+  }
+});
+
+it.each(["tab hides", "observer closes"])(
+  "cancels background verification when the %s",
+  async (reason) => {
+    vi.spyOn(document, "readyState", "get").mockReturnValue("complete");
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    let finishProbe!: (response: Response) => void;
+    const fetcher = vi.fn(
+      (_url: string, _init: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          finishProbe = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const update = vi.fn().mockResolvedValue(undefined);
+    const register = vi.fn().mockResolvedValue({ scope: "/", update });
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: { register },
+    });
+    const stop = observeUpdates();
+    await Promise.resolve();
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce(), {
+      timeout: 300,
+    });
+    if (reason === "tab hides") {
+      visibility.mockReturnValue("hidden");
+      document.dispatchEvent(new Event("visibilitychange"));
+    } else stop?.();
+    expect(fetcher.mock.calls[0][1].signal?.aborted).toBe(true);
+    finishProbe(new Response(null));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(update).not.toHaveBeenCalled();
+  },
+);
 
 it("unregisters an existing admin worker and reloads public visitor routes", async () => {
   const controller = { scriptURL: `${window.location.origin}/sw.js` };

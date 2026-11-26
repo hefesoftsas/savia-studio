@@ -30,21 +30,25 @@ const parts = (instant: number, zone: string) => {
   const get = (key: string) => p.find((v) => v.type === key)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`;
 };
-/** Reject both missing and repeated wall times rather than choosing a DST side. */
-export function localInstant(
-  date: string,
-  time: string,
-  zone: string,
-): number | null {
+function localInstants(date: string, time: string, zone: string): number[] {
   const wall = Date.parse(`${date}T${time}:00Z`),
     offsets = new Set<number>();
   for (let h = -36; h <= 36; h += 6) {
     const sample = wall + h * 3600000;
     offsets.add(Date.parse(`${parts(sample, zone)}Z`) - sample);
   }
-  const matches = [...offsets]
+  return [...offsets]
     .map((o) => wall - o)
     .filter((v) => parts(v, zone) === `${date}T${time}:00`);
+}
+
+/** Reject both missing and repeated wall times rather than choosing a DST side. */
+export function localInstant(
+  date: string,
+  time: string,
+  zone: string,
+): number | null {
+  const matches = localInstants(date, time, zone);
   return matches.length === 1 ? matches[0] : null;
 }
 
@@ -72,6 +76,19 @@ export function localDayStart(date: string, zone: string): number | null {
 const minute = (v: string) => Number(v.slice(0, 2)) * 60 + Number(v.slice(3));
 const clock = (m: number) =>
   `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+
+export function overlapsBusy(
+  start: number,
+  occupiedEnd: number,
+  busy: BusyInterval[],
+) {
+  return busy.some(
+    (interval) =>
+      Date.parse(interval.start) < occupiedEnd &&
+      Date.parse(interval.end) > start,
+  );
+}
+
 export function slotsForDate(
   settings: BookingSettings,
   professional: BookingProfessional,
@@ -87,8 +104,10 @@ export function slotsForDate(
     : professional.weekly.filter((p) => p.day === day);
   const slots: Array<{ startsAt: string; endsAt: string }> = [];
   for (const period of periods) {
-    const last = localInstant(date, period.end, settings.timeZone);
-    if (last === null) continue;
+    const closingInstants = localInstants(date, period.end, settings.timeZone);
+    // Stop at the first occurrence when the configured closing time repeats.
+    const last = closingInstants.length ? Math.min(...closingInstants) : null;
+    const closingWallTime = `${date}T${period.end}:00`;
     const endMinute = minute(period.end);
     for (
       let m = Math.ceil(minute(period.start) / 15) * 15;
@@ -100,18 +119,19 @@ export function slotsForDate(
       const end = start + service.durationMinutes * 60000,
         occupiedEnd = end + service.bufferMinutes * 60000;
       // Appointment length is elapsed time, including across clock changes.
-      if (occupiedEnd > last) break;
+      if (last !== null && occupiedEnd > last) break;
+      // If the clock skips over closing time, occupancy may end at the jump.
+      if (
+        last === null &&
+        parts(occupiedEnd - 1, settings.timeZone) >= closingWallTime
+      )
+        continue;
       if (
         start < now + settings.leadMinutes * 60000 ||
         start > now + settings.horizonDays * 86400000
       )
         continue;
-      if (
-        busy.some(
-          (b) => Date.parse(b.start) < occupiedEnd && Date.parse(b.end) > start,
-        )
-      )
-        continue;
+      if (overlapsBusy(start, occupiedEnd, busy)) continue;
       slots.push({
         startsAt: new Date(start).toISOString(),
         endsAt: new Date(end).toISOString(),

@@ -25,8 +25,15 @@ import {
 } from "@savia/tenant-host/bookings-route";
 import { bookingMessages } from "./booking-messages";
 import { bookingDayRange } from "./booking-date";
+import { bookingSetupMessages } from "./booking-setup-messages";
+import { validAvailabilityPeriods, validWeeklyHours } from "./booking-schedule";
 
-import type { Period, Exception, Settings } from "./booking-types";
+import type {
+  Period,
+  Exception,
+  Professional,
+  Settings,
+} from "./booking-types";
 import { BookingSetupWizard, WeeklyHoursEditor } from "./booking-setup-wizard";
 import { BookingPublicLinksPanel } from "./booking-public-links-panel";
 import {
@@ -75,7 +82,84 @@ type ReservationActionFeedback = {
   error?: string;
 };
 
-const defaultWeekly = (): Period[] => [];
+type AvailabilityDraft = {
+  baseline: Professional;
+  weekly: Period[];
+  exceptions: Exception[];
+  exceptionDate: string;
+};
+
+function periodSignature(periods?: Exception["periods"]) {
+  return (
+    periods &&
+    JSON.stringify(periods.map(({ start, end }) => [start, end]).sort())
+  );
+}
+
+function mergeWeeklyHours(
+  draft: Period[],
+  previous: Period[],
+  saved: Period[],
+) {
+  const days = new Set([...saved, ...draft].map(({ day }) => day));
+  return [...days].flatMap((day) => {
+    const local = draft.filter((period) => period.day === day);
+    const original = previous.filter((period) => period.day === day);
+    return periodSignature(local) === periodSignature(original)
+      ? saved.filter((period) => period.day === day)
+      : local;
+  });
+}
+
+function mergeExceptions(
+  draft: Exception[],
+  previous: Exception[],
+  saved: Exception[],
+) {
+  const localByDate = new Map(draft.map((item) => [item.date, item]));
+  const previousByDate = new Map(previous.map((item) => [item.date, item]));
+  const savedByDate = new Map(saved.map((item) => [item.date, item]));
+  const dates = new Set([...savedByDate.keys(), ...localByDate.keys()]);
+  return [...dates].sort().flatMap((date) => {
+    const local = localByDate.get(date);
+    const original = previousByDate.get(date);
+    const exception =
+      periodSignature(local?.periods) === periodSignature(original?.periods)
+        ? savedByDate.get(date)
+        : local;
+    return exception ? [exception] : [];
+  });
+}
+
+function readAvailabilityDraft(
+  professional: Professional,
+  draft?: AvailabilityDraft,
+): AvailabilityDraft {
+  if (!draft || draft.baseline.principalId !== professional.principalId) {
+    return {
+      baseline: professional,
+      weekly: professional.weekly,
+      exceptions: professional.exceptions,
+      exceptionDate: "",
+    };
+  }
+  if (draft.baseline === professional) return draft;
+  return {
+    ...draft,
+    baseline: professional,
+    weekly: mergeWeeklyHours(
+      draft.weekly,
+      draft.baseline.weekly,
+      professional.weekly,
+    ),
+    exceptions: mergeExceptions(
+      draft.exceptions,
+      draft.baseline.exceptions,
+      professional.exceptions,
+    ),
+  };
+}
+
 function isConflict(error: unknown) {
   return error instanceof ApiClientError
     ? error.status === 409 || error.code === "VERSION_CONFLICT"
@@ -110,6 +194,7 @@ export function BookingPage(props: BookingPageProps) {
 
 function BookingWorkspace({ services, tenantId }: BookingPageProps) {
   const t = useMessages(bookingMessages);
+  const setupText = useMessages(bookingSetupMessages);
   const locale = useAppLocale();
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [loading, setLoading] = useState(true);
@@ -122,9 +207,9 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
   const { tab = "settings", date: appointmentDate } =
     readBookingRouteQuery(searchParams);
   const [settings, setSettings] = useState<Settings>();
-  const [weekly, setWeekly] = useState<Period[]>([]);
-  const [exceptions, setExceptions] = useState<Exception[]>([]);
-  const [exceptionDate, setExceptionDate] = useState("");
+  const [availabilityDrafts, setAvailabilityDrafts] = useState(
+    () => new Map<string, AvailabilityDraft>(),
+  );
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [reservationsLoading, setReservationsLoading] = useState(false);
   const [reservationsLoadFailed, setReservationsLoadFailed] = useState(false);
@@ -176,7 +261,8 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
   );
 
   useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
+    const { signal } = controller;
     setLoading(true);
     setBootstrapFailed(false);
     setError("");
@@ -186,21 +272,19 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
     setReservations([]);
     setConferenceSelections({});
     void services.apiClient
-      .get<{ data: Bootstrap }>(`/v1/tenants/${tenantId}/booking`)
+      .get<{ data: Bootstrap }>(`/v1/tenants/${tenantId}/booking`, { signal })
       .then(({ data }) => {
-        if (!active) return;
+        if (signal.aborted) return;
         setBootstrap(data);
         setSettings(data.settings);
       })
       .catch(() => {
-        if (active) setBootstrapFailed(true);
+        if (!signal.aborted) setBootstrapFailed(true);
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (!signal.aborted) setLoading(false);
       });
-    return () => {
-      active = false;
-    };
+    return () => controller.abort();
   }, [tenantId, services.apiClient, attempt]);
 
   const readReservationPage = useCallback(
@@ -344,6 +428,33 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
     });
   }
 
+  function saveErrorMessage(error: unknown, kind: "settings" | "availability") {
+    if (isConflict(error)) {
+      return t(
+        "Booking settings changed elsewhere. Reload before saving again.",
+      );
+    }
+    if (error instanceof ApiClientError) {
+      const message = Object.prototype.hasOwnProperty.call(
+        bookingMessages,
+        error.message,
+      )
+        ? t(error.message as keyof typeof bookingMessages)
+        : error.message;
+      return t(
+        kind === "settings"
+          ? "Booking settings could not be saved (HTTP %{status}): %{message}"
+          : "Availability could not be saved (HTTP %{status}). %{message}",
+        { status: error.status, message },
+      );
+    }
+    return t(
+      kind === "settings"
+        ? "Booking settings could not be saved. Check your connection and retry."
+        : "Availability could not be saved. Check your connection and retry.",
+    );
+  }
+
   async function saveSettings(settings: Settings) {
     if (
       settings.published &&
@@ -378,26 +489,7 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
       setSettings(next.settings);
       setNotice(t("Booking settings saved."));
     } catch (exception) {
-      setError(
-        isConflict(exception)
-          ? t("Booking settings changed elsewhere. Reload before saving again.")
-          : exception instanceof ApiClientError
-            ? t(
-                "Booking settings could not be saved (HTTP %{status}): %{message}",
-                {
-                  status: exception.status,
-                  message: Object.prototype.hasOwnProperty.call(
-                    bookingMessages,
-                    exception.message,
-                  )
-                    ? t(exception.message as keyof typeof bookingMessages)
-                    : exception.message,
-                },
-              )
-            : t(
-                "Booking settings could not be saved. Check your connection and retry.",
-              ),
-      );
+      setError(saveErrorMessage(exception, "settings"));
     } finally {
       setSaving(false);
     }
@@ -406,11 +498,35 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
   async function saveAvailability(event: FormEvent) {
     event.preventDefault();
     if (saving || !bootstrap || !scheduleProfessional) return;
+    setNotice("");
+    if (!validWeeklyHours(weekly)) {
+      setError(
+        setupText(
+          "Check weekly hours. Use five-minute increments and non-overlapping periods.",
+        ),
+      );
+      return;
+    }
+    if (exceptions.length > 200) {
+      setError(t("Use up to 200 exception dates."));
+      return;
+    }
+    const invalidException = exceptions.find(
+      ({ periods }) => periods.length > 4 || !validAvailabilityPeriods(periods),
+    );
+    if (invalidException) {
+      setError(
+        t(
+          "Check the exception for %{date}. Use up to four non-overlapping periods in five-minute increments, with each end after its start.",
+          { date: invalidException.date },
+        ),
+      );
+      return;
+    }
     const saved = bootstrap.settings;
     const target = scheduleProfessional;
     setSaving(true);
     setError("");
-    setNotice("");
     try {
       const result = bootstrap.canManage
         ? await services.apiClient.put<{ data: Bootstrap }>(
@@ -433,6 +549,20 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
         (professional) => professional.id === target.id,
       );
       setBootstrap(next);
+      setAvailabilityDrafts((drafts) => {
+        const draft = drafts.get(target.id);
+        if (!draft) return drafts;
+        const updated = new Map(drafts);
+        if (savedSchedule && draft.exceptionDate) {
+          updated.set(target.id, {
+            ...readAvailabilityDraft(savedSchedule),
+            exceptionDate: draft.exceptionDate,
+          });
+        } else {
+          updated.delete(target.id);
+        }
+        return updated;
+      });
       setSettings((draft) => {
         if (!draft || draft === saved) return next.settings;
         if (draft.version !== saved.version) return draft;
@@ -443,10 +573,11 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
             professional.id === target.id && savedSchedule
               ? {
                   ...professional,
-                  weekly:
-                    professional.weekly === target.weekly
-                      ? savedSchedule.weekly
-                      : professional.weekly,
+                  weekly: mergeWeeklyHours(
+                    professional.weekly,
+                    target.weekly,
+                    savedSchedule.weekly,
+                  ),
                   exceptions: savedSchedule.exceptions,
                 }
               : professional,
@@ -455,11 +586,7 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
       });
       setNotice(t("Availability saved."));
     } catch (exception) {
-      setError(
-        isConflict(exception)
-          ? t("Booking settings changed elsewhere. Reload before saving again.")
-          : t("Availability could not be saved. Reload and retry."),
-      );
+      setError(saveErrorMessage(exception, "availability"));
     } finally {
       setSaving(false);
     }
@@ -486,28 +613,39 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
         (item) => item.id === selectedProfessional,
       )
     : currentProfessional;
-  const previousSchedule = useRef<typeof scheduleProfessional>(undefined);
+  const availability = scheduleProfessional
+    ? readAvailabilityDraft(
+        scheduleProfessional,
+        availabilityDrafts.get(scheduleProfessional.id),
+      )
+    : undefined;
+  const {
+    weekly = [],
+    exceptions = [],
+    exceptionDate = "",
+  } = availability ?? {};
 
-  useEffect(() => {
-    const previous = previousSchedule.current;
-    previousSchedule.current = scheduleProfessional;
-    const sameProfessional =
-      previous?.id === scheduleProfessional?.id &&
-      previous?.principalId === scheduleProfessional?.principalId;
-    // Other settings writes can return a new copy of an unchanged schedule.
-    if (
-      !sameProfessional ||
-      JSON.stringify(previous?.weekly) !==
-        JSON.stringify(scheduleProfessional?.weekly)
-    )
-      setWeekly(scheduleProfessional?.weekly ?? defaultWeekly());
-    if (
-      !sameProfessional ||
-      JSON.stringify(previous?.exceptions) !==
-        JSON.stringify(scheduleProfessional?.exceptions)
-    )
-      setExceptions(scheduleProfessional?.exceptions ?? []);
-  }, [scheduleProfessional]);
+  function updateAvailability(
+    update: (draft: AvailabilityDraft) => AvailabilityDraft,
+  ) {
+    if (!scheduleProfessional) return;
+    setAvailabilityDrafts((drafts) => {
+      const id = scheduleProfessional.id;
+      const updated = new Map(drafts);
+      updated.set(
+        id,
+        update(readAvailabilityDraft(scheduleProfessional, drafts.get(id))),
+      );
+      return updated;
+    });
+  }
+
+  function setExceptions(update: (items: Exception[]) => Exception[]) {
+    updateAvailability((draft) => ({
+      ...draft,
+      exceptions: update(draft.exceptions),
+    }));
+  }
 
   function editExceptionPeriod(
     date: string,
@@ -518,15 +656,13 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
     setExceptions((current) =>
       current.map((exception) => {
         if (exception.date !== date) return exception;
+        const period = exception.periods.at(index);
+        if (!period && !value) return exception;
         const periods = [...exception.periods];
-        if (!value) periods.splice(index, 1);
-        else if (periods[index])
-          periods[index] = { ...periods[index], [field]: value };
-        else
-          periods[index] = {
-            start: field === "start" ? value : "09:00",
-            end: field === "end" ? value : "17:00",
-          };
+        periods[index] = {
+          ...(period ?? { start: "09:00", end: "17:00" }),
+          [field]: value,
+        };
         return { ...exception, periods };
       }),
     );
@@ -907,9 +1043,11 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
                 className="h-9 min-w-0 max-w-full rounded-md border bg-background px-3 max-sm:h-11"
                 value={selectedProfessional}
                 disabled={saving}
-                onChange={(event) =>
-                  setSelectedProfessional(event.target.value)
-                }
+                onChange={(event) => {
+                  setSelectedProfessional(event.target.value);
+                  setError("");
+                  setNotice("");
+                }}
               >
                 {bootstrap.settings.professionals.map((professional) => (
                   <option key={professional.id} value={professional.id}>
@@ -923,10 +1061,12 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
             </label>
           )}
           {scheduleProfessional ? (
-            <form className="grid gap-5" onSubmit={saveAvailability}>
+            <form className="grid gap-5" onSubmit={saveAvailability} noValidate>
               <WeeklyHoursEditor
                 value={weekly}
-                onChange={setWeekly}
+                onChange={(weekly) =>
+                  updateAvailability((draft) => ({ ...draft, weekly }))
+                }
                 disabled={saving}
               />
               <fieldset disabled={saving} className="grid gap-3">
@@ -939,7 +1079,13 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
                     <Input
                       type="date"
                       value={exceptionDate}
-                      onChange={(event) => setExceptionDate(event.target.value)}
+                      onChange={(event) => {
+                        const exceptionDate = event.target.value;
+                        updateAvailability((draft) => ({
+                          ...draft,
+                          exceptionDate,
+                        }));
+                      }}
                     />
                   </label>
                   <ResponsiveActionButton
@@ -950,14 +1096,16 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
                       !exceptionDate ||
                       exceptions.some((item) => item.date === exceptionDate)
                     }
-                    onClick={() => {
-                      setExceptions((items) =>
-                        [...items, { date: exceptionDate, periods: [] }].sort(
-                          (a, b) => a.date.localeCompare(b.date),
-                        ),
-                      );
-                      setExceptionDate("");
-                    }}
+                    onClick={() =>
+                      updateAvailability((draft) => ({
+                        ...draft,
+                        exceptionDate: "",
+                        exceptions: [
+                          ...draft.exceptions,
+                          { date: draft.exceptionDate, periods: [] },
+                        ].sort((a, b) => a.date.localeCompare(b.date)),
+                      }))
+                    }
                   >
                     {t("Add exception")}
                   </ResponsiveActionButton>
@@ -1039,7 +1187,7 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
                             }
                           />
                         </label>
-                        {exception.periods.length > 1 && (
+                        {exception.periods.length > 0 && (
                           <ResponsiveActionButton
                             icon={Trash2}
                             type="button"

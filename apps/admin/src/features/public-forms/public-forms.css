@@ -235,6 +235,7 @@
     display: none !important;
   }
   .public-form-page {
+    min-height: 0;
     padding: 0;
   }
   .service-card,

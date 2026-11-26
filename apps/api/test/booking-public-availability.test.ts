@@ -76,6 +76,57 @@ it("fetches busy intervals once for a month and omits occupied slots", async () 
     true,
   );
 });
+it("skips calendar providers when the requested day has no working periods", async () => {
+  const link = linkFixture();
+  link.settings.professionals[0].exceptions = [
+    { date: "2026-10-04", periods: [] },
+  ];
+  const result = await getPublicAvailability(
+    link,
+    {
+      serviceId: link.settings.services[0].id,
+      from: "2026-10-04",
+      to: "2026-10-04",
+    },
+    {
+      now: () => Date.parse("2026-10-01T00:00:00Z"),
+      loadBusy: async () => {
+        throw new Error("Provider unavailable");
+      },
+    },
+  );
+  expect(result.days).toEqual([{ date: "2026-10-04", slots: [] }]);
+});
+
+it("loads busy intervals through the buffer of the final candidate only", async () => {
+  const link = linkFixture();
+  link.settings.professionals[0].exceptions = [
+    { date: "2026-10-04", periods: [{ start: "22:00", end: "23:00" }] },
+  ];
+  const calls: Array<{ from: string; to: string }> = [];
+  const result = await getPublicAvailability(
+    link,
+    {
+      serviceId: link.settings.services[0].id,
+      from: "2026-10-04",
+      to: "2026-10-04",
+    },
+    {
+      now: () => Date.parse("2026-10-01T00:00:00Z"),
+      loadBusy: async (_principalId, from, to) => {
+        calls.push({ from, to });
+        return [{ start: "2026-10-04T22:50:00Z", end: "2026-10-04T23:10:00Z" }];
+      },
+    },
+  );
+  expect(calls).toEqual([
+    { from: "2026-10-04T22:00:00.000Z", to: "2026-10-04T23:00:00.000Z" },
+  ]);
+  expect(result.days[0].slots.map(({ startsAt }) => startsAt)).toEqual([
+    "2026-10-04T22:00:00.000Z",
+  ]);
+});
+
 it("groups cross-midnight slots by display zone instead of business dates", async () => {
   const result = await getPublicAvailability(
     linkFixture(),

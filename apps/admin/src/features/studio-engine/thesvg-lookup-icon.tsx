@@ -1,4 +1,5 @@
-import { useEffect, useState, type ComponentType } from "react";
+import type { ComponentType } from "react";
+import { useLookupIcon } from "./use-lookup-icon";
 import type { SvgIconProps } from "@thesvg/react";
 
 type ThesvgIconComponent = ComponentType<SvgIconProps>;
@@ -40,23 +41,7 @@ export function ThesvgLookupIcon({
   name: string;
   className?: string;
 }) {
-  const [Icon, setIcon] = useState<ThesvgIconComponent | null>(
-    () => componentCache.get(name) ?? null,
-  );
-
-  useEffect(() => {
-    let active = true;
-    loadThesvgIconComponent(name)
-      .then((component) => {
-        if (active) setIcon(() => component);
-      })
-      .catch(() => {
-        if (active) setIcon(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [name]);
+  const Icon = useLookupIcon(name, componentCache, loadThesvgIconComponent);
 
   if (!Icon) {
     return <span className={className} aria-hidden="true" />;

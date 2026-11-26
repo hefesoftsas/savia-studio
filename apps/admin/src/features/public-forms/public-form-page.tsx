@@ -4,8 +4,9 @@ import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { withRequestTimeout } from "@/api/request-timeout";
 import "./public-forms.css";
-import { publicError, usePublicFormSubmission } from "./public-form-submission";
+import { usePublicFormSubmission } from "./public-form-submission";
 import { PublicQuoteForm } from "./public-quote-wizard";
 
 const publicQuotePresentation = z
@@ -99,62 +100,88 @@ const publicDefinition = z
 export type PublicFormDefinition = z.infer<typeof publicDefinition>;
 type Definition = PublicFormDefinition;
 
+const connectionError = {
+  message:
+    "No se pudo cargar el formulario. Revisa tu conexión y vuelve a intentarlo.",
+  retryable: true,
+} as const;
+type DefinitionResult =
+  | { definition: Definition }
+  | { message: keyof typeof publicFormsMessages; retryable: boolean };
+
 /** Standalone entry: intentionally imports no admin services, session or local data modules. */
 export function PublicFormPage({ token }: { token: string }) {
   const t = useMessages(publicFormsMessages);
   const locale = useAppLocale();
-  const [definition, setDefinition] = useState<Definition>();
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [result, setResult] = useState<DefinitionResult>();
+  const [attempt, setAttempt] = useState(0);
   const endpoint = `${(import.meta.env.VITE_SAVIA_API_URL ?? window.location.origin).replace(/\/$/, "")}/api/public/forms/${encodeURIComponent(token)}`;
   useEffect(() => {
     const controller = new AbortController();
-    setDefinition(undefined);
-    setError("");
-    setLoading(true);
-    void fetch(endpoint, {
-      credentials: "omit",
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(publicError(response.status));
+    setResult(undefined);
+    void withRequestTimeout<DefinitionResult>(
+      async (signal) => {
+        const response = await fetch(endpoint, {
+          credentials: "omit",
+          cache: "no-store",
+          signal,
+        });
+        if (response.status === 404 || response.status === 410)
+          return {
+            message:
+              "Este enlace ya no está disponible. Pide un enlace nuevo a quien lo compartió.",
+            retryable: false,
+          };
+        if (response.status === 503)
+          return {
+            message:
+              "Este formulario no está disponible temporalmente. Inténtalo más tarde o contacta a quien compartió el enlace.",
+            retryable: true,
+          };
+        if (!response.ok) return connectionError;
         const parsed = publicDefinition.safeParse(await response.json());
-        if (!parsed.success)
-          throw new Error(
-            "El formulario no está disponible. Pide un enlace nuevo a quien lo compartió.",
-          );
-        if (!controller.signal.aborted) setDefinition(parsed.data);
+        return parsed.success
+          ? { definition: parsed.data }
+          : {
+              message:
+                "El formulario no está disponible. Pide un enlace nuevo a quien lo compartió.",
+              retryable: false,
+            };
+      },
+      undefined,
+      controller.signal,
+    )
+      .then((loaded) => {
+        if (!controller.signal.aborted) setResult(loaded);
       })
-      .catch((cause) => {
-        if (!controller.signal.aborted)
-          setError(
-            cause instanceof Error && cause.message !== "Failed to fetch"
-              ? cause.message
-              : "No se pudo cargar el formulario. Revisa tu conexión y recarga la página.",
-          );
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+      .catch(() => {
+        if (!controller.signal.aborted) setResult(connectionError);
       });
     return () => controller.abort();
-  }, [endpoint]);
+  }, [endpoint, attempt]);
+  const definition =
+    result && "definition" in result ? result.definition : undefined;
   return (
     <main className="public-form-page" lang={locale}>
       <div className="public-form-shell">
         {!isSafePublicLogo(definition?.logoImage) && (
           <p className="public-form-brand">Savia</p>
         )}
-        {loading ? (
+        {!result ? (
           <p role="status">{t("Cargando formulario…")}</p>
-        ) : error ? (
+        ) : "message" in result ? (
           <div role="alert" className="public-form-notice">
             <h1>{t("Formulario no disponible")}</h1>
-            <p>
-              {Object.hasOwn(publicFormsMessages, error)
-                ? t(error as keyof typeof publicFormsMessages)
-                : error}
-            </p>
+            <p>{t(result.message)}</p>
+            {result.retryable && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setAttempt((value) => value + 1)}
+              >
+                {t("Reintentar carga")}
+              </Button>
+            )}
           </div>
         ) : definition ? (
           definition.kind === "quote" &&
@@ -193,6 +220,7 @@ function SubmissionForm({
     captchaElementRef,
     captcha,
     captchaError,
+    retryVerification,
     error,
     pending,
     uncertain,
@@ -353,11 +381,21 @@ function SubmissionForm({
             aria-label={t("Verificación de seguridad")}
           />
           {captchaError && (
-            <p role="alert" className="public-form-error">
-              {Object.hasOwn(publicFormsMessages, captchaError)
-                ? t(captchaError as keyof typeof publicFormsMessages)
-                : captchaError}
-            </p>
+            <div className="grid justify-items-start gap-2">
+              <p role="alert" className="public-form-error">
+                {Object.hasOwn(publicFormsMessages, captchaError)
+                  ? t(captchaError as keyof typeof publicFormsMessages)
+                  : captchaError}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={retryVerification}
+                disabled={pending}
+              >
+                {t("Reintentar verificación")}
+              </Button>
+            </div>
           )}
           {visibleError && (
             <p role="alert" className="public-form-error">

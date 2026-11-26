@@ -19,10 +19,13 @@ export async function prepareVscodeDownload({
   const expectedChecksum = createHash("sha256")
     .update(artifactBytes)
     .digest("hex");
-  const checksumContents = await fs.readFile(checksumFile, "utf8");
-  const recordedChecksum = checksumContents.trim();
+  const recordedChecksum = (await fs.readFile(checksumFile, "utf8")).trim();
+  const publishedChecksum = `${expectedChecksum} *${filename}`;
 
-  if (recordedChecksum !== `${expectedChecksum} ${filename}`) {
+  if (
+    recordedChecksum !== publishedChecksum &&
+    recordedChecksum !== `${expectedChecksum} ${filename}`
+  ) {
     throw new Error(`VSIX checksum is missing or invalid for ${filename}.`);
   }
 
@@ -34,7 +37,7 @@ export async function prepareVscodeDownload({
     const stagedArtifact = join(stagingDir, filename);
     const stagedChecksum = `${stagedArtifact}.sha256`;
     await fs.writeFile(stagedArtifact, artifactBytes);
-    await fs.writeFile(stagedChecksum, checksumContents);
+    await fs.writeFile(stagedChecksum, `${publishedChecksum}\n`);
 
     const previousArtifact = join(stagingDir, "previous.vsix");
     let hadPreviousArtifact = true;

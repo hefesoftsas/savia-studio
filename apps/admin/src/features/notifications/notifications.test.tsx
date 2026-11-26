@@ -19,8 +19,13 @@ import {
 } from "./client";
 import { getSessionGeneration, rotateSessionScope } from "@/auth/session-scope";
 import { notificationReadKey } from "./queries";
+import { REQUEST_TIMEOUT_MS } from "@/api/request-timeout";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 it("lets a recipient confirm receipt of a read administrator notice", async () => {
   const item: NoticeItem = {
@@ -575,3 +580,37 @@ it("shows a retryable error without the empty state when loading fails", async (
   );
   await vi.waitFor(() => expect(inbox.mock.calls.length).toBeGreaterThan(1));
 });
+
+it.each(["headers", "body"])(
+  "lets the inbox retry after the notification request stalls waiting for %s",
+  async (stage) => {
+    vi.useFakeTimers();
+    const stalled = new Promise<never>(() => {});
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(() =>
+        stage === "headers"
+          ? stalled
+          : Promise.resolve(
+              Object.assign(new Response(), { json: () => stalled }),
+            ),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ data: { items: [], nextCursor: null, cutoff: "" } }),
+      );
+    vi.stubGlobal("fetch", fetcher);
+    setupNoRetry({ inbox: notificationClient.inbox });
+
+    await act(() => vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1));
+    expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(screen.getByText("savia.notificationInbox.loadError")).toBeVisible();
+    expect(screen.queryByTestId("notifications-empty")).not.toBeInTheDocument();
+
+    vi.useRealTimers();
+    fireEvent.click(
+      screen.getByRole("button", { name: "savia.notificationInbox.retry" }),
+    );
+    expect(await screen.findByTestId("notifications-empty")).toBeVisible();
+    expect(fetcher.mock.calls[1][0]).toBe(fetcher.mock.calls[0][0]);
+  },
+);

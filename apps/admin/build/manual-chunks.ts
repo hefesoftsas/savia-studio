@@ -15,8 +15,6 @@ export function saviaManualChunk(id: string): string | undefined {
   if (
     pkgPath.startsWith("@codingame/") ||
     pkgPath.startsWith("@vscode/") ||
-    pkgPath === "prettier" ||
-    pkgPath.startsWith("prettier/") ||
     pkgPath === "vscode-oniguruma" ||
     pkgPath.startsWith("vscode-oniguruma/") ||
     pkgPath === "vscode-textmate" ||
@@ -64,4 +62,3 @@ export function saviaManualChunk(id: string): string | undefined {
   // vendor chunk pulls editor, docs and other route-only libraries into boot.
   return undefined;
 }
-

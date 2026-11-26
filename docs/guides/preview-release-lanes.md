@@ -519,6 +519,10 @@ The private bootstrap mounts the deployment observer before registering the
 service worker, including while the private application is loading. When a
 replacement controller takes over, a visible, online, safe view reloads once
 from its installed shell. The first worker claim does not reload the document.
+Version checks and pending reloads use Savia's shared connectivity check when
+the browser reports offline. The private view shares registration across
+remounts while it is pending. Closing the view releases its update listeners
+and any connectivity check it owns.
 Updates are discovered by normal registration and the existing visibility and
 reconnection events (at most one explicit check per minute); no periodic check,
 heartbeat, deployment socket or cron is added. A continuously visible idle tab
@@ -527,9 +531,13 @@ is not guaranteed to discover a deployment immediately.
 Open forms, textareas, editable content, embedded apps, dialogs, busy regions,
 edited controls still mounted in the document, and existing unload guards defer
 automatic reload. Closing the editor or leaving the edited view allows the
-pending update to apply. Saving alone does not prove an arbitrary custom editor
-is safe; the explicit update action remains available. A DOM observer watches
-only while an update is pending and makes no network requests. Storage,
+pending update to apply. Collapsing a details panel releases untouched fields
+from this check. An editor or form field that overrides inherited CSS visibility
+keeps the same protection while visible. Edited controls remain protected while
+mounted. Weak references let the browser reclaim detached panels. Saving alone
+does not prove an arbitrary custom editor is safe. The explicit update action
+remains available. A DOM observer watches only while an update is pending and
+makes no network requests. Storage,
 credentials, synchronization queues and public-route behavior are unchanged.
 
 Rollout verification requires two releases: load the new update handler first,

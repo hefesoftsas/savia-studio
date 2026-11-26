@@ -25,6 +25,11 @@ const copilotMocks = vi.hoisted(() => ({
   register: vi.fn(),
   deregister: vi.fn(),
 }));
+type InlineCompletionHandler = (params: {
+  body: {
+    completionMetadata: { textBeforeCursor: string; textAfterCursor: string };
+  };
+}) => Promise<{ completion: string | null }>;
 vi.mock("../monaco", () => ({
   loadMonaco: mocks.load,
   resolveMonacoTheme: () => "vs",
@@ -207,14 +212,7 @@ it("delegates inline completions to the provided fetcher and stays silent on fai
   );
   await waitFor(() => expect(copilotMocks.register).toHaveBeenCalled());
   const requestHandler = copilotMocks.register.mock.calls[0][2]
-    .requestHandler as (params: {
-    body: {
-      completionMetadata: {
-        textBeforeCursor: string;
-        textAfterCursor: string;
-      };
-    };
-  }) => Promise<{ completion: string | null }>;
+    .requestHandler as InlineCompletionHandler;
   await expect(
     requestHandler({
       body: {
@@ -228,6 +226,7 @@ it("delegates inline completions to the provided fetcher and stays silent on fai
   expect(fetchCompletion).toHaveBeenCalledWith(
     "a".repeat(8000 - "const x = ".length) + "const x = ",
     " suffix",
+    expect.any(AbortSignal),
   );
 
   fetchCompletion.mockRejectedValueOnce(new Error("offline"));
@@ -238,6 +237,58 @@ it("delegates inline completions to the provided fetcher and stays silent on fai
       },
     }),
   ).resolves.toEqual({ completion: null });
+});
+
+it("aborts outdated suggestions on a new request, edit, read-only mode, or unmount", async () => {
+  copilotMocks.register.mockReturnValue({
+    deregister: copilotMocks.deregister,
+  });
+  mocks.load.mockResolvedValue(monaco());
+  const fetchCompletion = vi.fn(
+    (_prefix: string, _suffix: string, _signal: AbortSignal) =>
+      new Promise<string | null>(() => {}),
+  );
+  const props = {
+    value: "source",
+    language: "typescript" as const,
+    ariaLabel: "code",
+    onChange: vi.fn(),
+    inlineCompletion: { filename: "entry.tsx", fetchCompletion },
+  };
+  const view = render(<MonacoCodeEditor {...props} />);
+  await waitFor(() => expect(copilotMocks.register).toHaveBeenCalled());
+  const request = copilotMocks.register.mock.calls[0][2]
+    .requestHandler as InlineCompletionHandler;
+  const complete = () =>
+    request({
+      body: {
+        completionMetadata: {
+          textBeforeCursor: "before",
+          textAfterCursor: "after",
+        },
+      },
+    });
+  const first = complete();
+  const second = complete();
+  expect(fetchCompletion.mock.calls[0][2]?.aborted).toBe(true);
+  await expect(first).resolves.toEqual({ completion: null });
+
+  view.rerender(<MonacoCodeEditor {...props} value="edited" />);
+  expect(fetchCompletion.mock.calls[1][2].aborted).toBe(true);
+  await expect(second).resolves.toEqual({ completion: null });
+
+  const third = complete();
+  view.rerender(<MonacoCodeEditor {...props} value="edited" readOnly />);
+  expect(fetchCompletion.mock.calls[2][2].aborted).toBe(true);
+  await expect(third).resolves.toEqual({ completion: null });
+  await expect(complete()).resolves.toEqual({ completion: null });
+  expect(fetchCompletion).toHaveBeenCalledTimes(3);
+
+  view.rerender(<MonacoCodeEditor {...props} value="edited" />);
+  const last = complete();
+  view.unmount();
+  expect(fetchCompletion.mock.calls[3][2].aborted).toBe(true);
+  await expect(last).resolves.toEqual({ completion: null });
 });
 
 it("initializes with the latest content if it changes during lazy loading", async () => {

@@ -89,6 +89,110 @@ function renderManagePage(token = manageToken, children?: ReactNode) {
   );
 }
 
+it("recovers from an initial connection error on the same management link", async () => {
+  const fetcher = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("Network request failed"))
+    .mockResolvedValueOnce(Response.json({ data: manageData() }));
+  vi.stubGlobal("fetch", fetcher);
+
+  renderManagePage();
+  expect(await screen.findByRole("alert")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(
+    await screen.findByRole("button", { name: "Reschedule" }),
+  ).toBeEnabled();
+  expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
+    managePath,
+    managePath,
+  ]);
+});
+
+it.each([
+  { status: 404, cancelled: false },
+  { status: 409, cancelled: true },
+])(
+  "refreshes the appointment when rescheduling availability returns $status",
+  async ({ status, cancelled }) => {
+    let reads = 0;
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), "https://savia.test").pathname;
+      if (path === `${managePath}/availability`)
+        return new Response(null, { status });
+      if (path !== managePath) throw new Error(`Unexpected path ${path}`);
+      const data =
+        ++reads === 1
+          ? manageData()
+          : manageData(
+              confirmedReservation({
+                version: 8,
+                status: cancelled ? "cancelled" : "confirmed",
+              }),
+              { canReschedule: false },
+            );
+      return Response.json({ data });
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    renderManagePage();
+    fireEvent.click(await screen.findByRole("button", { name: "Reschedule" }));
+    await screen.findByText(
+      cancelled
+        ? "Cancelled"
+        : "To change this appointment, contact the booking business.",
+    );
+    expect(reads).toBe(2);
+    expect(
+      screen.queryByRole("heading", { name: "Choose a new time" }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    if (!cancelled)
+      expect(
+        screen.getByRole("button", { name: "Cancel reservation" }),
+      ).toBeEnabled();
+  },
+);
+
+it("distinguishes the existing and replacement appointments in a repeated local hour", async () => {
+  vi.setSystemTime(new Date("2026-11-01T04:05:00Z"));
+  const reservation = confirmedReservation({
+    startsAt: "2026-11-01T05:30:00Z",
+    endsAt: "2026-11-01T06:00:00Z",
+  });
+  const timeZone = "America/New_York";
+  const data = manageData(reservation, { timeZone, cancellationMinutes: 30 });
+  const availability = {
+    displayTimeZone: timeZone,
+    businessTimeZone: "America/Bogota",
+    days: [
+      {
+        date: "2026-11-01",
+        slots: [
+          {
+            startsAt: "2026-11-01T06:30:00Z",
+            endsAt: "2026-11-01T07:00:00Z",
+          },
+        ],
+      },
+    ],
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) =>
+      Response.json({
+        data: String(input).includes("/availability?") ? availability : data,
+      }),
+    ),
+  );
+
+  renderManagePage();
+  fireEvent.click(await screen.findByRole("button", { name: "Reschedule" }));
+  fireEvent.click(await screen.findByRole("button", { name: "1:30 AM" }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  expect(screen.getByText(/Current appointment:.*1:30 AM EDT/)).toBeVisible();
+  expect(screen.getByText(/1:30 AM EST/)).toBeVisible();
+});
+
 it("offers the first replacement day and excludes the current instant across offset formats", async () => {
   const reservation = confirmedReservation({
     startsAt: "2026-10-05T09:00:00-05:00",
@@ -247,6 +351,7 @@ it("hides the previous reservation when its public management link is revoked", 
   );
 
   expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   expect(
     screen.queryByRole("heading", {
       name: "Manage or cancel this appointment",
@@ -707,6 +812,71 @@ it.each(["cancelled", "unchanged", "moved"])(
       expect(postedVersions).toEqual([7, 8]);
     }
     expect(reads).toBe(2);
+  },
+);
+
+it.each(["cancel", "reschedule"])(
+  "requires a successful appointment refresh before allowing changes after an unverified %s",
+  async (action) => {
+    const changed =
+      action === "cancel"
+        ? confirmedReservation({ status: "cancelled", version: 8 })
+        : confirmedReservation({
+            startsAt: "2026-10-06T15:00:00Z",
+            endsAt: "2026-10-06T15:30:00Z",
+            version: 8,
+          });
+    let reads = 0;
+    const request = vi.fn(async (path: string) => {
+      if (path.startsWith(`${managePath}/availability?`))
+        return Response.json({ data: availabilityData() });
+      if (path === `${managePath}/${action}`)
+        return new Response(null, { status: 503 });
+      reads += 1;
+      if (reads === 2 || reads === 3)
+        return new Response(null, { status: 503 });
+      return Response.json({
+        data: manageData(reads === 1 ? confirmedReservation() : changed),
+      });
+    });
+    vi.stubGlobal("fetch", request);
+    renderManagePage();
+    if (action === "reschedule") {
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Reschedule" }),
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "10:00 AM" }));
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    }
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: action === "cancel" ? "Cancel reservation" : "Confirm reschedule",
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "We could not verify the change.",
+    );
+    const cancel = screen.getByRole("button", { name: "Cancel reservation" });
+    expect(cancel).toBeDisabled();
+    const refresh = screen.getByRole("button", { name: "Refresh appointment" });
+    fireEvent.click(refresh);
+    expect(
+      await screen.findByText(
+        "The appointment could not be refreshed. Try again.",
+      ),
+    ).toBeVisible();
+    expect(cancel).toBeDisabled();
+    fireEvent.click(refresh);
+    if (action === "cancel") {
+      expect(await screen.findByText("Cancelled")).toBeVisible();
+    } else {
+      expect(await screen.findByText(/Oct 6, 2026, 10:00 AM/)).toBeVisible();
+      expect(cancel).toBeEnabled();
+    }
+    expect(
+      request.mock.calls.filter(([path]) => path === `${managePath}/${action}`),
+    ).toHaveLength(1);
   },
 );
 

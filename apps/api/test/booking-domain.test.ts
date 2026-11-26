@@ -120,6 +120,88 @@ it("offers unambiguous starts when the appointment fits in the extra hour after 
   ).toEqual([]);
 });
 
+it("keeps slots that fit before the first occurrence of a repeated closing time", () => {
+  const settings = {
+    ...defaultSettings("Appointments"),
+    timeZone: "America/New_York",
+    leadMinutes: 0,
+    horizonDays: 10,
+  };
+  const professional = {
+    id: crypto.randomUUID(),
+    principalId: "user",
+    enabled: true,
+    weekly: [{ day: 0, start: "00:00", end: "01:30" }],
+    exceptions: [],
+  };
+  const service = {
+    id: crypto.randomUUID(),
+    name: "Consultation",
+    description: "",
+    durationMinutes: 45,
+    bufferMinutes: 15,
+    enabled: true,
+    professionalIds: [professional.id],
+  };
+  const slots = slotsForDate(
+    settings,
+    professional,
+    service,
+    "2026-11-01",
+    [],
+    Date.parse("2026-10-31T12:00:00Z"),
+  );
+  expect(slots.map(({ startsAt }) => startsAt)).toEqual([
+    "2026-11-01T04:00:00.000Z",
+    "2026-11-01T04:15:00.000Z",
+    "2026-11-01T04:30:00.000Z",
+  ]);
+});
+
+it("preserves slots before a closing time skipped by a forward clock change", () => {
+  const settings = {
+    ...defaultSettings("Appointments"),
+    timeZone: "America/New_York",
+    leadMinutes: 0,
+    horizonDays: 10,
+  };
+  const professional = {
+    id: crypto.randomUUID(),
+    principalId: "user",
+    enabled: true,
+    weekly: [{ day: 0, start: "01:15", end: "02:30" }],
+    exceptions: [],
+  };
+  const service = {
+    id: crypto.randomUUID(),
+    name: "Consultation",
+    description: "",
+    durationMinutes: 15,
+    bufferMinutes: 15,
+    enabled: true,
+    professionalIds: [professional.id],
+  };
+  expect(
+    slotsForDate(
+      settings,
+      professional,
+      service,
+      "2026-03-08",
+      [],
+      Date.parse("2026-03-07T12:00:00Z"),
+    ),
+  ).toEqual([
+    {
+      startsAt: "2026-03-08T06:15:00.000Z",
+      endsAt: "2026-03-08T06:30:00.000Z",
+    },
+    {
+      startsAt: "2026-03-08T06:30:00.000Z",
+      endsAt: "2026-03-08T06:45:00.000Z",
+    },
+  ]);
+});
+
 it("rejects duplicate professionals and overlapping working periods", () => {
   const pro = {
     id: crypto.randomUUID(),

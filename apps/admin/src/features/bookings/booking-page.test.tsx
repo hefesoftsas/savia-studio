@@ -360,7 +360,7 @@ it("gives a recovery action after a failed bootstrap and reports version conflic
   );
 });
 
-it("ignores a slow response after switching tenants", async () => {
+it("aborts the previous settings request and ignores its late response after switching tenants", async () => {
   let finishFirst!: (value: unknown) => void;
   const first = new Promise((resolve) => {
     finishFirst = resolve;
@@ -383,6 +383,7 @@ it("ignores a slow response after switching tenants", async () => {
     post: vi.fn(),
   };
   const view = mount(apiClient, 41);
+  const firstSignal = apiClient.get.mock.calls[0][1]?.signal;
   view.rerender(
     <StoreContextProvider value={memoryStore({ locale: "en" })}>
       <AppLocaleProvider>
@@ -395,6 +396,7 @@ it("ignores a slow response after switching tenants", async () => {
   expect(
     await screen.findByRole("heading", { name: "Tenant B" }),
   ).toBeInTheDocument();
+  expect(firstSignal?.aborted).toBe(true);
   finishFirst({
     data: {
       settings,
@@ -410,7 +412,10 @@ it("ignores a slow response after switching tenants", async () => {
       screen.getByRole("heading", { name: "Tenant B" }),
     ).toBeInTheDocument(),
   );
-  expect(apiClient.get).toHaveBeenNthCalledWith(2, "/v1/tenants/42/booking");
+  expect(apiClient.get).toHaveBeenNthCalledWith(2, "/v1/tenants/42/booking", {
+    signal: expect.any(AbortSignal),
+  });
+  expect(apiClient.get.mock.calls[1][1].signal.aborted).toBe(false);
 });
 
 it("does not apply a pending settings save to the newly selected workspace", async () => {
@@ -1206,12 +1211,139 @@ function managementClient() {
   };
 }
 
+it("blocks overlapping weekly availability and preserves the hours for correction", async () => {
+  const apiClient = managementClient();
+  mount(apiClient, 42, "/bookings?tab=availability");
+  await screen.findByLabelText("Monday start");
+  fireEvent.click(screen.getAllByRole("button", { name: "Add period" })[0]);
+  fireEvent.change(screen.getByLabelText("Monday start 2"), {
+    target: { value: "11:00" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "non-overlapping periods",
+  );
+  expect(apiClient.put).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("Monday start 2")).toHaveValue("11:00");
+  fireEvent.change(screen.getByLabelText("Monday start 2"), {
+    target: { value: "12:00" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  await screen.findByText("Availability saved.");
+  expect(apiClient.put).toHaveBeenCalledOnce();
+});
+
+it("identifies an invalid exception date and allows correction without reloading", async () => {
+  const apiClient = managementClient();
+  mount(apiClient, 42, "/bookings?tab=availability");
+  fireEvent.change(await screen.findByLabelText("Exception date"), {
+    target: { value: "2026-11-26" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add exception" }));
+  const exception = screen.getByText("2026-11-26").parentElement!;
+  fireEvent.click(
+    within(exception).getByRole("button", { name: "Add period" }),
+  );
+  fireEvent.change(screen.getByLabelText("2026-11-26 End 1"), {
+    target: { value: "08:00" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("2026-11-26");
+  expect(apiClient.put).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("2026-11-26 End 1")).toHaveValue("08:00");
+  fireEvent.change(screen.getByLabelText("2026-11-26 End 1"), {
+    target: { value: "12:00" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  await screen.findByText("Availability saved.");
+  expect(apiClient.put).toHaveBeenCalledOnce();
+});
+
+it("preserves an incomplete exception period and closes the date only when explicitly removed", async () => {
+  const apiClient = managementClient();
+  mount(apiClient, 42, "/bookings?tab=availability");
+  fireEvent.change(await screen.findByLabelText("Exception date"), {
+    target: { value: "2026-11-26" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add exception" }));
+  const header = screen.getByText("2026-11-26").parentElement!;
+  fireEvent.click(within(header).getByRole("button", { name: "Add period" }));
+  fireEvent.change(screen.getByLabelText("2026-11-26 Start 1"), {
+    target: { value: "" },
+  });
+  expect(screen.getByLabelText("2026-11-26 End 1")).toHaveValue("17:00");
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("2026-11-26");
+  expect(apiClient.put).not.toHaveBeenCalled();
+
+  fireEvent.change(screen.getByLabelText("2026-11-26 Start 1"), {
+    target: { value: "10:00" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  await screen.findByText("Availability saved.");
+  expect(apiClient.put).toHaveBeenLastCalledWith(
+    "/v1/tenants/42/booking",
+    expect.objectContaining({
+      professionals: [
+        expect.objectContaining({
+          exceptions: [
+            { date: "2026-11-26", periods: [{ start: "10:00", end: "17:00" }] },
+          ],
+        }),
+      ],
+    }),
+  );
+
+  const exceptions = screen.getByRole("group", { name: "Exceptions" });
+  fireEvent.click(
+    within(exceptions).getByRole("button", { name: "Remove period" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  await screen.findByText("Availability saved.");
+  expect(apiClient.put).toHaveBeenLastCalledWith(
+    "/v1/tenants/42/booking",
+    expect.objectContaining({
+      professionals: [
+        expect.objectContaining({
+          exceptions: [{ date: "2026-11-26", periods: [] }],
+        }),
+      ],
+    }),
+  );
+});
+
+it("shows an API rejection reason without clearing the availability draft", async () => {
+  const apiClient = managementClient();
+  apiClient.put.mockRejectedValueOnce(
+    new ApiClientError(
+      422,
+      "INVALID_AVAILABILITY",
+      "Use one exception per date.",
+    ),
+  );
+  mount(apiClient, 42, "/bookings?tab=availability");
+  fireEvent.change(await screen.findByLabelText("Monday start"), {
+    target: { value: "10:00" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("HTTP 422");
+  expect(alert).toHaveTextContent("Use one exception per date.");
+  expect(screen.getByLabelText("Monday start")).toHaveValue("10:00");
+});
+
 it("saves availability without publishing an unrelated settings draft", async () => {
   const apiClient = managementClient();
   mount(apiClient);
   fireEvent.change(await screen.findByLabelText("Public title"), {
     target: { value: "Draft public title" },
   });
+  fireEvent.click(screen.getByRole("button", { name: "Hours" }));
+  const monday = screen.getByLabelText("Monday start");
+  fireEvent.change(monday, { target: { value: "10:00" } });
+  fireEvent.change(monday, { target: { value: "09:00" } });
   fireEvent.click(screen.getByRole("button", { name: "Availability" }));
   fireEvent.change(await screen.findByLabelText("Monday start"), {
     target: { value: "10:00" },
@@ -1245,6 +1377,70 @@ it("saves availability without publishing an unrelated settings draft", async ()
     }),
   );
 });
+
+it.each(["settings", "availability"] as const)(
+  "preserves weekday edits in %s when the other editor saves a different day",
+  async (draftEditor) => {
+    const apiClient = managementClient();
+    const initial = await apiClient.get();
+    initial.data.settings.professionals[0].weekly.push({
+      day: 2,
+      start: "09:00",
+      end: "12:00",
+    });
+    mount(apiClient);
+    await screen.findByLabelText("Public title");
+
+    const otherEditor =
+      draftEditor === "settings" ? "availability" : "settings";
+    const openEditor = (editor: typeof draftEditor) => {
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: editor === "settings" ? "Booking settings" : "Availability",
+        }),
+      );
+      if (editor === "settings")
+        fireEvent.click(screen.getByRole("button", { name: "Hours" }));
+    };
+    const save = async (editor: typeof draftEditor) => {
+      fireEvent.click(screen.getByRole("button", { name: `Save ${editor}` }));
+      await screen.findByText(
+        editor === "settings"
+          ? "Booking settings saved."
+          : "Availability saved.",
+      );
+    };
+
+    openEditor(draftEditor);
+    fireEvent.change(screen.getByLabelText("Monday start"), {
+      target: { value: "10:00" },
+    });
+    openEditor(otherEditor);
+    fireEvent.change(screen.getByLabelText("Tuesday Start"), {
+      target: { value: "11:00" },
+    });
+    await save(otherEditor);
+
+    openEditor(draftEditor);
+    expect(screen.getByLabelText("Monday start")).toHaveValue("10:00");
+    expect(screen.getByLabelText("Tuesday Start")).toHaveValue("11:00");
+    await save(draftEditor);
+    expect(apiClient.put).toHaveBeenLastCalledWith(
+      "/v1/tenants/42/booking",
+      expect.objectContaining({
+        version: 4,
+        professionals: [
+          expect.objectContaining({
+            weekly: expect.arrayContaining([
+              { day: 1, start: "10:00", end: "12:00" },
+              { day: 2, start: "11:00", end: "12:00" },
+            ]),
+          }),
+        ],
+      }),
+    );
+  },
+);
 
 it("retains a separate availability draft while unrelated booking settings are saved", async () => {
   const apiClient = managementClient();
@@ -1293,6 +1489,141 @@ it("retains a separate availability draft while unrelated booking settings are s
         expect.objectContaining({
           weekly: [{ day: 1, start: "10:00", end: "12:00" }],
           exceptions: [{ date: "2026-11-26", periods: [] }],
+        }),
+      ],
+    }),
+  );
+});
+
+it("keeps edited and removed exception dates when the saved schedule changes", async () => {
+  const apiClient = managementClient();
+  const { data } = await apiClient.get();
+  data.settings.professionals[0].exceptions = [
+    { date: "2026-11-25", periods: [{ start: "10:00", end: "12:00" }] },
+    { date: "2026-11-26", periods: [] },
+  ];
+  const refreshed = structuredClone(data);
+  refreshed.settings.version = 4;
+  refreshed.settings.professionals[0].exceptions.push({
+    date: "2026-11-28",
+    periods: [{ start: "08:00", end: "09:00" }],
+  });
+  apiClient.put.mockResolvedValueOnce({
+    data: { ...refreshed, agenda: { enabled: true, sourceCount: 1 } },
+  });
+  mount(apiClient, 42, "/bookings?tab=availability");
+
+  fireEvent.change(await screen.findByLabelText("2026-11-25 Start 1"), {
+    target: { value: "11:00" },
+  });
+  fireEvent.click(
+    within(screen.getByText("2026-11-26").parentElement!).getByRole("button", {
+      name: "Remove exception",
+    }),
+  );
+  fireEvent.change(screen.getByLabelText("Exception date"), {
+    target: { value: "2026-11-27" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add exception" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Use My Day to block busy times" }),
+  );
+  await screen.findByText("My Day access is enabled. Calendar sources: 1.");
+
+  expect(screen.getByLabelText("2026-11-25 Start 1")).toHaveValue("11:00");
+  expect(screen.queryByText("2026-11-26")).toBeNull();
+  expect(screen.getByText("2026-11-27")).toBeVisible();
+  expect(screen.getByLabelText("2026-11-28 Start 1")).toHaveValue("08:00");
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  await screen.findByText("Availability saved.");
+  expect(apiClient.put).toHaveBeenLastCalledWith(
+    "/v1/tenants/42/booking",
+    expect.objectContaining({
+      version: 4,
+      professionals: [
+        expect.objectContaining({
+          exceptions: [
+            { date: "2026-11-25", periods: [{ start: "11:00", end: "12:00" }] },
+            { date: "2026-11-27", periods: [] },
+            { date: "2026-11-28", periods: [{ start: "08:00", end: "09:00" }] },
+          ],
+        }),
+      ],
+    }),
+  );
+});
+
+it("keeps each professional's hours and exceptions separate when switching and saving", async () => {
+  const apiClient = managementClient();
+  const { data } = await apiClient.get();
+  data.settings.professionals.push({
+    id: "professional-2",
+    principalId: "principal-2",
+    enabled: true,
+    weekly: [{ day: 1, start: "08:00", end: "12:00" }],
+    exceptions: [],
+  });
+  data.candidates.push({ principalId: "principal-2", displayName: "Bea" });
+  mount(apiClient, 42, "/bookings?tab=availability");
+
+  fireEvent.change(await screen.findByLabelText("Monday start"), {
+    target: { value: "10:00" },
+  });
+  fireEvent.change(screen.getByLabelText("Exception date"), {
+    target: { value: "2026-11-26" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add exception" }));
+  fireEvent.change(screen.getByLabelText("Exception date"), {
+    target: { value: "2026-11-27" },
+  });
+
+  fireEvent.change(screen.getByLabelText("Professional"), {
+    target: { value: "professional-2" },
+  });
+  expect(screen.getByLabelText("Monday start")).toHaveValue("08:00");
+  expect(screen.getByLabelText("Exception date")).toHaveValue("");
+  expect(screen.queryByText("2026-11-26")).toBeNull();
+  fireEvent.change(screen.getByLabelText("Monday start"), {
+    target: { value: "11:00" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  await screen.findByText("Availability saved.");
+  expect(apiClient.put).toHaveBeenLastCalledWith(
+    "/v1/tenants/42/booking",
+    expect.objectContaining({
+      professionals: [
+        expect.objectContaining({
+          weekly: settings.professionals[0].weekly,
+          exceptions: [],
+        }),
+        expect.objectContaining({
+          weekly: [{ day: 1, start: "11:00", end: "12:00" }],
+          exceptions: [],
+        }),
+      ],
+    }),
+  );
+
+  fireEvent.change(screen.getByLabelText("Professional"), {
+    target: { value: settings.professionals[0].id },
+  });
+  expect(screen.getByLabelText("Monday start")).toHaveValue("10:00");
+  expect(screen.getByLabelText("Exception date")).toHaveValue("2026-11-27");
+  expect(screen.getByText("2026-11-26")).toBeVisible();
+  expect(screen.queryByText("Availability saved.")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
+  await screen.findByText("Availability saved.");
+  expect(apiClient.put).toHaveBeenLastCalledWith(
+    "/v1/tenants/42/booking",
+    expect.objectContaining({
+      professionals: [
+        expect.objectContaining({
+          weekly: [{ day: 1, start: "10:00", end: "12:00" }],
+          exceptions: [{ date: "2026-11-26", periods: [] }],
+        }),
+        expect.objectContaining({
+          weekly: [{ day: 1, start: "11:00", end: "12:00" }],
+          exceptions: [],
         }),
       ],
     }),

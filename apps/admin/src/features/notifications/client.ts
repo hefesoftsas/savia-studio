@@ -1,3 +1,5 @@
+import { withRequestTimeout } from "@/api/request-timeout";
+
 export interface NoticeItem {
   id: string;
   title: string;
@@ -18,15 +20,25 @@ export interface InboxPage {
 export type InboxFilter = "all" | "unread" | "pending";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (response.status === 401) throw new Error("unauthorized");
-  if (response.status === 403) throw new Error("forbidden");
-  if (!response.ok)
-    throw new Error(`notifications request failed: ${response.status}`);
-  return (await response.json()) as T;
+  return withRequestTimeout(
+    async (signal) => {
+      const response = await fetch(`/api${path}`, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          ...(init?.headers ?? {}),
+        },
+        signal,
+      });
+      if (response.status === 401) throw new Error("unauthorized");
+      if (response.status === 403) throw new Error("forbidden");
+      if (!response.ok)
+        throw new Error(`notifications request failed: ${response.status}`);
+      return (await response.json()) as T;
+    },
+    undefined,
+    init?.signal,
+  );
 }
 
 export const notificationClient = {
