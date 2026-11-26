@@ -12,6 +12,7 @@ const COMPONENTS = {
 };
 
 const RUNTIME_IGNORED_PATHS = new Set([
+  ".github/workflows/build-vscode-extension.yml",
   ".github/workflows/deploy-preview.yml",
   ".github/workflows/preview-frontend-warmup.yml",
   ".github/workflows/inspect-preview-backup-gate.yml",

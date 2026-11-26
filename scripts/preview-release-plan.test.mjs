@@ -573,6 +573,15 @@ test("self-hosted smoke scripts publish no Preview runtime unless hosted code al
   }
 });
 
+test("VS Code validation changes skip Preview while extension source updates still publish", () => {
+  const workflowPath = ".github/workflows/build-vscode-extension.yml";
+  assert.equal(releaseRuntimeChanged([workflowPath]), false);
+  assert.equal(
+    releaseRuntimeChanged([workflowPath, "apps/vscode/src/extension.ts"]),
+    true,
+  );
+});
+
 test("legacy Office success survives a later plugin failure but incomplete uploads do not", () => {
   const artifacts = [
     {

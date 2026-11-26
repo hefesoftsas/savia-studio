@@ -8,6 +8,10 @@ CI and automatic Preview use GitHub Actions that declare the Node.js 24 runner
 runtime. Their project commands still use Node.js 22 and the configured pnpm
 version. The Preview upload and download actions retain ZIP artifacts.
 
+Updates to the VS Code validation workflow run its extension checks and publish
+a CI artifact. Changes to the extension source can still update the VSIX served
+by Preview.
+
 ## Compatible plugin updates
 
 The fast lane accepts existing `packages/plugin-*` or `store-ports/*` packages
