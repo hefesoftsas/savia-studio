@@ -818,7 +818,12 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       reportedTotal = providerTotal ?? reportedTotal;
       total += records.length;
       verifyScannedTotal(reportedTotal, total);
-      if (!group && !amount && reportedTotal !== undefined)
+      if (
+        !group &&
+        !amount &&
+        reportedTotal !== undefined &&
+        (next === undefined || reportedTotal > total)
+      )
         return c.json({ data: [], total: reportedTotal });
       if (
         total > maxRecords ||
@@ -1262,15 +1267,17 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
           break;
         }
       }
+      const total =
+        after === undefined
+          ? (providerTotal ?? visited)
+          : providerTotal === visited
+            ? undefined
+            : providerTotal;
       return c.json({
         data: records.map(project),
         page,
         perPage: limit,
-        ...(providerTotal !== undefined
-          ? { total: providerTotal }
-          : after === undefined
-            ? { total: visited }
-            : {}),
+        ...(total !== undefined ? { total } : {}),
         ...workspaceRecordPagination(page, maxPage, after !== undefined),
       });
     }

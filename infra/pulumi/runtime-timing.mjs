@@ -33,6 +33,7 @@ const WORKER_ROLES = [
 ];
 const COMMAND_LABELS = [
   "auth-init",
+  "auth-init:session",
   "migrations",
   "flows-migrations",
   "quiesce:flows-drain",

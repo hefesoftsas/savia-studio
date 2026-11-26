@@ -854,6 +854,51 @@ describe("HubSpot record pagination", () => {
     expect(proxy).toHaveBeenCalledOnce();
   });
 
+  it("continues the summary when a zero total has a next cursor", async () => {
+    const proxy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          results: [],
+          total: 0,
+          paging: { next: { after: "next" } },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ results: [{ id: "1" }, { id: "2" }], total: 2 }),
+      );
+    const response = await createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).request("/api/records/hubspot_contacts/summary");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ data: [], total: 2 });
+    expect(proxy).toHaveBeenCalledTimes(2);
+  });
+
+  it("omits a zero total for a list with a next cursor", async () => {
+    const proxy = vi.fn(async () =>
+      Response.json({
+        results: [],
+        total: 0,
+        paging: { next: { after: "next" } },
+      }),
+    );
+    const response = await createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).request("/api/records/hubspot_contacts");
+
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result).toMatchObject({
+      data: [],
+      pageInfo: { hasNextPage: true, hasPreviousPage: false },
+    });
+    expect(result).not.toHaveProperty("total");
+  });
+
   it.each([
     [
       "complete",

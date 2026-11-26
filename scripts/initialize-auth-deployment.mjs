@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { buildSecretUploads } from "./upload-cloudflare-secrets.mjs";
 import { preserveCommandFailure } from "../infra/pulumi/command-diagnostics.mjs";
+import { recordRuntimeTiming } from "../infra/pulumi/runtime-timing.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const failureCategories = new Set([
@@ -18,6 +19,8 @@ const failureCategories = new Set([
   "TRANSPORT_FAILED",
   "READINESS_MISMATCH",
 ]);
+
+class AuthSessionExitedError extends Error {}
 
 async function reportInitializationFailure(response, report) {
   let body;
@@ -102,6 +105,35 @@ export async function initializeAuthDeployment(
     (upload) => upload.app === "auth",
   )?.secrets.SAVIA_INTERNAL_BRIDGE_KEY;
   if (!credential) throw new Error("Auth deployment credential is missing");
+  const session = {
+    environment,
+    service,
+    revision,
+    credential,
+    env,
+    start,
+    request,
+    report,
+  };
+  try {
+    return await initializeAuthSession(session);
+  } catch (error) {
+    if (!(error instanceof AuthSessionExitedError)) throw error;
+  }
+  report("Auth preparation: starting a new session after Wrangler exited.");
+  return initializeAuthSession(session);
+}
+
+async function initializeAuthSession({
+  environment,
+  service,
+  revision,
+  credential,
+  env,
+  start,
+  request,
+  report,
+}) {
   const nonce = randomBytes(32).toString("hex");
   const directory = await mkdtemp(join(tmpdir(), "savia-auth-deployment-"));
   let child,
@@ -126,6 +158,7 @@ export async function initializeAuthDeployment(
       { mode: 0o600 },
     );
     const port = await availablePort();
+    const started = performance.now();
     report("Auth preparation: starting authenticated remote session.");
     child = start(
       join(root, "apps/api/node_modules/.bin/wrangler"),
@@ -174,10 +207,20 @@ export async function initializeAuthDeployment(
       } catch {
         /* The authenticated remote session is still starting. */
       }
-      await delay(1_000);
+      if (!exited) await delay(1_000);
     }
+    await recordRuntimeTiming(
+      env.SAVIA_RUNTIME_OPERATION_DIRECTORY,
+      "auth-init:session",
+      performance.now() - started,
+      ready && !exited ? "success" : "failure",
+    );
     if (!ready || exited) {
       report("Auth preparation: remote session unavailable.");
+      if (exitCode !== null)
+        throw new AuthSessionExitedError(
+          "Auth initialization session unavailable",
+        );
       throw new Error("Auth initialization session unavailable");
     }
     report("Auth preparation: initializing the bound source revision.");

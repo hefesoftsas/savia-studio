@@ -314,8 +314,11 @@ continues to honor `Retry-After`. Network errors are returned without retry.
 
 Full releases stage secrets with `wrangler versions secret bulk` before publishing
 code, allowing retries after rollback leaves a newer inactive Worker version.
-The Auth helper records bounded subprocess diagnostics in the private encrypted
-failure artifact; CI displays only preparation stages and HTTP status numbers.
+If Wrangler exits before sending the Auth initialization request, the Auth
+helper starts a fresh session once. After it sends the request, the helper
+requires a readiness response for the deployed revision. Startup has a separate
+row in the CI timing summary. The private encrypted diagnostics artifact
+contains bounded subprocess output from failed attempts.
 
 ## Independent Preview component retries
 
