@@ -33,12 +33,12 @@ jobs:
       reused_pr_ci: ${{ steps.plan.outputs.reused_pr_ci }}
     steps:
       - name: Check out source history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
         with:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
 
@@ -131,15 +131,15 @@ jobs:
       CHANGED_PLUGINS: ${{ needs.changes.outputs.plugins }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -183,15 +183,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -212,15 +212,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -241,15 +241,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -270,15 +270,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -299,15 +299,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -328,15 +328,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -359,15 +359,15 @@ jobs:
       API_SHARD: "1"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -397,15 +397,15 @@ jobs:
       API_SHARD: "2"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -434,15 +434,15 @@ jobs:
       API_SHARD: "3"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -474,15 +474,15 @@ jobs:
       API_SHARD: ${{ matrix.shard }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -503,15 +503,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -538,15 +538,15 @@ jobs:
       CI_KIND: ${{ needs.changes.outputs.ci_kind }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -603,15 +603,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -632,15 +632,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -661,15 +661,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -690,15 +690,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -748,7 +748,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Require successful applicable CI lanes
         env:
@@ -765,15 +765,15 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.1.0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -794,11 +794,11 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
       NODE_OPTIONS: "--max-old-space-size=1536"
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5.1.0
+      - uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -818,11 +818,11 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
       NODE_OPTIONS: "--max-old-space-size=1536"
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5.1.0
+      - uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -840,11 +840,11 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
       NODE_OPTIONS: "--max-old-space-size=1536"
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5.1.0
+      - uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -863,11 +863,11 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
       NODE_OPTIONS: "--max-old-space-size=1536"
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5.1.0
+      - uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -885,11 +885,11 @@ jobs:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
       NODE_OPTIONS: "--max-old-space-size=1536"
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5.1.0
+      - uses: pnpm/action-setup@v5.0.0
         with:
           version: 11.24.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -927,10 +927,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5.1.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.5.0
         with:
           node-version: 22
       - name: Check tracked data and local configuration
