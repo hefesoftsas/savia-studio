@@ -12,6 +12,7 @@ import {
 } from "../../../../packages/backup-gate/control.mjs";
 import type { Flow, Variable } from "./types";
 import {
+  SecretReplacementRequiredError,
   bundleStatus,
   createFolder,
   deleteFlow,
@@ -36,6 +37,7 @@ import {
   resetFlow,
   resetVariable,
   resolveVersion,
+  saveFlowAndVariables,
   saveFlow,
   saveVariables,
   seedOnce,
@@ -302,56 +304,109 @@ app.get("/api/flows/:id", async (c) => {
   const scope = scopeOf(c.req.raw);
   const flow = await getFlow(c.env, c.req.param("id"), scope);
   if (!flow) return c.json({ error: "Flow no encontrado." }, 404);
+  const inTenant = !isPlatformTenant(scope);
+  const [variables, versions, platformFlow] = await Promise.all([
+    getVariables(c.env, flow.id, false, scope),
+    listVersions(c.env, flow.id, scope),
+    inTenant && flow.customized ? getFlow(c.env, flow.id) : null,
+  ]);
   return c.json({
     ...flow,
-    variables: await getVariables(c.env, flow.id, false, scope),
-    versions: await listVersions(c.env, flow.id, scope),
+    variables,
+    versions,
+    hasPlatformDefault: inTenant && (!flow.customized || Boolean(platformFlow)),
   });
 });
-function validateFlow(value: Flow) {
-  if (
-    !value ||
-    !/^[a-z0-9-]{1,80}$/.test(value.id) ||
-    !value.name ||
-    !Array.isArray(value.steps) ||
-    value.steps.length < 1 ||
-    !value.input ||
-    typeof value.input !== "object"
-  )
-    throw new Error("Flow inválido");
-  for (const step of value.steps) {
-    if (step.cache !== undefined && !validateRequestCachePolicy(step.cache))
-      throw new HTTPException(400, { message: "Invalid request cache policy" });
-    if (step.cache?.enabled && !["GET", "HEAD"].includes(step.method))
-      throw new HTTPException(400, {
-        message: "Request caching requires a read-only GET or HEAD step",
-      });
-    if (step.cache?.enabled && step.cache.scope === "connection")
-      throw new HTTPException(400, {
-        message:
-          "Connection-scoped caching requires an execution connection; use tenant scope for this flow",
-      });
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    isRecord(value) &&
+    Object.values(value).every((entry) => typeof entry === "string")
+  );
+}
+
+const malformedJsonError = { error: "Envía un cuerpo JSON válido." };
+
+function validateFlow(
+  value: unknown,
+  id: string,
+): { flow: Flow } | { error: string } {
+  if (!isRecord(value))
+    return { error: "La definición del flujo debe ser un objeto." };
+  if (!/^[a-z0-9-]{1,80}$/.test(id))
+    return { error: "El identificador del flujo no es válido." };
+  if (typeof value.name !== "string" || !value.name.trim())
+    return { error: "Indica un nombre para el flujo." };
+  if (!isStringRecord(value.input))
+    return {
+      error: "La entrada del flujo debe ser un objeto con valores de texto.",
+    };
+  if (!Array.isArray(value.steps) || value.steps.length === 0)
+    return { error: "Agrega al menos un paso al flujo." };
+
+  for (const [index, step] of value.steps.entries()) {
+    const position = index + 1;
+    if (!isRecord(step))
+      return { error: `El paso ${position} debe ser un objeto.` };
     if (
-      !step.id ||
-      !step.name ||
+      typeof step.id !== "string" ||
+      !step.id.trim() ||
+      typeof step.name !== "string" ||
+      !step.name.trim() ||
+      typeof step.url !== "string" ||
+      typeof step.method !== "string" ||
+      !step.method.trim()
+    )
+      return {
+        error: `Revisa el identificador, nombre, URL y método del paso ${position}.`,
+      };
+    if (
       typeof step.body !== "string" ||
       typeof step.pre !== "string" ||
-      typeof step.post !== "string" ||
-      !step.headers ||
-      Object.values(step.headers).some((v) => typeof v !== "string")
+      typeof step.post !== "string"
     )
-      throw new Error("Paso inválido");
+      return {
+        error: `El cuerpo y los scripts del paso ${position} deben ser texto.`,
+      };
+    if (!isStringRecord(step.headers))
+      return {
+        error: `Los encabezados del paso ${position} deben ser un objeto con valores de texto.`,
+      };
+    if (step.cache === undefined) continue;
+    if (!validateRequestCachePolicy(step.cache))
+      return {
+        error: `Revisa la configuración de caché del paso ${position}.`,
+      };
+    if (step.cache.enabled && !["GET", "HEAD"].includes(step.method))
+      return { error: `El paso ${position} solo admite caché con GET o HEAD.` };
+    if (step.cache.enabled && step.cache.scope === "connection")
+      return {
+        error: `Usa caché de tenant en el paso ${position} para un flujo sin conexión asociada.`,
+      };
   }
+
+  return {
+    flow: {
+      ...value,
+      id,
+      name: value.name,
+      input: value.input,
+      steps: value.steps,
+    } as Flow,
+  };
 }
-app.put("/api/flows/:id", async (c) => {
-  const scope = scopeOf(c.req.raw);
-  const flow = await c.req.json<Flow>();
-  flow.id = c.req.param("id");
-  validateFlow(flow);
-  await saveFlow(c.env, flow, scope);
-  await recordAudit(c.env, {
+async function auditFlowSave(
+  env: Env,
+  scope: string,
+  actor: string,
+  flow: Flow,
+) {
+  await recordAudit(env, {
     tenant: scope,
-    actor: actorOf(c.req.raw),
+    actor,
     action: "flow.save",
     flowId: flow.id,
     detail: {
@@ -369,17 +424,33 @@ app.put("/api/flows/:id", async (c) => {
       ],
     },
   });
+}
+app.put("/api/flows/:id", async (c) => {
+  const scope = scopeOf(c.req.raw);
+  const payload = await c.req.json<unknown>().catch(() => undefined);
+  if (payload === undefined) return c.json(malformedJsonError, 400);
+  const result = validateFlow(payload, c.req.param("id"));
+  if ("error" in result) return c.json(result, 400);
+  const { flow } = result;
+  await saveFlow(c.env, flow, scope);
+  await auditFlowSave(c.env, scope, actorOf(c.req.raw), flow);
   return c.json({ ok: true });
 });
 app.put("/api/flows/:id/variables", async (c) => {
   const scope = scopeOf(c.req.raw);
-  const rows = await c.req.json<Variable[]>();
+  const payload = await c.req
+    .json<Variable[] | { flow: Flow; variables: Variable[] }>()
+    .catch(() => undefined);
+  if (payload === undefined) return c.json(malformedJsonError, 400);
+  const variablesOnly = Array.isArray(payload);
+  const rows = variablesOnly ? payload : payload?.variables;
   if (
     !Array.isArray(rows) ||
     rows.length > 150 ||
     rows.some(
       (v) =>
         !v ||
+        typeof v.key !== "string" ||
         !/^[\w.-]{1,120}$/.test(v.key) ||
         typeof v.value !== "string" ||
         typeof v.secret !== "boolean",
@@ -389,15 +460,28 @@ app.put("/api/flows/:id/variables", async (c) => {
     return c.json({ error: "Variables inválidas o claves duplicadas." }, 400);
   const flow = await getFlow(c.env, c.req.param("id"), scope);
   if (!flow) return c.json({ error: "Flow no encontrado." }, 404);
-  await saveVariables(c.env, flow.id, rows, scope);
+  const actor = actorOf(c.req.raw);
+  if (variablesOnly) {
+    await saveVariables(c.env, flow.id, rows, scope);
+  } else {
+    const result = validateFlow(payload?.flow, flow.id);
+    if ("error" in result) return c.json(result, 400);
+    const draft = result.flow;
+    await saveFlowAndVariables(c.env, draft, rows, scope);
+    await auditFlowSave(c.env, scope, actor, draft);
+  }
   await recordAudit(c.env, {
     tenant: scope,
-    actor: actorOf(c.req.raw),
+    actor,
     action: "variables.save",
     flowId: flow.id,
     detail: { keys: rows.length },
   });
-  return c.json({ ok: true });
+  // The write is already committed if the follow-up read is unavailable.
+  const variables = await getVariables(c.env, flow.id, false, scope).catch(
+    () => undefined,
+  );
+  return c.json({ ok: true, variables });
 });
 /**
  * Reverts one tenant customization back to the platform catalog.
@@ -412,9 +496,22 @@ app.post("/api/flows/:id/reset", async (c) => {
       { error: "El restablecido solo aplica a scopes de tenant." },
       400,
     );
-  const status = await resetFlow(c.env, c.req.param("id"), scope);
+  const status = await resetFlow(
+    c.env,
+    c.req.param("id"),
+    scope,
+    c.req.query("requirePlatformDefault") === "true",
+  );
   if (status === "unknown-flow")
     return c.json({ error: "Flow no encontrado." }, 404);
+  if (status === "platform-default-unavailable")
+    return c.json(
+      {
+        error:
+          "El flow de plataforma ya no está disponible para restablecer. Vuelve a cargar el flow.",
+      },
+      409,
+    );
   await recordAudit(c.env, {
     tenant: scope,
     actor: actorOf(c.req.raw),
@@ -436,11 +533,20 @@ app.delete("/api/flows/:id/variables/:key", async (c) => {
     c.req.param("id"),
     c.req.param("key"),
     scope,
+    c.req.query("requirePlatformDefault") === "true",
   );
   if (status === "unknown-flow")
     return c.json({ error: "Flow no encontrado." }, 404);
   if (status === "unknown-key")
     return c.json({ error: "Variable no encontrada." }, 404);
+  if (status === "platform-default-unavailable")
+    return c.json(
+      {
+        error:
+          "El valor de plataforma ya no está disponible para restablecer. Vuelve a cargar el flow.",
+      },
+      409,
+    );
   await recordAudit(c.env, {
     tenant: scope,
     actor: actorOf(c.req.raw),
@@ -683,6 +789,8 @@ app.fetch = async (request, environment, executionContext) => {
 };
 
 app.onError((error, c) => {
+  if (error instanceof SecretReplacementRequiredError)
+    return c.json({ error: error.message }, 400);
   if (databaseConflict(error))
     return c.json({ error: "The data changed. Reload and retry." }, 409);
   if (databaseInputFailure(error))

@@ -42,17 +42,23 @@ export function createSaviaRequestApi(
     saveFlow: (flow: RequestFlow) =>
       apiClient.put<{ ok: true }>(
         scoped(`${apiRoot}/flows/${flow.id}`, scope),
-        flow,
+        { ...flow, variables: [] },
       ),
-    saveVariables: (id: string, variables: RequestVariable[]) =>
-      apiClient.put<{ ok: true }>(
+    saveVariables: (
+      id: string,
+      variables: RequestVariable[],
+      flow?: RequestFlow,
+    ) => {
+      const rows = variables.map(({ draft: _draft, ...variable }) => variable);
+      return apiClient.put<{ ok: true; variables?: RequestVariable[] }>(
         scoped(`${apiRoot}/flows/${id}/variables`, scope),
-        variables,
-      ),
+        flow ? { flow: { ...flow, variables: [] }, variables: rows } : rows,
+      );
+    },
     resetVariable: (id: string, key: string) =>
       apiClient.request<{ ok: true; reverted: boolean }>(
         scoped(
-          `${apiRoot}/flows/${id}/variables/${encodeURIComponent(key)}`,
+          `${apiRoot}/flows/${id}/variables/${encodeURIComponent(key)}?requirePlatformDefault=true`,
           scope,
         ),
         {
@@ -63,7 +69,10 @@ export function createSaviaRequestApi(
       ),
     resetFlow: (id: string) =>
       apiClient.post<{ ok: true; reverted: boolean }>(
-        scoped(`${apiRoot}/flows/${id}/reset`, scope),
+        scoped(
+          `${apiRoot}/flows/${id}/reset?requirePlatformDefault=true`,
+          scope,
+        ),
       ),
     revealVariable: (id: string, key: string) =>
       apiClient.post<{ value: string }>(
@@ -106,8 +115,6 @@ export function createSaviaRequestApi(
       apiClient.get<RequestFlow>(
         scoped(`${apiRoot}/flows/${id}/versions/${versionId}`, scope),
       ),
-    demoInput: () =>
-      apiClient.get<Record<string, string>>(`${apiRoot}/demo-input`),
     publish: (id: string) =>
       apiClient.post<{ id: string }>(
         scoped(`${apiRoot}/flows/${id}/publish`, scope),

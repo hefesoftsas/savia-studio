@@ -13,7 +13,18 @@ export type RequestVariable = {
   required?: boolean;
   configured?: boolean;
   overridden?: boolean;
+  hasPlatformDefault?: boolean;
+  draft?: {
+    id: string;
+    originalKey?: string;
+    originalSecretConfigured?: boolean;
+  };
 };
+
+export function hasRenamedVariableKey(variable: RequestVariable): boolean {
+  const originalKey = variable.draft?.originalKey;
+  return originalKey !== undefined && originalKey !== variable.key;
+}
 
 export type RequestStep = {
   id: string;
@@ -41,6 +52,7 @@ export type RequestFlow = Omit<FlowSummary, "steps"> & {
   resultPrefix?: string;
   allowedOrigins?: string[];
   customized?: boolean;
+  hasPlatformDefault?: boolean;
   input: Record<string, string>;
   variables: RequestVariable[];
   versions: Array<{ id: string; created_at: string }>;

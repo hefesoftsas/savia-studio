@@ -111,12 +111,12 @@ describe("createSaviaRequestApi", () => {
         '{"key":"token"}',
       ],
       [
-        "https://admin.test/v1/savia-request/api/flows/autos/variables/token",
+        "https://admin.test/v1/savia-request/api/flows/autos/variables/token?requirePlatformDefault=true",
         "DELETE",
         "{}",
       ],
       [
-        "https://admin.test/v1/savia-request/api/flows/autos/reset",
+        "https://admin.test/v1/savia-request/api/flows/autos/reset?requirePlatformDefault=true",
         "POST",
         undefined,
       ],

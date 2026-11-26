@@ -199,6 +199,7 @@ describe("tenant scope", () => {
       secret: false,
       configured: true,
       overridden: false,
+      hasPlatformDefault: true,
       value: "https://global.test",
     });
     expect(masked).toContainEqual({
@@ -206,6 +207,7 @@ describe("tenant scope", () => {
       secret: true,
       configured: true,
       overridden: false,
+      hasPlatformDefault: true,
       value: "",
     });
     const revealed = await getVariables(
@@ -289,6 +291,573 @@ describe("tenant scope", () => {
       .bind(TENANT_B, "vars-flow")
       .all<{ key: string }>();
     expect(overlayRows.results.map((row) => row.key)).toEqual(["endpoint"]);
+  });
+
+  it.each([
+    { name: "platform", owner: undefined, editor: undefined },
+    { name: "tenant-owned", owner: TENANT_A, editor: TENANT_A },
+    { name: "inherited", owner: undefined, editor: TENANT_A },
+  ])(
+    "requires a replacement before clearing a $name secret flag",
+    async ({ owner, editor }) => {
+      const flowId = "secret-replacement";
+      const path = `/api/flows/${flowId}/variables`;
+      await insertGlobalFlow(flowId);
+      await saveVariables(
+        platform.env,
+        flowId,
+        [
+          { key: "endpoint", value: "https://original.test", secret: false },
+          { key: "token", value: "fixture-token", secret: true },
+        ],
+        owner,
+      );
+
+      const edited = { key: "endpoint", value: "", secret: false };
+      const rejected = await call(
+        "PUT",
+        path,
+        [edited, { key: "token", value: "", secret: false }],
+        editor,
+      );
+      expect(rejected.status).toBe(400);
+      expect(await rejected.json()).toEqual({
+        error: "Para desmarcar un secreto debes reemplazar su valor.",
+      });
+      expect(
+        await getVariables(platform.env, flowId, true, editor, true),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            ...edited,
+            value: "https://original.test",
+          }),
+          expect.objectContaining({
+            key: "token",
+            value: "fixture-token",
+            secret: true,
+          }),
+        ]),
+      );
+
+      const replacement = {
+        key: "token",
+        value: "public-fixture",
+        secret: false,
+      };
+      expect(
+        (await call("PUT", path, [edited, replacement], editor)).status,
+      ).toBe(200);
+      expect(await getVariables(platform.env, flowId, false, editor)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining(edited),
+          expect.objectContaining(replacement),
+        ]),
+      );
+      if (!owner && editor) {
+        expect(await getVariables(platform.env, flowId, true)).toContainEqual(
+          expect.objectContaining({
+            key: "token",
+            value: "fixture-token",
+            secret: true,
+          }),
+        );
+      }
+    },
+  );
+
+  it.each([undefined, TENANT_A])(
+    "requires a replacement when making a configured public variable secret in %s",
+    async (tenant) => {
+      const flowId = "protect-public-variable";
+      const path = `/api/flows/${flowId}/variables`;
+      await insertGlobalFlow(flowId);
+      await saveVariables(platform.env, flowId, [
+        { key: "label", value: "existing-fixture", secret: false },
+      ]);
+
+      const failed = await call(
+        "PUT",
+        path,
+        [{ key: "label", value: "", secret: true }],
+        tenant,
+      );
+      expect(failed.status).toBe(400);
+      expect(await failed.json()).toEqual({
+        error:
+          "Para marcar una variable como secreta debes reemplazar su valor.",
+      });
+      expect(
+        await getVariables(platform.env, flowId, true, tenant),
+      ).toContainEqual(
+        expect.objectContaining({
+          key: "label",
+          value: "existing-fixture",
+          secret: false,
+        }),
+      );
+
+      const saved = await call(
+        "PUT",
+        path,
+        [{ key: "label", value: "private-fixture", secret: true }],
+        tenant,
+      );
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toMatchObject({
+        variables: [
+          expect.objectContaining({
+            key: "label",
+            value: "",
+            secret: true,
+            configured: true,
+          }),
+        ],
+      });
+      expect(
+        await getVariables(platform.env, flowId, true, tenant),
+      ).toContainEqual(
+        expect.objectContaining({
+          key: "label",
+          value: "private-fixture",
+          secret: true,
+        }),
+      );
+    },
+  );
+
+  it("keeps a new unconfigured tenant secret available in the saved variables", async () => {
+    const flowId = "tenant-secret-field";
+    await insertGlobalFlow(flowId);
+    const response = await call(
+      "PUT",
+      `/api/flows/${flowId}/variables`,
+      [{ key: "token", value: "", secret: true }],
+      TENANT_A,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      variables: [
+        {
+          key: "token",
+          value: "",
+          secret: true,
+          configured: false,
+          overridden: true,
+          hasPlatformDefault: false,
+        },
+      ],
+    });
+  });
+
+  it("resolves empty overrides according to the effective variable's secrecy", async () => {
+    const flowId = "legacy-variable-override";
+    await insertGlobalFlow(flowId);
+    await saveVariables(platform.env, flowId, [
+      { key: "label", value: "public-label", secret: false },
+      { key: "token", value: "public-token", secret: false },
+      { key: "inherited_secret", value: "inherited-fixture", secret: true },
+    ]);
+    await platform.env.DB.batch(
+      [
+        ["label", 0],
+        ["token", 1],
+        ["inherited_secret", 1],
+      ].map(([key, secret]) =>
+        platform.env.DB.prepare(
+          "INSERT INTO tenant_flow_variables(tenant_id,flow_id,key,value,secret,updated_at) VALUES(?,?,?,?,?,?)",
+        ).bind(TENANT_A, flowId, key, "", secret, new Date().toISOString()),
+      ),
+    );
+
+    expect(
+      await getVariables(platform.env, flowId, true, TENANT_A, true),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "label",
+          secret: false,
+          value: "",
+          configured: false,
+        }),
+        expect.objectContaining({
+          key: "token",
+          secret: true,
+          value: "",
+          configured: false,
+        }),
+        expect.objectContaining({
+          key: "inherited_secret",
+          secret: true,
+          value: "inherited-fixture",
+          configured: true,
+        }),
+      ]),
+    );
+    expect(
+      await getVariables(platform.env, flowId, true, TENANT_A),
+    ).toContainEqual(
+      expect.objectContaining({
+        key: "inherited_secret",
+        value: "",
+        configured: true,
+      }),
+    );
+  });
+
+  it.each([undefined, TENANT_A])(
+    "commits the definition and variables together in %s",
+    async (tenant) => {
+      const id = "atomic-save";
+      const path = `/api/flows/${id}/variables`;
+      await insertGlobalFlow(id, "Original");
+      const original = (await getFlow(platform.env, id))!;
+      await saveVariables(platform.env, id, [
+        { key: "token", value: "saved-fixture", secret: true },
+      ]);
+      const draft = { ...original, name: "Updated" };
+
+      const rejected = await call(
+        "PUT",
+        path,
+        {
+          flow: draft,
+          variables: [{ key: "token", value: "", secret: false }],
+        },
+        tenant,
+      );
+      expect(rejected.status).toBe(400);
+      expect(await rejected.json()).toEqual({
+        error: "Para desmarcar un secreto debes reemplazar su valor.",
+      });
+      expect(await getFlow(platform.env, id, tenant)).toMatchObject({
+        name: "Original",
+      });
+      expect(
+        await getVariables(platform.env, id, true, tenant, true),
+      ).toContainEqual(
+        expect.objectContaining({
+          key: "token",
+          secret: true,
+          value: "saved-fixture",
+        }),
+      );
+
+      const saved = await call(
+        "PUT",
+        path,
+        {
+          flow: draft,
+          variables: [
+            { key: "token", value: "replacement-fixture", secret: true },
+          ],
+        },
+        tenant,
+      );
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toMatchObject({
+        ok: true,
+        variables: [
+          expect.objectContaining({
+            key: "token",
+            value: "",
+            configured: true,
+          }),
+        ],
+      });
+      expect(await getFlow(platform.env, id, tenant)).toMatchObject({
+        name: "Updated",
+      });
+      expect(
+        await getVariables(platform.env, id, true, tenant, true),
+      ).toContainEqual(
+        expect.objectContaining({
+          key: "token",
+          secret: true,
+          value: "replacement-fixture",
+        }),
+      );
+      if (tenant)
+        expect(await getFlow(platform.env, id)).toMatchObject({
+          name: "Original",
+        });
+    },
+  );
+
+  describe.each(["definition", "definition and variables"])(
+    "flow save with %s",
+    (mode) => {
+      const id = "flow-validation";
+      const path = `/api/flows/${id}${mode === "definition" ? "" : "/variables"}`;
+
+      it("returns a JSON error for a malformed body", async () => {
+        const response = await requestApp.fetch(
+          new Request(`https://savia-request.internal${path}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: "{",
+          }),
+          platform.env,
+        );
+
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          error: "Envía un cuerpo JSON válido.",
+        });
+      });
+
+      it.each([
+        { field: "name", value: 12, error: "Indica un nombre para el flujo." },
+        {
+          field: "input",
+          value: [],
+          error:
+            "La entrada del flujo debe ser un objeto con valores de texto.",
+        },
+        {
+          field: "steps",
+          value: [null],
+          error: "El paso 1 debe ser un objeto.",
+        },
+      ])(
+        "identifies an invalid $field without saving",
+        async ({ field, value, error }) => {
+          await insertGlobalFlow(id, "Original");
+          const original = (await getFlow(platform.env, id))!;
+          const draft = { ...original, name: "Updated", [field]: value };
+          const variables = [
+            { key: "endpoint", value: "fixture", secret: false },
+          ];
+          const body =
+            mode === "definition" ? draft : { flow: draft, variables };
+
+          const response = await call("PUT", path, body, TENANT_A);
+
+          expect(response.status).toBe(400);
+          expect(await response.json()).toEqual({ error });
+          expect(await getFlow(platform.env, id, TENANT_A)).toMatchObject({
+            name: "Original",
+            customized: false,
+          });
+          expect(await getVariables(platform.env, id, false, TENANT_A)).toEqual(
+            [],
+          );
+        },
+      );
+
+      it.each([
+        {
+          reason: "method",
+          method: "POST",
+          cache: { enabled: true, scope: "tenant", ttlSeconds: 60 },
+          error: "El paso 1 solo admite caché con GET o HEAD.",
+        },
+        {
+          reason: "duration",
+          method: "GET",
+          cache: { enabled: true, scope: "tenant", ttlSeconds: 0 },
+          error: "Revisa la configuración de caché del paso 1.",
+        },
+        {
+          reason: "scope",
+          method: "GET",
+          cache: { enabled: true, scope: "connection", ttlSeconds: 60 },
+          error:
+            "Usa caché de tenant en el paso 1 para un flujo sin conexión asociada.",
+        },
+      ])(
+        "returns the affected step and cache $reason error as JSON",
+        async ({ method, cache, error }) => {
+          await insertGlobalFlow(id);
+          const original = (await getFlow(platform.env, id))!;
+          const draft = {
+            ...original,
+            steps: [
+              {
+                ...original.steps[0],
+                method,
+                cache,
+              },
+            ],
+          };
+          const body =
+            mode === "definition" ? draft : { flow: draft, variables: [] };
+
+          const response = await call("PUT", path, body, TENANT_A);
+
+          expect(response.status).toBe(400);
+          expect(await response.json()).toEqual({ error });
+        },
+      );
+    },
+  );
+
+  it("rejects a variable whose key is missing", async () => {
+    const id = "variable-validation";
+    await insertGlobalFlow(id);
+
+    const response = await call(
+      "PUT",
+      `/api/flows/${id}/variables`,
+      [{ value: "fixture", secret: false }],
+      TENANT_A,
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "Variables inválidas o claves duplicadas.",
+    });
+    expect(await getVariables(platform.env, id, false, TENANT_A)).toEqual([]);
+  });
+
+  it("rolls back the flow definition when a variable write fails inside the batch", async () => {
+    const id = "atomic-save-rollback";
+    await insertGlobalFlow(id, "Original");
+    const flow = (await getFlow(platform.env, id))!;
+    await platform.env.DB.prepare(
+      "CREATE TRIGGER fail_variable_write BEFORE INSERT ON tenant_flow_variables WHEN NEW.key='fail-on-write' BEGIN SELECT RAISE(ABORT, 'fixture variable write failed'); END",
+    ).run();
+    try {
+      const response = await call(
+        "PUT",
+        `/api/flows/${id}/variables`,
+        {
+          flow: { ...flow, name: "Updated" },
+          variables: [
+            { key: "fail-on-write", value: "fixture", secret: false },
+          ],
+        },
+        TENANT_A,
+      );
+      expect(response.status).toBe(500);
+      expect(await getFlow(platform.env, id, TENANT_A)).toMatchObject({
+        name: "Original",
+        customized: false,
+      });
+      expect(await getVariables(platform.env, id, false, TENANT_A)).toEqual([]);
+    } finally {
+      await platform.env.DB.prepare("DROP TRIGGER fail_variable_write").run();
+    }
+  });
+
+  it("acknowledges variable writes using the stored masked configuration", async () => {
+    const flowId = "masked-acknowledgement";
+    await insertGlobalFlow(flowId);
+    await saveVariables(platform.env, flowId, [
+      { key: "endpoint", value: "https://platform.test", secret: false },
+    ]);
+    const saved = await call(
+      "PUT",
+      `/api/flows/${flowId}/variables`,
+      [{ key: "token", value: "tenant-fixture", secret: true }],
+      TENANT_A,
+    );
+
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toEqual({
+      ok: true,
+      variables: [
+        {
+          key: "endpoint",
+          value: "https://platform.test",
+          secret: false,
+          configured: true,
+          overridden: false,
+          hasPlatformDefault: true,
+        },
+        {
+          key: "token",
+          value: "",
+          secret: true,
+          configured: true,
+          overridden: true,
+          hasPlatformDefault: false,
+        },
+      ],
+    });
+  });
+
+  it("keeps inherited secret keys available for configuration when a tenant duplicates a flow", async () => {
+    const flowId = "duplicate-variables";
+    await insertGlobalFlow(flowId);
+    await saveVariables(platform.env, flowId, [
+      { key: "endpoint", value: "https://example.test", secret: false },
+      { key: "platform_token", value: "platform-fixture", secret: true },
+    ]);
+    await saveVariables(
+      platform.env,
+      flowId,
+      [{ key: "tenant_token", value: "tenant-fixture", secret: true }],
+      TENANT_A,
+    );
+
+    const response = await call(
+      "POST",
+      `/api/flows/${flowId}/duplicate`,
+      {},
+      TENANT_A,
+    );
+    expect(response.status).toBe(201);
+    const { id } = await response.json<{ id: string }>();
+    expect(
+      await getVariables(platform.env, id, false, TENANT_A),
+    ).toContainEqual({
+      key: "platform_token",
+      value: "",
+      secret: true,
+      configured: false,
+      overridden: true,
+      hasPlatformDefault: false,
+    });
+    expect(await getVariables(platform.env, id, true, TENANT_A, true)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "platform_token",
+          value: "",
+          secret: true,
+        }),
+        expect.objectContaining({
+          key: "tenant_token",
+          value: "tenant-fixture",
+          secret: true,
+        }),
+        expect.objectContaining({
+          key: "endpoint",
+          value: "https://example.test",
+          secret: false,
+        }),
+      ]),
+    );
+    expect(await getFlow(platform.env, id, TENANT_B)).toBeNull();
+    const copyVariables = await getVariables(platform.env, id, false, TENANT_A);
+    const saved = await call(
+      "PUT",
+      `/api/flows/${id}/variables`,
+      copyVariables.map((variable) =>
+        variable.key === "platform_token"
+          ? { ...variable, value: "copy-fixture" }
+          : variable,
+      ),
+      TENANT_A,
+    );
+    expect(saved.status).toBe(200);
+    expect(
+      await getVariables(platform.env, id, true, TENANT_A, true),
+    ).toContainEqual(
+      expect.objectContaining({
+        key: "platform_token",
+        value: "copy-fixture",
+        secret: true,
+      }),
+    );
+    expect(await getVariables(platform.env, flowId, true)).toContainEqual(
+      expect.objectContaining({
+        key: "platform_token",
+        value: "platform-fixture",
+        secret: true,
+      }),
+    );
   });
 
   it("isolates versions and runs per tenant with platform fallback", async () => {

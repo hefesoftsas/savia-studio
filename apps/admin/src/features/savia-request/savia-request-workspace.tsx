@@ -2,7 +2,15 @@ import {
   useRealtimeRefresh,
   RemoteChangesNotice,
 } from "@/realtime/use-realtime-refresh";
-import { useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useLocation } from "react-router-dom";
 import {
   ArrowDown,
   ArrowUp,
@@ -21,20 +29,27 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { RouteLoading } from "@/components/admin/route-loading";
+import {
+  getSessionGeneration,
+  useSessionGeneration,
+} from "@/auth/session-scope";
+import { isReadAccessDenied } from "@/queries/read-state";
 import type { RequestResult } from "../../../../api/src/request-results/contracts";
 import { useAppServices } from "@/features/assistant/assistant-context";
 import { StandardResult } from "./standard-result";
 import { SecretsScreen } from "./secrets-screen";
 import { SaviaRequestScopeBar } from "./savia-request-scope-bar";
 import { useSaviaRequestWorkspace } from "./savia-request-provider";
-import type {
-  RequestFlow,
-  RequestRun,
-  RequestStep,
-  RequestVariable,
+import {
+  hasRenamedVariableKey,
+  type RequestFlow,
+  type RequestRun,
+  type RequestStep,
+  type RequestVariable,
 } from "./types";
 import { CodeEditor } from "./editor/code-editor";
-import { DeleteDialog, type DeleteAction } from "./editor/delete-dialog";
+import { DeleteDialog, useDeleteConfirmation } from "./editor/delete-dialog";
 import { VariableAccessContext } from "./editor/variable-context";
 import { VariableInput } from "./editor/variable-input";
 import { VariableNames } from "./editor/variable-completion";
@@ -144,17 +159,23 @@ function bodyLanguage(step: RequestStep): "json" | "xml" | "text" {
 export function SaviaRequestWorkspace() {
   const services = useAppServices();
   const {
+    active,
     api,
     busy,
     clearSelection,
+    createAndSelectFlow,
     discardDraft,
     dirty,
+    duplicateAndSelectFlow,
     error,
     flow,
     flows,
     folders,
     refreshNavigation,
     reloadFlow,
+    retryRoute,
+    routeLoading,
+    routeReadError,
     saveDraft,
     scope,
     selectFlow,
@@ -164,44 +185,147 @@ export function SaviaRequestWorkspace() {
   } = useSaviaRequestWorkspace();
   const [tab, setTab] = useState<WorkspaceTab>("steps");
   const [editor, setEditor] = useState<EditorPane>("body");
-  const [input, setInput] = useState("{}");
-  const [mode, setMode] = useState<"mock" | "live">("mock");
-  const effectiveMode = flow?.id === "dane-city-lookup" ? "live" : mode;
   const destinationLabel = flow ? requestDestinationLabel(flow) : "proveedor";
-  const [runs, setRuns] = useState<RequestRun[]>([]);
-  const [activeRun, setActiveRun] = useState<RequestRun | null>(null);
+  const sessionGeneration = useSessionGeneration();
+  const flowId = active && view === "flow" ? flow?.id : undefined;
+  const flowScope = useMemo(
+    () => ({ api, flowId, sessionGeneration }),
+    [api, flowId, sessionGeneration],
+  );
+  const location = useLocation();
+  const creationScope = useMemo(
+    () => ({ flowScope, location }),
+    [flowScope, location],
+  );
+  const [creation, setCreation] = useState<{
+    scope: typeof creationScope;
+    draft: RequestFlow;
+    error?: string;
+  }>();
+  const currentCreation =
+    creation?.scope === creationScope ? creation : undefined;
+  const creatingFlow = Boolean(
+    currentCreation && currentCreation.error === undefined,
+  );
+  const [liveScope, setLiveScope] = useState<typeof flowScope | null>(null);
+  const effectiveMode =
+    flowId === "dane-city-lookup" || liveScope === flowScope ? "live" : "mock";
+  const [operationInput, setOperationInput] = useState<{
+    scope: typeof flowScope;
+    text: string;
+  }>();
+  const [inputRevision, setInputRevision] = useState(0);
+  const input =
+    operationInput?.scope === flowScope
+      ? operationInput.text
+      : displayInput(flow?.input ?? {});
+  const currentFlowScope = useRef<typeof flowScope | null>(null);
+  const historyRequest = useRef(0);
+  const [history, setHistory] = useState<{
+    scope: typeof flowScope;
+    runs: RequestRun[];
+  }>();
+  const [selectedRun, setSelectedRun] = useState<{
+    scope: typeof flowScope;
+    run: RequestRun;
+  }>();
+  const runs = history?.scope === flowScope ? history.runs : [];
+  const activeRun = selectedRun?.scope === flowScope ? selectedRun.run : null;
   const [notice, setNotice] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [deletion, setDeletion] = useState<DeleteAction | null>(null);
-  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [submission, setSubmission] = useState<{
+    scope: typeof flowScope;
+  } | null>(null);
+  const submitting = submission?.scope === flowScope;
+  const { deletion, confirmDeletion, closeDeletion } = useDeleteConfirmation(
+    api,
+    active && view === "flow",
+    flow,
+  );
+
+  useLayoutEffect(() => {
+    currentFlowScope.current = flowScope;
+    setOperationInput(undefined);
+    return () => {
+      currentFlowScope.current = null;
+      historyRequest.current += 1;
+    };
+  }, [flowScope]);
+
+  const isCurrentFlowScope = useCallback(
+    () =>
+      currentFlowScope.current === flowScope &&
+      flowScope.sessionGeneration === getSessionGeneration(),
+    [flowScope],
+  );
+
+  const setInput = useCallback(
+    (text: string) => {
+      if (isCurrentFlowScope()) setOperationInput({ scope: flowScope, text });
+    },
+    [flowScope, isCurrentFlowScope],
+  );
+
+  const restoreOperationInput = () => {
+    if (!isCurrentFlowScope()) return;
+    setOperationInput(undefined);
+    // Reset the editor immediately so its typing delay cannot lag behind the run payload.
+    setInputRevision((current) => current + 1);
+  };
+
+  const setMode = (mode: RequestRun["mode"]) => {
+    if (isCurrentFlowScope()) setLiveScope(mode === "live" ? flowScope : null);
+  };
+
+  const readStoredVariable = useCallback(
+    async (key: string) => {
+      if (!flowScope.flowId || !isCurrentFlowScope()) return;
+      const { value } = await flowScope.api.revealVariable(
+        flowScope.flowId,
+        key,
+      );
+      if (isCurrentFlowScope()) return value;
+    },
+    [flowScope, isCurrentFlowScope],
+  );
+
+  const refreshRuns = useCallback(async () => {
+    if (!flowScope.flowId || !isCurrentFlowScope()) return;
+    const request = ++historyRequest.current;
+    const isCurrent = () =>
+      isCurrentFlowScope() && request === historyRequest.current;
+    try {
+      const nextRuns = await flowScope.api.listRuns(flowScope.flowId);
+      if (isCurrent()) setHistory({ scope: flowScope, runs: nextRuns });
+    } catch (cause) {
+      if (!isCurrent()) return;
+      if (isReadAccessDenied(cause)) {
+        setHistory(undefined);
+        setSelectedRun(undefined);
+      }
+      throw cause;
+    }
+  }, [isCurrentFlowScope, flowScope]);
 
   useEffect(() => {
-    if (!flow) {
-      setRuns([]);
-      setActiveRun(null);
-      return;
-    }
-    setInput(displayInput(flow.input));
-    setActiveRun(null);
-    setRevealed({});
-    void api.listRuns(flow.id).then(setRuns, () => setRuns([]));
-  }, [api, flow?.id]);
+    void refreshRuns().catch(() => undefined);
+  }, [refreshRuns]);
 
   const remote = useRealtimeRefresh({
     topics: ["integrations"],
     tenantId: scope ? Number(scope.replace(/^tenant:/, "")) : 0,
-    blocked: dirty || busy || submitting,
+    refreshScope: JSON.stringify([sessionGeneration, flowId]),
+    blocked: dirty || busy || submitting || creatingFlow || Boolean(deletion),
     accepts: (event) =>
       !event.collection || event.collection === "savia-request",
     refresh: async () => {
       await refreshNavigation();
-      if (flow) {
+      if (flowId && isCurrentFlowScope()) {
         await reloadFlow();
-        setRuns(await api.listRuns(flow.id));
+        await refreshRuns();
       }
     },
   });
-  const working = busy || submitting;
+  const working = busy || submitting || creatingFlow;
   const step = flow?.steps[stepIndex] ?? flow?.steps[0];
   const variableNames = useMemo(
     () =>
@@ -232,56 +356,64 @@ export function SaviaRequestWorkspace() {
     });
   };
   const updateVariable = (index: number, patch: Partial<RequestVariable>) => {
-    if (!flow) return;
+    const variable = flow?.variables[index];
+    if (!flow || !variable) return;
+    const next = {
+      ...variable,
+      ...patch,
+      draft: variable.draft ?? {
+        id: `stored:${variable.key}`,
+        originalKey: variable.key,
+        originalSecretConfigured: Boolean(
+          variable.secret && variable.configured,
+        ),
+      },
+    };
     updateDraft({
       ...flow,
-      variables: flow.variables.map((variable, currentIndex) =>
-        currentIndex === index ? { ...variable, ...patch } : variable,
+      variables: flow.variables.map((candidate, currentIndex) =>
+        currentIndex === index ? next : candidate,
       ),
     });
+    return next;
   };
-  const saveAll = async () => {
-    if (!flow) return false;
-    try {
-      const next = { ...flow, input: executionInput(input) };
-      updateDraft(next);
-      if (!(await saveDraft())) return false;
-      await api.saveVariables(next.id, next.variables);
-      return true;
-    } catch (exception) {
-      setNotice(
-        exception instanceof Error
-          ? exception.message
-          : "No pudimos guardar el flow.",
-      );
-      return false;
-    }
-  };
+  const saveCurrentDraft = async () =>
+    (await saveDraft()) && isCurrentFlowScope();
   const withSubmission = async (work: () => Promise<void>) => {
-    setSubmitting(true);
+    if (!isCurrentFlowScope()) return;
+    const action = { scope: flowScope };
+    setSubmission(action);
     setNotice("");
     try {
       await work();
     } catch (exception) {
-      setNotice(
-        exception instanceof Error
-          ? exception.message
-          : "No pudimos completar la operación.",
-      );
+      if (isCurrentFlowScope())
+        setNotice(
+          exception instanceof Error
+            ? exception.message
+            : "No pudimos completar la operación.",
+        );
     } finally {
-      setSubmitting(false);
+      setSubmission((current) => (current === action ? null : current));
     }
   };
   const run = () =>
     withSubmission(async () => {
-      if (!flow || !(await saveAll())) return;
-      const result = await api.run(
-        flow.id,
-        effectiveMode,
-        executionInput(input),
+      if (!flow) return;
+      const runInput = executionInput(input);
+      const newKeys = Object.keys(runInput).filter(
+        (key) => !Object.hasOwn(flow.input, key),
       );
-      setActiveRun(result);
-      setRuns(await api.listRuns(flow.id));
+      if (newKeys.length > 0)
+        throw new Error(
+          `Guarda las claves nuevas antes de ejecutar (${newKeys.join(", ")}).`,
+        );
+      if (!(await saveCurrentDraft())) return;
+      const result = await api.run(flow.id, effectiveMode, runInput);
+      if (!isCurrentFlowScope()) return;
+      setSelectedRun({ scope: flowScope, run: result });
+      await refreshRuns();
+      if (!isCurrentFlowScope()) return;
       setTab("run");
       setNotice(
         result.status === "success"
@@ -293,56 +425,73 @@ export function SaviaRequestWorkspace() {
     });
   const publish = () =>
     withSubmission(async () => {
-      if (!flow || !(await saveAll())) return;
+      if (!flow || !(await saveCurrentDraft())) return;
       await api.publish(flow.id);
       setNotice("Versión publicada.");
     });
-  const createFlow = () =>
-    withSubmission(async () => {
-      const next = emptyFlow();
-      await api.saveFlow(next);
-      await refreshNavigation();
-      await selectFlow(next.id);
-      setNotice("Flow creado. Completa sus datos y guarda los cambios.");
-    });
+  const createFlow = async () => {
+    if (!active || working || !isCurrentFlowScope()) return;
+    const draft = currentCreation?.draft ?? emptyFlow();
+    const attempt = { scope: creationScope, draft };
+    setCreation(attempt);
+    try {
+      if (!(await createAndSelectFlow(draft, Boolean(currentCreation))))
+        setCreation((current) => (current === attempt ? undefined : current));
+    } catch (cause) {
+      setCreation((current) =>
+        current === attempt
+          ? {
+              ...attempt,
+              error:
+                cause instanceof Error
+                  ? cause.message
+                  : "No pudimos crear el flow.",
+            }
+          : current,
+      );
+    }
+  };
   const duplicateFlow = () =>
     withSubmission(async () => {
-      if (!flow || !(await saveAll())) return;
-      const copy = await api.duplicateFlow(flow.id);
-      await refreshNavigation();
-      await selectFlow(copy.id);
-      setNotice("Flow duplicado con sus pasos y variables.");
+      if (flow) await duplicateAndSelectFlow(flow.id);
     });
   const removeFlow = () => {
     if (!flow) return;
-    setDeletion({
+    confirmDeletion({
       title: "Eliminar flow",
       description: `¿Eliminar «${flow.name}» con todos sus pasos?`,
-      run: async () => {
+      run: async (isCurrent) => {
         await api.removeFlow(flow.id);
-        discardDraft();
-        const [next] = await refreshNavigation();
-        if (next) await selectFlow(next.id);
-        else clearSelection();
+        // The deletion already succeeded. Clear the selection if reloading the list fails.
+        const [next] = await refreshNavigation().catch(() => []);
+        if (!isCurrent()) return;
+        if (next) {
+          discardDraft();
+          await selectFlow(next.id);
+        } else clearSelection();
       },
     });
   };
+  const reloadRestoredFlow = async (isCurrent: () => boolean) =>
+    isCurrent() &&
+    (await reloadFlow({ discardOnFailure: true })) &&
+    isCurrent();
   const resetFlow = () => {
-    if (!flow) return;
-    setDeletion({
+    if (!scope || !flow?.hasPlatformDefault) return;
+    confirmDeletion({
       title: "Restablecer flow",
+      confirmLabel: "Restablecer",
       description: `«${flow.name}» volverá a los valores de plataforma. Los cambios sin guardar se perderán.`,
-      run: async () => {
-        await api.resetFlow(flow.id);
-        const nextFlows = await refreshNavigation();
-        if (nextFlows.some((candidate) => candidate.id === flow.id)) {
-          if (!(await reloadFlow())) return;
-        } else {
-          discardDraft();
-          if (nextFlows[0]) await selectFlow(nextFlows[0].id);
-          else clearSelection();
-        }
-        setNotice("Flow restablecido a valores de plataforma.");
+      run: async (isCurrent) => {
+        const { reverted } = await api.resetFlow(flow.id);
+        if (!isCurrent()) return;
+        restoreOperationInput();
+        if (await reloadRestoredFlow(isCurrent))
+          setNotice(
+            reverted
+              ? "Flow restablecido a valores de plataforma."
+              : "El flow ya usaba los valores de plataforma.",
+          );
       },
     });
   };
@@ -350,10 +499,16 @@ export function SaviaRequestWorkspace() {
     withSubmission(async () => {
       if (!flow) return;
       const variable = flow.variables[index];
-      if (!variable) return;
-      if (!(await saveAll())) return;
+      if (
+        !scope ||
+        !variable?.overridden ||
+        !variable.hasPlatformDefault ||
+        hasRenamedVariableKey(variable)
+      )
+        return;
+      if (!(await saveCurrentDraft())) return;
       const result = await api.resetVariable(flow.id, variable.key);
-      if (await reloadFlow())
+      if (await reloadRestoredFlow(isCurrentFlowScope))
         setNotice(
           result.reverted
             ? `«${variable.key}» volvió al valor de plataforma.`
@@ -374,6 +529,13 @@ export function SaviaRequestWorkspace() {
   }
 
   if (!flow) {
+    const creationError = currentCreation?.error;
+    const formError = error ?? creationError;
+    const createLabel = creatingFlow
+      ? "Creando flow…"
+      : creationError
+        ? "Reintentar creación"
+        : "Crear flow";
     return (
       <main className="mx-auto w-full max-w-6xl pb-10">
         <div className="pt-6">
@@ -389,34 +551,44 @@ export function SaviaRequestWorkspace() {
             Savia request
           </h1>
         </header>
-        <Card>
-          <CardContent className="flex flex-col items-center px-6 py-16 text-center">
-            <div className="flex size-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
-              <Workflow className="size-6" aria-hidden="true" />
-            </div>
-            <h2 className="mt-5 text-2xl font-semibold">
-              No hay flows todavía
-            </h2>
-            <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
-              Crea el primer flow para organizar requests, variables y
-              ejecuciones desde este espacio.
-            </p>
-            {error ? (
-              <p className="mt-4 text-sm text-destructive" role="alert">
-                {error}
-              </p>
-            ) : null}
-            <Button
-              className="mt-6"
-              disabled={working}
-              onClick={createFlow}
-              type="button"
-            >
-              <FilePlus2 />
-              Crear flow
-            </Button>
-          </CardContent>
-        </Card>
+        {routeLoading ? (
+          <RouteLoading label="Cargando flows…" />
+        ) : (
+          <Card>
+            <CardContent className="flex flex-col items-center px-6 py-16 text-center">
+              <div className="flex size-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                <Workflow className="size-6" aria-hidden="true" />
+              </div>
+              <h2 className="mt-5 text-2xl font-semibold">
+                {error
+                  ? "No pudimos cargar Savia Request"
+                  : "No hay flows todavía"}
+              </h2>
+              {formError ? (
+                <p
+                  className="mt-2 max-w-md text-sm text-destructive"
+                  role="alert"
+                >
+                  {formError}
+                </p>
+              ) : (
+                <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+                  Crea el primer flow para organizar requests, variables y
+                  ejecuciones desde este espacio.
+                </p>
+              )}
+              <Button
+                className="mt-6"
+                disabled={working}
+                onClick={error ? retryRoute : () => void createFlow()}
+                type="button"
+              >
+                {formError ? <RotateCcw /> : <FilePlus2 />}
+                {error ? "Reintentar" : createLabel}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
       </main>
     );
   }
@@ -442,12 +614,15 @@ export function SaviaRequestWorkspace() {
         };
       }
       const value =
-        variable.secret && variable.configured && !variable.value
-          ? (await api.revealVariable(flow.id, name)).value
+        variable.secret &&
+        variable.configured &&
+        !variable.value &&
+        !hasRenamedVariableKey(variable)
+          ? await readStoredVariable(name)
           : variable.value;
       return {
-        value,
-        editable: true,
+        value: value ?? "",
+        editable: value !== undefined,
         note: variable.secret ? "Variable secreta" : "Variable del flow",
       };
     },
@@ -521,7 +696,7 @@ export function SaviaRequestWorkspace() {
                 >
                   <Trash2 /> Eliminar
                 </Button>
-                {scope ? (
+                {scope && flow.hasPlatformDefault ? (
                   <Button
                     disabled={working}
                     onClick={resetFlow}
@@ -643,7 +818,9 @@ export function SaviaRequestWorkspace() {
                     disabled={working}
                     onClick={() =>
                       void withSubmission(async () => {
-                        if (await saveAll()) setNotice("Cambios guardados.");
+                        updateDraft({ ...flow, input: executionInput(input) });
+                        if (await saveCurrentDraft())
+                          setNotice("Cambios guardados.");
                       })
                     }
                     size="sm"
@@ -673,12 +850,33 @@ export function SaviaRequestWorkspace() {
                 </p>
               ) : null}
               {error ? (
-                <p
-                  className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive"
-                  role="alert"
-                >
-                  {error}
-                </p>
+                <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm">
+                  <p className="text-destructive" role="alert">
+                    {error}
+                  </p>
+                  {routeReadError ? (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Button
+                        disabled={working}
+                        onClick={retryRoute}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        <RotateCcw /> Reintentar selección
+                      </Button>
+                      <Button
+                        disabled={working}
+                        onClick={() => void selectFlow(flow.id, stepIndex)}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                      >
+                        Volver al flow actual
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
               ) : null}
 
               {tab === "steps" && step ? (
@@ -686,7 +884,7 @@ export function SaviaRequestWorkspace() {
                   editor={editor}
                   flow={flow}
                   onDelete={() =>
-                    setDeletion({
+                    confirmDeletion({
                       title: "Eliminar paso",
                       description: `¿Eliminar «${step.name}» de la secuencia?`,
                       run: () =>
@@ -720,37 +918,12 @@ export function SaviaRequestWorkspace() {
                 <VariablesEditor
                   flow={flow}
                   allowReset={Boolean(scope)}
+                  readStoredValue={readStoredVariable}
                   onReset={(index) => {
                     void resetVariable(index);
                   }}
-                  onReveal={async (index) => {
-                    const variable = flow.variables[index];
-                    if (!variable) return;
-                    if (revealed[variable.key]) {
-                      setRevealed((current) => ({
-                        ...current,
-                        [variable.key]: false,
-                      }));
-                      return;
-                    }
-                    if (
-                      variable.secret &&
-                      variable.configured &&
-                      !variable.value
-                    ) {
-                      const value = await api.revealVariable(
-                        flow.id,
-                        variable.key,
-                      );
-                      updateVariable(index, { value: value.value });
-                    }
-                    setRevealed((current) => ({
-                      ...current,
-                      [variable.key]: true,
-                    }));
-                  }}
                   onRemove={(index) =>
-                    setDeletion({
+                    confirmDeletion({
                       title: "Eliminar variable",
                       description: "La variable se retirará del borrador.",
                       run: () =>
@@ -767,12 +940,16 @@ export function SaviaRequestWorkspace() {
                       ...flow,
                       variables: [
                         ...flow.variables,
-                        { key: "", value: "", secret: false },
+                        {
+                          key: "",
+                          value: "",
+                          secret: false,
+                          draft: { id: `new:${crypto.randomUUID()}` },
+                        },
                       ],
                     })
                   }
                   onUpdate={updateVariable}
-                  revealed={revealed}
                   working={working}
                 />
               ) : null}
@@ -782,14 +959,12 @@ export function SaviaRequestWorkspace() {
                   activeRun={activeRun}
                   flow={flow}
                   input={input}
+                  inputRevision={inputRevision}
+                  key={JSON.stringify([sessionGeneration, scope, flow.id])}
                   mode={effectiveMode}
-                  onDemo={() =>
-                    void withSubmission(async () =>
-                      setInput(displayInput(await api.demoInput())),
-                    )
-                  }
                   onInputChange={setInput}
                   onModeChange={setMode}
+                  onRestoreInput={restoreOperationInput}
                   onRun={run}
                   readStandardResult={services.requestResults.read.bind(
                     services.requestResults,
@@ -800,14 +975,9 @@ export function SaviaRequestWorkspace() {
 
               {tab === "history" ? (
                 <HistoryPanel
-                  onRefresh={() =>
-                    void withSubmission(async () =>
-                      setRuns(await api.listRuns(flow.id)),
-                    )
-                  }
+                  onRefresh={() => void withSubmission(refreshRuns)}
                   onSelect={(run) => {
-                    setActiveRun(run);
-                    setMode(run.mode);
+                    setSelectedRun({ scope: flowScope, run });
                     setTab("run");
                   }}
                   runs={runs}
@@ -815,10 +985,7 @@ export function SaviaRequestWorkspace() {
                 />
               ) : null}
               {deletion ? (
-                <DeleteDialog
-                  action={deletion}
-                  onClose={() => setDeletion(null)}
-                />
+                <DeleteDialog action={deletion} onClose={closeDeletion} />
               ) : null}
             </CardContent>
           </Card>
@@ -1036,6 +1203,7 @@ function StepsEditor({
               }
               language={editor === "body" ? bodyLanguage(step) : "javascript"}
               onChange={(value) => onUpdate({ [editor]: value })}
+              readOnly={working}
               value={step[editor]}
             />
           )}
@@ -1190,22 +1358,23 @@ function HeadersEditor({
 
 function VariablesEditor({
   flow,
-  revealed,
   working,
   allowReset,
   onUpdate,
   onRemove,
-  onReveal,
+  readStoredValue,
   onReset,
   onAdd,
 }: {
   flow: RequestFlow;
-  revealed: Record<string, boolean>;
   working: boolean;
   allowReset: boolean;
-  onUpdate(index: number, patch: Partial<RequestVariable>): void;
+  onUpdate(
+    index: number,
+    patch: Partial<RequestVariable>,
+  ): RequestVariable | undefined;
   onRemove(index: number): void;
-  onReveal(index: number): Promise<void>;
+  readStoredValue(key: string): Promise<string | undefined>;
   onReset(index: number): void;
   onAdd(): void;
 }) {
@@ -1216,7 +1385,13 @@ function VariablesEditor({
           <h2 className="text-base font-semibold">Variables del flow</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Un secreto vacío conserva su valor guardado.
-            {allowReset
+            {allowReset &&
+            flow.variables.some(
+              (variable) =>
+                variable.overridden &&
+                variable.hasPlatformDefault &&
+                !hasRenamedVariableKey(variable),
+            )
               ? " Restablecer devuelve una variable al valor de plataforma."
               : null}
           </p>
@@ -1244,7 +1419,7 @@ function VariablesEditor({
             {flow.variables.map((variable, index) => (
               <tr
                 className="border-b last:border-0"
-                key={`${variable.key}-${index}`}
+                key={variable.draft?.id ?? `stored:${variable.key}`}
               >
                 <td className="py-2 pr-3">
                   <Input
@@ -1257,38 +1432,12 @@ function VariablesEditor({
                   />
                 </td>
                 <td className="py-2 pr-3">
-                  <div className="flex min-w-56 gap-2">
-                    <Input
-                      aria-label={`Valor de ${variable.key}`}
-                      autoComplete="off"
-                      disabled={working}
-                      onChange={(event) =>
-                        onUpdate(index, { value: event.target.value })
-                      }
-                      placeholder={
-                        variable.configured && variable.secret
-                          ? "•••••••• · guardado"
-                          : "Escribe un valor"
-                      }
-                      type={
-                        variable.secret && !revealed[variable.key]
-                          ? "password"
-                          : "text"
-                      }
-                      value={variable.value}
-                    />
-                    {variable.secret ? (
-                      <Button
-                        disabled={working}
-                        onClick={() => void onReveal(index)}
-                        size="sm"
-                        type="button"
-                        variant="outline"
-                      >
-                        {revealed[variable.key] ? "Ocultar" : "Mostrar"}
-                      </Button>
-                    ) : null}
-                  </div>
+                  <VariableValueInput
+                    disabled={working}
+                    onChange={(value) => onUpdate(index, { value })}
+                    readStoredValue={readStoredValue}
+                    variable={variable}
+                  />
                 </td>
                 <td className="py-2 pr-3">
                   <input
@@ -1303,7 +1452,10 @@ function VariablesEditor({
                 </td>
                 <td className="py-2">
                   <span className="flex gap-1">
-                    {allowReset && variable.overridden ? (
+                    {allowReset &&
+                    variable.overridden &&
+                    variable.hasPlatformDefault &&
+                    !hasRenamedVariableKey(variable) ? (
                       <Button
                         aria-label={`Restablecer ${variable.key}`}
                         disabled={working}
@@ -1337,26 +1489,139 @@ function VariablesEditor({
   );
 }
 
+function VariableValueInput({
+  variable,
+  disabled,
+  onChange,
+  readStoredValue,
+}: {
+  variable: RequestVariable;
+  disabled: boolean;
+  onChange(value: string): RequestVariable | undefined;
+  readStoredValue(key: string): Promise<string | undefined>;
+}) {
+  // A stored secret belongs to this field until an explicit edit updates the draft.
+  const [preview, setPreview] = useState<{
+    variable: RequestVariable;
+    read: typeof readStoredValue;
+    status: "loading" | "visible" | "error";
+    value?: string;
+  }>();
+  const current =
+    preview?.variable === variable && preview.read === readStoredValue
+      ? preview
+      : undefined;
+  const pending = useRef<symbol | null>(null);
+
+  useLayoutEffect(() => {
+    setPreview((previous) =>
+      previous?.variable === variable && previous.read === readStoredValue
+        ? previous
+        : undefined,
+    );
+    return () => {
+      pending.current = null;
+    };
+  }, [variable, readStoredValue]);
+
+  const visible = current?.status === "visible";
+  const loading = current?.status === "loading";
+  const configuredForKey =
+    variable.configured && !hasRenamedVariableKey(variable);
+  const toggle = async () => {
+    if (visible) {
+      setPreview(undefined);
+      return;
+    }
+    const source = { variable, read: readStoredValue };
+    if (!configuredForKey || variable.value) {
+      setPreview({ ...source, status: "visible" });
+      return;
+    }
+    const request = Symbol();
+    pending.current = request;
+    setPreview({ ...source, status: "loading" });
+    try {
+      const value = await readStoredValue(variable.key);
+      if (pending.current === request) {
+        setPreview(
+          value === undefined
+            ? undefined
+            : { ...source, status: "visible", value },
+        );
+      }
+    } catch {
+      if (pending.current === request)
+        setPreview({ ...source, status: "error" });
+    }
+  };
+
+  return (
+    <>
+      <div className="flex min-w-56 gap-2">
+        <Input
+          aria-label={`Valor de ${variable.key}`}
+          autoComplete="off"
+          disabled={disabled}
+          onChange={(event) => {
+            const next = onChange(event.target.value);
+            setPreview(
+              visible && next
+                ? { variable: next, read: readStoredValue, status: "visible" }
+                : undefined,
+            );
+          }}
+          placeholder={
+            configuredForKey && variable.secret
+              ? "•••••••• · guardado"
+              : "Escribe un valor"
+          }
+          type={variable.secret && !visible ? "password" : "text"}
+          value={current?.value ?? variable.value}
+        />
+        {variable.secret ? (
+          <Button
+            disabled={disabled || loading}
+            onClick={() => void toggle()}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {visible ? "Ocultar" : loading ? "Mostrando…" : "Mostrar"}
+          </Button>
+        ) : null}
+      </div>
+      {current?.status === "error" ? (
+        <p className="mt-1 text-sm text-destructive" role="alert">
+          No se pudo mostrar el secreto.
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 function RunPanel({
   flow,
   input,
+  inputRevision,
   mode,
   working,
   activeRun,
   onInputChange,
   onModeChange,
-  onDemo,
+  onRestoreInput,
   onRun,
   readStandardResult,
 }: {
   flow: RequestFlow;
   input: string;
+  inputRevision: number;
   mode: "mock" | "live";
   working: boolean;
   activeRun: RequestRun | null;
   onInputChange(value: string): void;
   onModeChange(mode: "mock" | "live"): void;
-  onDemo(): void;
+  onRestoreInput(): void;
   onRun(): void;
   readStandardResult(flowId: string, runId: string): Promise<RequestResult>;
 }) {
@@ -1365,7 +1630,7 @@ function RunPanel({
       <section className="rounded-lg border p-4">
         <h2 className="text-base font-semibold">Datos de la operación</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Los objetos JSON pueden editarse directamente.
+          Usa Guardar para conservar estos datos como entrada del flow.
         </p>
         <label className="mt-4 grid gap-1.5 text-sm font-medium">
           Modo de ejecución
@@ -1393,17 +1658,18 @@ function RunPanel({
         <div className="mt-4 flex items-center justify-between gap-3">
           <span className="text-sm font-medium">Entrada JSON</span>
           <Button
-            disabled={working || mode === "live"}
-            onClick={onDemo}
+            disabled={working}
+            onClick={onRestoreInput}
             size="sm"
             type="button"
             variant="outline"
           >
-            Cargar ejemplo simulado
+            Restaurar entrada del flow
           </Button>
         </div>
         <div className="mt-2">
           <CodeEditor
+            key={inputRevision}
             label="Entrada JSON"
             onChange={onInputChange}
             value={input}

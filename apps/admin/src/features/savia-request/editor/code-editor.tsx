@@ -16,6 +16,7 @@ type CodeEditorProps = {
   language?: "json" | "xml" | "javascript" | "text";
   label: string;
   height?: string;
+  readOnly?: boolean;
 };
 
 export function CodeEditor({
@@ -24,6 +25,7 @@ export function CodeEditor({
   language = "json",
   label,
   height = "22rem",
+  readOnly = false,
 }: CodeEditorProps) {
   const names = useContext(VariableNames);
   const [dark, setDark] = useState(() =>
@@ -87,7 +89,13 @@ export function CodeEditor({
           {label} · {language.toUpperCase()}
         </span>
         {language === "json" || language === "xml" ? (
-          <Button onClick={format} size="sm" type="button" variant="outline">
+          <Button
+            disabled={readOnly}
+            onClick={format}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
             Formatear
           </Button>
         ) : null}
@@ -99,9 +107,11 @@ export function CodeEditor({
           highlightActiveLine: true,
           autocompletion: true,
         }}
+        editable={!readOnly}
         extensions={extension}
         height={height}
         onChange={onChange}
+        readOnly={readOnly}
         theme={dark ? "dark" : "light"}
         value={value}
       />

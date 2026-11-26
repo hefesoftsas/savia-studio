@@ -72,6 +72,14 @@ async function overlayVariables(
   return rows.results;
 }
 
+function effectiveVariableRow(
+  base?: StoredVariable,
+  override?: StoredVariable,
+) {
+  if (override?.secret && !override.value && base?.secret) return base;
+  return override ?? base;
+}
+
 function parseFlowDefinition(
   definition: string,
 ): (Flow & { deleted?: boolean }) | null {
@@ -87,8 +95,7 @@ function withFolderFallback(
 ): Flow & { deleted?: boolean } {
   const source =
     flow.steps[0]?.sourcePath ??
-    compiledCatalog.find((x) => x.id === flow.id)?.steps[0]
-      ?.sourcePath;
+    compiledCatalog.find((x) => x.id === flow.id)?.steps[0]?.sourcePath;
   flow.folderPath ??=
     source?.split("/").slice(0, -1).join("/") ?? "Mis requests";
   return flow;
@@ -663,6 +670,15 @@ export async function syncExampleRequestBundleBundle(
   };
 }
 
+async function readPlatformFlow(env: Env, id: string) {
+  const row = await env.DB.prepare("SELECT definition FROM flows WHERE id=?")
+    .bind(id)
+    .first<{ definition: string }>();
+  if (!row) return null;
+  const flow = parseFlowDefinition(row.definition);
+  return flow && !flow.deleted ? { definition: row.definition, flow } : null;
+}
+
 /** Effective definition: tenant overlay wins, otherwise the global catalog. */
 export async function getFlow(
   env: Env,
@@ -682,13 +698,9 @@ export async function getFlow(
       return { ...(withFolderFallback(flow) as Flow), customized: true };
     }
   }
-  const row = await env.DB.prepare("SELECT definition FROM flows WHERE id=?")
-    .bind(id)
-    .first<{ definition: string }>();
-  if (!row) return null;
-  const flow = parseFlowDefinition(row.definition);
-  if (!flow || flow.deleted) return null;
-  return { ...(withFolderFallback(flow) as Flow), customized: false };
+  const base = await readPlatformFlow(env, id);
+  if (!base) return null;
+  return { ...(withFolderFallback(base.flow) as Flow), customized: false };
 }
 
 /** Every visible flow id in scope (global + tenant overlays, minus tombstones). */
@@ -779,8 +791,8 @@ export async function listScopedFlows(env: Env, tenant = ""): Promise<Flow[]> {
 }
 
 /**
- * Effective variables: tenant overlay wins per key, otherwise the global
- * default. Reads and reveals never expose base secrets to tenant scopes
+ * The tenant overlay wins per key. An empty secret can inherit a platform
+ * secret. Reads and reveals never expose base secrets to tenant scopes
  * (`value: ""`, `configured` from either layer); only tenant-owned secrets
  * can be revealed. Server-side execution (`decryptBaseSecrets`) resolves
  * base secrets too, so shared catalog flows run for tenants — values stay
@@ -821,68 +833,58 @@ export async function getVariables(
     keys.map(async (key) => {
       const baseRow = baseByKey.get(key);
       const overlayRow = overlayByKey.get(key);
-      const secret = overlayRow ? !!overlayRow.secret : !!baseRow?.secret;
-      const configured = !!(overlayRow?.value || baseRow?.value);
-      const overridden = Boolean(overlayRow);
-      if (!secret) {
-        return {
-          key,
-          secret,
-          configured,
-          overridden,
-          value: overlayRow ? overlayRow.value : (baseRow?.value ?? ""),
-        };
-      }
-      // Secret: tenant-owned values are readable when requested; base
-      // values only for server-side execution, never for reads/reveals.
-      if (overlayRow?.value) {
-        return {
-          key,
-          secret,
-          configured,
-          overridden,
-          value: privateValues ? await unseal(env, overlayRow.value) : "",
-        };
-      }
-      if (privateValues && decryptBaseSecrets && baseRow?.value) {
-        return {
-          key,
-          secret,
-          configured,
-          overridden,
-          value: await unseal(env, baseRow.value),
-        };
-      }
-      return { key, secret, configured, overridden, value: "" };
+      const effective = effectiveVariableRow(baseRow, overlayRow);
+      const secret = Boolean(effective?.secret);
+      const storedValue = effective?.value ?? "";
+      const canReadSecret =
+        privateValues && (effective === overlayRow || decryptBaseSecrets);
+      return {
+        key,
+        secret,
+        configured: Boolean(storedValue),
+        overridden: Boolean(overlayRow),
+        ...(!privateValues ? { hasPlatformDefault: Boolean(baseRow) } : {}),
+        value: !secret
+          ? storedValue
+          : canReadSecret && storedValue
+            ? await unseal(env, storedValue)
+            : "",
+      };
     }),
   );
 }
 
-/**
- * Platform scope keeps the legacy replace-all semantics on `flow_variables`.
- * Tenant scope replaces the tenant overlay only: an empty secret value means
- * "no override" (falls back to the platform default) so masked secrets sent
- * back by the editor are never stored as empty overrides.
- */
-export async function saveVariables(
+export class SecretReplacementRequiredError extends Error {
+  constructor(markingSecret: boolean) {
+    super(
+      markingSecret
+        ? "Para marcar una variable como secreta debes reemplazar su valor."
+        : "Para desmarcar un secreto debes reemplazar su valor.",
+    );
+    this.name = "SecretReplacementRequiredError";
+  }
+}
+
+function preserveStoredSecret(row: Variable, previous?: StoredVariable) {
+  if (row.value || !previous) return false;
+  const wasSecret = Boolean(previous.secret);
+  if (previous.value && row.secret !== wasSecret)
+    throw new SecretReplacementRequiredError(row.secret);
+  return row.secret && wasSecret;
+}
+
+async function prepareVariableWrites(
   env: Env,
   id: string,
   rows: Variable[],
-  tenant = "",
-) {
-  const scope = scopeTenant(tenant);
+  scope: string,
+): Promise<D1PreparedStatement[]> {
   if (isPlatformTenant(scope)) {
     const existing = await baseVariables(env, id);
     const statements = [];
     for (const row of rows) {
       const old = existing.find((x) => x.key === row.key);
-      if (old?.secret && old.value && !row.value) {
-        if (!row.secret)
-          throw new Error(
-            "Para desmarcar un secreto debes reemplazar su valor.",
-          );
-        continue;
-      }
+      if (preserveStoredSecret(row, old)) continue;
       const value =
         row.secret && row.value ? await seal(env, row.value) : row.value;
       statements.push(
@@ -898,20 +900,20 @@ export async function saveVariables(
             "DELETE FROM flow_variables WHERE flow_id=? AND key=?",
           ).bind(id, row.key),
         );
-    if (statements.length) await env.DB.batch(statements);
-    return;
+    return statements;
   }
   const existing = await overlayVariables(env, scope, id);
   const existingByKey = new Map(existing.map((row) => [row.key, row]));
+  const needsDefaults = rows.some((row) => !row.value);
+  const defaults = needsDefaults ? await baseVariables(env, id) : [];
+  const defaultsByKey = new Map(defaults.map((row) => [row.key, row]));
   const statements = [];
   for (const row of rows) {
-    // Masked secret sent back untouched: keep a stored tenant secret, or keep
-    // falling back to the platform default when there is no tenant override.
-    if (row.secret && !row.value) {
-      if (!row.secret)
-        throw new Error("Para desmarcar un secreto debes reemplazar su valor.");
-      continue;
-    }
+    const previous = effectiveVariableRow(
+      defaultsByKey.get(row.key),
+      existingByKey.get(row.key),
+    );
+    if (preserveStoredSecret(row, previous)) continue;
     const value =
       row.secret && row.value ? await seal(env, row.value) : row.value;
     statements.push(
@@ -927,7 +929,25 @@ export async function saveVariables(
           "DELETE FROM tenant_flow_variables WHERE tenant_id=? AND flow_id=? AND key=?",
         ).bind(scope, id, row.key),
       );
-  void existingByKey;
+  return statements;
+}
+
+/**
+ * Platform scope replaces `flow_variables`. Tenant scope replaces its overlay.
+ * Empty masked secrets preserve the stored value or inherit the platform value.
+ */
+export async function saveVariables(
+  env: Env,
+  id: string,
+  rows: Variable[],
+  tenant = "",
+) {
+  const statements = await prepareVariableWrites(
+    env,
+    id,
+    rows,
+    scopeTenant(tenant),
+  );
   if (statements.length) await env.DB.batch(statements);
 }
 
@@ -968,13 +988,11 @@ export async function importVariables(
   return { applied, skipped };
 }
 
-/** Persists an effective definition in scope (tenant overlay or global). */
-export async function saveFlow(
+function prepareFlowWrite(
   env: Env,
   flow: Flow,
-  tenant = "",
-): Promise<void> {
-  const scope = scopeTenant(tenant);
+  scope: string,
+): D1PreparedStatement {
   const definition = {
     id: flow.id,
     name: flow.name,
@@ -989,18 +1007,33 @@ export async function saveFlow(
     folderPath: flow.folderPath,
   };
   if (isPlatformTenant(scope)) {
-    await env.DB.prepare(
+    return env.DB.prepare(
       "INSERT INTO flows(id,definition) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET definition=excluded.definition",
-    )
-      .bind(flow.id, JSON.stringify(definition))
-      .run();
-    return;
+    ).bind(flow.id, JSON.stringify(definition));
   }
-  await env.DB.prepare(
+  return env.DB.prepare(
     "INSERT INTO tenant_flows(tenant_id,flow_id,definition,updated_at) VALUES(?,?,?,?) ON CONFLICT(tenant_id,flow_id) DO UPDATE SET definition=excluded.definition,updated_at=excluded.updated_at",
-  )
-    .bind(scope, flow.id, JSON.stringify(definition), nowIso())
-    .run();
+  ).bind(scope, flow.id, JSON.stringify(definition), nowIso());
+}
+
+/** Persists an effective definition in scope (tenant overlay or global). */
+export async function saveFlow(
+  env: Env,
+  flow: Flow,
+  tenant = "",
+): Promise<void> {
+  await prepareFlowWrite(env, flow, scopeTenant(tenant)).run();
+}
+
+export async function saveFlowAndVariables(
+  env: Env,
+  flow: Flow,
+  rows: Variable[],
+  tenant = "",
+): Promise<void> {
+  const scope = scopeTenant(tenant);
+  const variables = await prepareVariableWrites(env, flow.id, rows, scope);
+  await env.DB.batch([prepareFlowWrite(env, flow, scope), ...variables]);
 }
 
 /** Soft-delete in scope: tenant tombstones hide the global flow. */
@@ -1036,7 +1069,11 @@ export async function deleteFlow(
 }
 
 export type ResetStatus =
-  "unknown-flow" | "unknown-key" | "unchanged" | "reverted";
+  | "unknown-flow"
+  | "unknown-key"
+  | "platform-default-unavailable"
+  | "unchanged"
+  | "reverted";
 
 function requireTenantScope(scope: string): void {
   if (isPlatformTenant(scope))
@@ -1052,10 +1089,16 @@ export async function resetFlow(
   env: Env,
   id: string,
   tenant: string,
+  requirePlatformDefault = false,
 ): Promise<ResetStatus> {
   const scope = scopeTenant(tenant);
   requireTenantScope(scope);
   if (!(await getFlow(env, id, scope))) return "unknown-flow";
+  const platformFlow = requirePlatformDefault
+    ? await readPlatformFlow(env, id)
+    : null;
+  if (requirePlatformDefault && !platformFlow)
+    return "platform-default-unavailable";
   const overlay = await env.DB.prepare(
     "SELECT 1 FROM tenant_flows WHERE tenant_id=? AND flow_id=?",
   )
@@ -1067,14 +1110,29 @@ export async function resetFlow(
     .bind(scope, id)
     .first();
   if (!overlay && !variables) return "unchanged";
-  await env.DB.batch([
+  // PostgreSQL holds the platform row through both deletes in the batch.
+  const lock = dialectFor(env.DB).name === "postgres" ? " FOR SHARE" : "";
+  const guard = platformFlow
+    ? ` AND EXISTS (SELECT 1 FROM flows WHERE id=? AND definition=?${lock})`
+    : "";
+  const bindings = platformFlow
+    ? [scope, id, id, platformFlow.definition]
+    : [scope, id];
+  const deleted = await env.DB.batch([
     env.DB.prepare(
-      "DELETE FROM tenant_flows WHERE tenant_id=? AND flow_id=?",
-    ).bind(scope, id),
+      "DELETE FROM tenant_flows WHERE tenant_id=? AND flow_id=?" + guard,
+    ).bind(...bindings),
     env.DB.prepare(
-      "DELETE FROM tenant_flow_variables WHERE tenant_id=? AND flow_id=?",
-    ).bind(scope, id),
+      "DELETE FROM tenant_flow_variables WHERE tenant_id=? AND flow_id=?" +
+        guard,
+    ).bind(...bindings),
   ]);
+  if (platformFlow && !deleted.some((result) => result.meta.changes)) {
+    const current = await readPlatformFlow(env, id);
+    return current?.definition === platformFlow.definition
+      ? "unchanged"
+      : "platform-default-unavailable";
+  }
   return "reverted";
 }
 
@@ -1087,23 +1145,36 @@ export async function resetVariable(
   id: string,
   key: string,
   tenant: string,
+  requirePlatformDefault = false,
 ): Promise<ResetStatus> {
   const scope = scopeTenant(tenant);
   requireTenantScope(scope);
   if (!(await getFlow(env, id, scope))) return "unknown-flow";
   const base = await baseVariables(env, id);
   const overlay = await overlayVariables(env, scope, id);
-  if (
-    !base.some((row) => row.key === key) &&
-    !overlay.some((row) => row.key === key)
+  const hasDefault = base.some((row) => row.key === key);
+  const hasOverride = overlay.some((row) => row.key === key);
+  if (!hasDefault && !hasOverride) return "unknown-key";
+  if (requirePlatformDefault && !hasDefault)
+    return "platform-default-unavailable";
+  if (!hasOverride) return "unchanged";
+  const lock = dialectFor(env.DB).name === "postgres" ? " FOR SHARE" : "";
+  const guard = requirePlatformDefault
+    ? ` AND EXISTS (SELECT 1 FROM flow_variables WHERE flow_id=? AND key=?${lock})`
+    : "";
+  const bindings = requirePlatformDefault
+    ? [scope, id, key, id, key]
+    : [scope, id, key];
+  const deleted = await env.DB.prepare(
+    "DELETE FROM tenant_flow_variables WHERE tenant_id=? AND flow_id=? AND key=?" +
+      guard,
   )
-    return "unknown-key";
-  if (!overlay.some((row) => row.key === key)) return "unchanged";
-  await env.DB.prepare(
-    "DELETE FROM tenant_flow_variables WHERE tenant_id=? AND flow_id=? AND key=?",
-  )
-    .bind(scope, id, key)
+    .bind(...bindings)
     .run();
+  if (requirePlatformDefault && !deleted.meta.changes)
+    return (await baseVariables(env, id)).some((row) => row.key === key)
+      ? "unchanged"
+      : "platform-default-unavailable";
   return "reverted";
 }
 
@@ -1135,9 +1206,8 @@ export async function duplicateFlow(
     ]);
     return { id, name: copy.name };
   }
-  // Tenant copy: overlay rows move verbatim; non-secret platform defaults are
-  // materialized so the copy is self-contained. Platform secrets are never
-  // readable here, so they must be reconfigured on the copy.
+  // Copy tenant-owned values and public defaults. Keep inherited secret keys
+  // as empty fields for configuration in the copy.
   const base = await baseVariables(env, source.id);
   const overlay = await overlayVariables(env, scope, source.id);
   const overlayKeys = new Set(overlay.map((row) => row.key));
@@ -1151,11 +1221,18 @@ export async function duplicateFlow(
       ).bind(scope, id, row.key, row.value, row.secret, nowIso()),
     ),
     ...base
-      .filter((row) => !overlayKeys.has(row.key) && !row.secret)
+      .filter((row) => !overlayKeys.has(row.key))
       .map((row) =>
         env.DB.prepare(
           "INSERT INTO tenant_flow_variables(tenant_id,flow_id,key,value,secret,updated_at) VALUES(?,?,?,?,?,?)",
-        ).bind(scope, id, row.key, row.value, 0, nowIso()),
+        ).bind(
+          scope,
+          id,
+          row.key,
+          row.secret ? "" : row.value,
+          row.secret,
+          nowIso(),
+        ),
       ),
   ];
   await env.DB.batch(batch);

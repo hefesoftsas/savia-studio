@@ -140,10 +140,22 @@ describe("tenant reset", () => {
     expect(summaries.find((flow) => flow.id === "shared-flow")).toMatchObject({
       customized: true,
     });
+    const detail = await call(
+      "GET",
+      "/api/flows/shared-flow",
+      undefined,
+      TENANT_A,
+    );
+    expect(await detail.json()).toMatchObject({
+      hasPlatformDefault: true,
+      variables: [
+        expect.objectContaining({ key: "endpoint", hasPlatformDefault: true }),
+      ],
+    });
 
     const response = await call(
       "POST",
-      "/api/flows/shared-flow/reset",
+      "/api/flows/shared-flow/reset?requirePlatformDefault=true",
       {},
       TENANT_A,
     );
@@ -163,6 +175,59 @@ describe("tenant reset", () => {
     // Other tenants and the platform catalog are untouched.
     expect(await getFlow(platform.env, "shared-flow", TENANT_B)).toMatchObject({
       customized: false,
+    });
+  });
+
+  it("preserves a tenant flow and variable when their platform defaults have been removed", async () => {
+    await insertGlobalFlow();
+    await insertGlobalVariable("endpoint", "https://global.test");
+    const original = (await getFlow(platform.env, "shared-flow"))!;
+    await saveFlow(platform.env, { ...original, name: "Shared A" }, TENANT_A);
+    const update = await call(
+      "PUT",
+      "/api/flows/shared-flow/variables",
+      [{ key: "endpoint", value: "https://tenant.test", secret: false }],
+      TENANT_A,
+    );
+    expect(update.status).toBe(200);
+    await platform.env.DB.prepare(
+      "DELETE FROM flow_variables WHERE flow_id=? AND key=?",
+    )
+      .bind("shared-flow", "endpoint")
+      .run();
+    const variable = await call(
+      "DELETE",
+      "/api/flows/shared-flow/variables/endpoint?requirePlatformDefault=true",
+      undefined,
+      TENANT_A,
+    );
+    expect(variable.status).toBe(409);
+    const removed = await call("DELETE", "/api/flows/shared-flow", {});
+    expect(removed.status).toBe(200);
+    const flow = await call(
+      "POST",
+      "/api/flows/shared-flow/reset?requirePlatformDefault=true",
+      {},
+      TENANT_A,
+    );
+    expect(flow.status).toBe(409);
+
+    const detail = await call(
+      "GET",
+      "/api/flows/shared-flow",
+      undefined,
+      TENANT_A,
+    );
+    expect(await detail.json()).toMatchObject({
+      name: "Shared A",
+      hasPlatformDefault: false,
+      variables: [
+        expect.objectContaining({
+          key: "endpoint",
+          value: "https://tenant.test",
+          hasPlatformDefault: false,
+        }),
+      ],
     });
   });
 
