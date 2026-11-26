@@ -636,19 +636,15 @@ function BookingWorkspace({
   const [selectedProfessional, setSelectedProfessional] = useState("");
   useEffect(() => {
     if (!bootstrap) return;
-    const existing = bootstrap.settings.professionals.find(
-      (item) => item.id === selectedProfessional,
-    );
-    const owned = bootstrap.settings.professionals.find(
-      (item) => item.principalId === bootstrap.principalId,
-    );
-    setSelectedProfessional(
-      existing?.id ??
-        owned?.id ??
-        bootstrap.settings.professionals[0]?.id ??
-        "",
-    );
-  }, [bootstrap, selectedProfessional]);
+    const { professionals } = bootstrap.settings;
+    setSelectedProfessional((current) => {
+      if (professionals.some((item) => item.id === current)) return current;
+      const owned = professionals.find(
+        (item) => item.principalId === bootstrap.principalId,
+      );
+      return owned?.id ?? professionals[0]?.id ?? "";
+    });
+  }, [bootstrap]);
   const scheduleProfessional = bootstrap?.canManage
     ? bootstrap.settings.professionals.find(
         (item) => item.id === selectedProfessional,

@@ -27,8 +27,9 @@ a save is in progress.
 Each professional has a separate availability draft while Bookings is open.
 Switching professionals preserves pending hours and exceptions. Saving applies
 the selected professional's draft, so other professionals' drafts remain
-available. A newer saved schedule updates untouched exception dates and keeps
-pending additions, edits, and removals in the draft.
+available. The updated schedule keeps the current selection when that
+professional is still available. A newer saved schedule updates untouched
+exception dates and keeps pending additions, edits, and removals in the draft.
 Changing workspaces resets the booking form and its saving state. Leaving Bookings
 or choosing another workspace cancels any pending settings read. A response
 from the previous workspace applies only to the request that sent it.
