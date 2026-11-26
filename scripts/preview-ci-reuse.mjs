@@ -9,11 +9,13 @@ const appPath =
 const pulumiScriptPath = /^infra\/pulumi\/[\w-]+(?:\.test)?\.mjs$/;
 const authInitializerPath =
   /^scripts\/initialize-auth-deployment(?:\.test)?\.mjs$/;
-const docsPath = /^docs\/[\w./-]+\.md$/;
+const localLauncherPath = /^scripts\/dev-local(?:\.sh|\.test\.mjs)$/;
+const docsPath = /^(?:README|docs\/[\w./-]+)\.md$/;
 const reusablePaths = [
   appPath,
   pulumiScriptPath,
   authInitializerPath,
+  localLauncherPath,
   docsPath,
 ];
 const adminBuildPaths = new Set([

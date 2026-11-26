@@ -323,7 +323,8 @@ shared code and unrelated mixed changes retain full validation.
 
 A push to `main` may reuse CI from a merged same-repository pull request for
 changes to application source and tests, Pulumi scripts and tests, the Auth
-initialization helper and its tests, and the named Admin frontend build paths
+initialization helper and its tests, the local development launcher and its
+contract tests, the README and docs, and the named Admin frontend build paths
 in `scripts/preview-ci-reuse.mjs`. Changes to those build paths also require
 all six Admin test shards and the Core and Apps type check to pass in the PR.
 CI compares GitHub's associated PR and successful workflow attempt

@@ -155,6 +155,35 @@ test("reuses exact CI proof for named Admin build paths after all Admin checks p
   );
 });
 
+test("reuses exact PR validation for local development changes", async () => {
+  const paths = [
+    "README.md",
+    "apps/admin/build/preview-build.test.ts",
+    "apps/admin/vite.config.ts",
+    "scripts/dev-local.sh",
+    "scripts/dev-local.test.mjs",
+  ].join("\0");
+  const jobs = [classifier(`${proofName} (Flows skipped)`), ...adminBuildJobs];
+  assert.equal(await check({ paths, jobs, flowsDisabled: true }), true);
+  assert.equal(
+    await check({
+      paths,
+      jobs,
+      flowsDisabled: true,
+      contracts: [contractJobs[1]],
+    }),
+    false,
+  );
+  assert.equal(
+    await check({
+      paths: paths + "\0scripts/another-local-command.sh",
+      jobs,
+      flowsDisabled: true,
+    }),
+    false,
+  );
+});
+
 test("falls back when the push, PR, or tested tree cannot be proved", async () => {
   for (const scenario of [
     { parents: commit + " " + "e".repeat(40) },
