@@ -6,6 +6,28 @@ const workflow = (name) =>
     new URL(`../../.github/workflows/${name}.yml`, import.meta.url),
     "utf8",
   );
+
+test("Preview migration diagnostics read only a verified encrypted artifact", async () => {
+  const source = await workflow("inspect-preview-migration-failure");
+  assert.match(source, /workflow_dispatch:/);
+  assert.match(source, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(source, /name: preview\s+deployment: false/);
+  assert.match(source, /permissions:\s+contents: read\s+actions: read/);
+  assert.match(source, /\.head_repository\.full_name == \$repo/);
+  assert.match(source, /\.head_sha == \$sha/);
+  assert.match(source, /\.event == "workflow_run" and \.status == "completed"/);
+  assert.match(source, /select\(length == 1\)/);
+  assert.match(
+    source,
+    /artifact-ids: \$\{\{ steps\.source\.outputs\.artifact_id \}\}/,
+  );
+  assert.match(source, /secrets\.SAVIA_FLOWS_BACKUP_KEY/);
+  assert.doesNotMatch(
+    source,
+    /upload-artifact|\.apply|wrangler|CLOUDFLARE_API_TOKEN/,
+  );
+});
+
 test("Preview retains only encrypted command diagnostics outside its private recovery directory", async () => {
   const source = await workflow("deploy-preview");
   const start = source.indexOf("- name: Encrypt private command diagnostics");
