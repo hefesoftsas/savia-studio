@@ -1,6 +1,12 @@
 import React from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { render } from "./locale-test-render";
 import Workspace from "../plugin-project-workspace";
 import { setStudioRuntime } from "../runtime";
@@ -66,6 +72,68 @@ afterEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
 });
+
+it.each([false, true])(
+  "saves edits delivered while returning to projects and refreshes the list version (auto-saved: %s)",
+  async (autoSaved) => {
+    let lists = 0;
+    let version = 1;
+    let serverFiles = files;
+    let finishList!: () => void;
+    const writes: Array<{ version: number; files: typeof files }> = [];
+    setStudioRuntime({
+      embedded: true,
+      tenantId: 1,
+      pluginTransport: async (path, init) => {
+        if (path === "/api/plugin-projects") {
+          const response = Response.json({
+            data: [{ id, label: "Draft", updatedAt: "today", version }],
+          });
+          if (++lists === 2)
+            return new Promise((resolve) => {
+              finishList = () => resolve(response);
+            });
+          return response;
+        }
+        if (path === `/api/plugin-projects/${id}`) {
+          if (init?.method === "PUT") {
+            const draft = JSON.parse(String(init.body));
+            writes.push(draft);
+            serverFiles = draft.files;
+            version += 1;
+          }
+          return Response.json({
+            data: { id, files: serverFiles, history: [], version },
+          });
+        }
+        if (path === "/api/plugin-store") return Response.json({ data: [] });
+        if (path.endsWith("/registry"))
+          return Response.json({ canPublish: false });
+        throw new Error(`Unexpected request: ${path}`);
+      },
+    });
+    render(
+      <Workspace tenantId={1} onClose={() => {}} onPublished={() => {}} />,
+    );
+    fireEvent.click(await screen.findByText("Draft"));
+    const editor = await screen.findByRole("textbox", { name: "source" });
+    fireEvent.click(screen.getByRole("button", { name: "Volver a proyectos" }));
+    await waitFor(() => expect(finishList).toBeTypeOf("function"));
+    fireEvent.change(editor, { target: { value: "Late edit" } });
+    if (autoSaved) await waitFor(() => expect(writes).toHaveLength(1));
+    finishList();
+
+    fireEvent.click(await screen.findByText("Draft"));
+    expect(await screen.findByRole("textbox", { name: "source" })).toHaveValue(
+      "Late edit",
+    );
+    expect(
+      writes.map((write) => [write.version, write.files["entry.tsx"]]),
+    ).toEqual([[1, "Late edit"]]);
+    expect(lists).toBe(3);
+  },
+);
+
 it("refreshes the store picker after publication and before returning to projects", async () => {
   const calls: string[] = [];
   let latestVersion = "1.1.7";
@@ -668,43 +736,81 @@ it("recovers unsaved local content for the same owner and version", async () => 
   fireEvent.click(await screen.findByText("Draft"));
   expect(await screen.findByLabelText("source")).toHaveValue("offline edit");
 });
-it("recovers a stale local version into a new project without overwriting the newer server draft", async () => {
-  localStorage.setItem(
-    `savia:plugin-project:alice:1:${id}`,
-    JSON.stringify({
-      files: { ...files, "entry.tsx": "stale local edit" },
-      history: [],
-      version: 1,
-    }),
-  );
-  const writes: any[] = [];
-  setStudioRuntime({
-    embedded: true,
-    tenantId: 1,
-    pluginTransport: async (path, init) => {
-      if (path === "/api/plugin-projects")
-        return Response.json({ data: [{ id, label: "Draft" }] });
-      if (path.endsWith("/registry"))
-        return Response.json({ canPublish: false });
-      if (init?.method === "PUT") {
-        const body = JSON.parse(String(init.body));
-        writes.push({ path, ...body });
-        return Response.json({
-          data: { ...body, id: path.split("/").pop(), version: 1 },
-        });
-      }
-      return Response.json({ data: { id, files, history: [], version: 2 } });
-    },
-  });
-  render(<Workspace tenantId={1} onClose={() => {}} onPublished={() => {}} />);
-  fireEvent.click(await screen.findByText("Draft"));
-  expect(await screen.findByLabelText("source")).toHaveValue(
-    "stale local edit",
-  );
-  expect(writes).toHaveLength(1);
-  expect(writes[0].path).not.toContain(id);
-  expect(writes[0].version).toBe(0);
-});
+it.each([false, true])(
+  "reports recovery only after saving a separate project (retry: %s)",
+  async (retry) => {
+    const recoveryKey = `savia:plugin-project:alice:1:${id}`;
+    localStorage.setItem(
+      recoveryKey,
+      JSON.stringify({
+        files: { ...files, "entry.tsx": "stale local edit" },
+        history: [],
+        version: 1,
+      }),
+    );
+    const writes: Array<{ path: string; version: number }> = [];
+    const recoveryResponses: Array<(response: Response) => void> = [];
+    setStudioRuntime({
+      embedded: true,
+      tenantId: 1,
+      pluginTransport: async (path, init) => {
+        if (path === "/api/plugin-projects")
+          return Response.json({ data: [{ id, label: "Draft" }] });
+        if (path.endsWith("/registry"))
+          return Response.json({ canPublish: false });
+        if (init?.method === "PUT") {
+          const body = JSON.parse(String(init.body));
+          writes.push({ path, ...body });
+          return new Promise<Response>((resolve) => {
+            recoveryResponses.push(resolve);
+          });
+        }
+        return Response.json({ data: { id, files, history: [], version: 2 } });
+      },
+    });
+    render(
+      <Workspace tenantId={1} onClose={() => {}} onPublished={() => {}} />,
+    );
+    const draft = await screen.findByRole("button", { name: "Draft" });
+    await act(async () => fireEvent.click(draft));
+    expect(recoveryResponses).toHaveLength(1);
+    expect(draft).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Nuevo proyecto" }),
+    ).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(draft);
+    if (retry) {
+      recoveryResponses[0](
+        Response.json({ error: "Recovery unavailable" }, { status: 503 }),
+      );
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Recovery unavailable",
+      );
+      expect(localStorage.getItem(recoveryKey)).toContain("stale local edit");
+      await act(async () => fireEvent.click(draft));
+      expect(recoveryResponses).toHaveLength(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+    }
+    const recovered = writes.at(-1)!;
+    recoveryResponses.at(-1)!(
+      Response.json({
+        data: { ...recovered, id: recovered.path.split("/").pop(), version: 1 },
+      }),
+    );
+    expect(await screen.findByLabelText("source")).toHaveValue(
+      "stale local edit",
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Tus cambios se recuperaron en un proyecto separado.",
+    );
+    expect(localStorage.getItem(recoveryKey)).toBeNull();
+    expect(writes).toHaveLength(retry ? 2 : 1);
+    expect(recovered.path).not.toContain(id);
+    expect(recovered.version).toBe(0);
+  },
+);
 it("does not load another account’s browser recovery", async () => {
   localStorage.setItem(
     `savia:plugin-project:bob:1:${id}`,

@@ -143,6 +143,9 @@ it("round trips numeric, null, and legacy string cursor values", async () => {
   const scope = await paginationScope(["tenant", "items"]);
   for (const value of ["old-token-value", 17.25, null] as const) {
     const token = encodeRecordCursor(scope, value, "row-id");
-    expect(decodeRecordCursor(token, scope)).toEqual({ value, id: "row-id" });
+    expect(token && decodeRecordCursor(token, scope)).toEqual({
+      value,
+      id: "row-id",
+    });
   }
 });

@@ -90,6 +90,8 @@ worker is no longer part of the scheduler.
   The unread count refreshes on realtime events and when a stale count is
   shown as the menu opens. The menu shows loading and retry states while
   the count is unavailable.
+  Each notification request times out after 15 seconds, including while
+  reading the response. The inbox offers **Retry** if loading fails.
   Collection follow controls offer a retry if their initial state cannot be
   loaded.
   Follow requests require an existing collection in the current workspace.

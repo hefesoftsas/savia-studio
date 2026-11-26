@@ -42,6 +42,22 @@ export default defineConfig({
   plugins: [
     compactBrandIcons(),
     {
+      name: "savia-configurable-lucide-icons",
+      enforce: "pre",
+      resolveId(source, importer) {
+        const lookupQuery = "?savia-configurable-icon";
+        if (
+          !importer?.endsWith(lookupQuery) ||
+          !/^\.\/[\w-]+\.mjs$/.test(source)
+        )
+          return null;
+        // Resolve legacy aliases to the same lazy module as their canonical IDs.
+        return this.resolve(`${source}${lookupQuery}`, importer, {
+          skipSelf: true,
+        });
+      },
+    },
+    {
       name: "companion-download-catalog",
       configureServer(server) {
         server.middlewares.use(
@@ -92,7 +108,7 @@ export default defineConfig({
           ...PUBLIC_VISITOR_ROUTE_DENYLIST,
           /^\/s\/p(?:\/|\?|$)/,
           /^\/register(?:\/|\?|$)/,
-          /^\/office(?:\/|$)/,
+          /^\/office(?:\/|\?|$)/,
           /^\/plugin-editor(?:\.html)?(?:\/|\?|$)/,
           /^\/flows-ui(?:\/|\?|$)/,
         ],

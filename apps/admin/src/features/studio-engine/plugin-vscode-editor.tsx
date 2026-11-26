@@ -32,6 +32,11 @@ function isCompletionRequest(value: unknown): value is CompletionRequest {
   );
 }
 
+function abortCompletions(pending: Map<string, AbortController>) {
+  for (const controller of pending.values()) controller.abort();
+  pending.clear();
+}
+
 export function PluginVscodeEditor({
   projectId = "draft",
   runtimeUrl = import.meta.env.VITE_PLUGIN_EDITOR_RUNTIME_URL,
@@ -72,7 +77,11 @@ export function PluginVscodeEditor({
   onChange(path: string, value: string): void;
   onSearch(): void;
   onError(message: string): void;
-  fetchCompletion?: (prefix: string, suffix: string) => Promise<string | null>;
+  fetchCompletion?: (
+    prefix: string,
+    suffix: string,
+    signal: AbortSignal,
+  ) => Promise<string | null>;
 }) {
   const session = useMemo(
     () => ({
@@ -104,6 +113,7 @@ export function PluginVscodeEditor({
   const pendingEdits = useRef(
     new Map<string, { sequence: number; value: string }>(),
   );
+  const pendingCompletions = useRef(new Map<string, AbortController>());
   const latest = useRef({
     files,
     activeFile,
@@ -142,7 +152,7 @@ export function PluginVscodeEditor({
     setReady(false);
     pendingEdits.current.clear();
     loadedExtensions.current.clear();
-    let completionsInFlight = 0;
+    const completions = pendingCompletions.current;
     let sessionActive = true;
     const listener = (event: MessageEvent) => {
       const data = acceptEditorEnvelope(
@@ -152,7 +162,22 @@ export function PluginVscodeEditor({
         session,
       );
       if (!data) return;
-      const ack = data as { type?: unknown; ackId?: unknown; error?: unknown };
+      const ack = data as {
+        type?: unknown;
+        ackId?: unknown;
+        error?: unknown;
+        requestId?: unknown;
+      };
+      if (
+        ack.type === "savia-editor-completion-cancel" &&
+        typeof ack.requestId === "string" &&
+        ack.requestId.length <= 80
+      ) {
+        const controller = completions.get(ack.requestId);
+        completions.delete(ack.requestId);
+        controller?.abort();
+        return;
+      }
       if (
         ack.type === "savia-editor-package-ack" &&
         typeof ack.ackId === "string" &&
@@ -172,10 +197,12 @@ export function PluginVscodeEditor({
         if (
           data.prefix.length > 100 * 1024 ||
           data.suffix.length > 100 * 1024 ||
-          completionsInFlight >= 4
+          completions.size >= 4 ||
+          completions.has(data.requestId)
         )
           return;
-        completionsInFlight += 1;
+        const controller = new AbortController();
+        completions.set(data.requestId, controller);
         const requestFrame = event.source as Window;
         const current = latest.current;
         const canComplete =
@@ -186,7 +213,11 @@ export function PluginVscodeEditor({
           let value: string | null = null;
           if (canComplete) {
             try {
-              value = await current.fetchCompletion!(data.prefix, data.suffix);
+              value = await current.fetchCompletion!(
+                data.prefix,
+                data.suffix,
+                controller.signal,
+              );
             } catch {
               value = null;
             }
@@ -194,7 +225,8 @@ export function PluginVscodeEditor({
           const latestState = latest.current;
           if (latestState.readOnly || latestState.activeFile !== "entry.tsx")
             value = null;
-          completionsInFlight -= 1;
+          if (completions.get(data.requestId) !== controller) return;
+          completions.delete(data.requestId);
           if (!sessionActive || requestFrame !== frame.current?.contentWindow)
             return;
           requestFrame.postMessage(
@@ -244,12 +276,18 @@ export function PluginVscodeEditor({
     window.addEventListener("message", listener);
     return () => {
       sessionActive = false;
+      abortCompletions(completions);
       window.removeEventListener("message", listener);
       for (const pending of packageAcks.current.values())
         pending.reject(new Error("Editor session ended."));
       packageAcks.current.clear();
     };
   }, [session, frameOrigin]);
+
+  useEffect(() => {
+    if (readOnly || activeFile !== "entry.tsx")
+      abortCompletions(pendingCompletions.current);
+  }, [activeFile, readOnly]);
 
   const acknowledgements: Record<string, number> = {};
   for (const [path, pending] of pendingEdits.current) {

@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useMessages } from "@/i18n/core";
 import { bookingMessages } from "./booking-messages";
 import { bookingSetupMessages } from "./booking-setup-messages";
+import { validWeeklyHours } from "./booking-schedule";
 import type {
   Candidate,
   Period,
@@ -49,27 +50,6 @@ function newId() {
     return (char === "x" ? value : (value & 3) | 8).toString(16);
   });
 }
-function validWeekly(weekly: Period[]) {
-  const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
-  return days.every((day) => {
-    const periods = weekly
-      .filter((p) => p.day === day)
-      .sort((a, b) => a.start.localeCompare(b.start));
-    return (
-      periods.length <= 4 &&
-      periods.every(
-        (p, i) =>
-          time.test(p.start) &&
-          time.test(p.end) &&
-          Number(p.start.slice(3)) % 5 === 0 &&
-          Number(p.end.slice(3)) % 5 === 0 &&
-          p.end > p.start &&
-          (!i || periods[i - 1].end <= p.start),
-      )
-    );
-  });
-}
-
 export function WeeklyHoursEditor({
   value,
   onChange,
@@ -269,7 +249,10 @@ export function BookingSetupWizard({
       )
     )
       return w("Name each service and use valid durations.");
-    if (at === 3 && settings.professionals.some((p) => !validWeekly(p.weekly)))
+    if (
+      at === 3 &&
+      settings.professionals.some((p) => !validWeeklyHours(p.weekly, 4))
+    )
       return w(
         "Check weekly hours. Use five-minute increments and non-overlapping periods.",
       );

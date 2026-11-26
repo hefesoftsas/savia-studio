@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { RouteLoading } from "@/components/admin/route-loading";
 import { Button } from "@/components/ui/button";
 import { useAppServices } from "@/features/assistant/assistant-context";
 import { createEmbeddedTransport } from "@/api/embedded-transport";
 import { useAppLocale } from "@/i18n/core";
 import { apiFetch } from "./api";
 import { getStudioRuntime } from "./runtime";
-import PluginIde from "./plugin-ide";
-import { createPluginProject } from "./plugin-ide-project";
+import { createPluginProject } from "@savia/plugin-authoring/project";
+import { findMissingPluginSourceAssets } from "@savia/plugin-authoring/source-compiler";
 import {
   PluginProjectSession,
   type ProjectDraft,
@@ -15,7 +16,9 @@ import {
 } from "./plugin-project-session";
 import { pluginProjectSaveSchema } from "@savia/studio-shared/plugin-projects";
 import { compareSolutionVersions } from "@savia/studio-shared/solution-package";
-import { findMissingPluginSourceAssets } from "./plugin-source-compiler";
+
+const PluginIde = lazy(() => import("./plugin-ide"));
+
 type Project = RecoveryDraft & { id: string; updatedAt: string };
 type StoreCatalogItem = { id: string; label: string; version: string };
 
@@ -99,7 +102,7 @@ export default function PluginProjectWorkspace({
   const storeCatalogRequest = useRef(0);
   const key = (id: string) =>
     `savia:plugin-project:${encodeURIComponent(owner.current)}:${tenantId}:${id}`;
-  function activate(value: Project) {
+  async function activate(value: Project): Promise<void> {
     session.current?.dispose();
     let recovery: RecoveryDraft | undefined;
     try {
@@ -109,16 +112,19 @@ export default function PluginProjectWorkspace({
       /* Invalid recovery is never executed. */
     }
     if (recovery && recovery.version !== value.version) {
-      setError(
-        tr(
-          "Hay una copia local pendiente. Se recuperará como proyecto separado.",
-          "Pending local changes will be recovered as a separate project.",
-          "As alterações locais serão recuperadas em um projeto separado.",
-        ),
-      );
-      void create(recovery)
-        .then(() => localStorage.removeItem(key(value.id)))
-        .catch(fail);
+      setError("");
+      setNotice("");
+      await create(recovery);
+      localStorage.removeItem(key(value.id));
+      if (mounted.current) {
+        setNotice(
+          tr(
+            "Tus cambios se recuperaron en un proyecto separado.",
+            "Your changes were recovered in a separate project.",
+            "Suas alterações foram recuperadas em um projeto separado.",
+          ),
+        );
+      }
       return;
     }
     const draft: ProjectDraft = recovery ?? value;
@@ -263,7 +269,7 @@ export default function PluginProjectWorkspace({
       "PUT",
       { ...draft, version: 0 },
     );
-    if (mounted.current) activate(result.data);
+    if (mounted.current) await activate(result.data);
   }
   async function importFromStore(sourceId: string, sourceVersion: string) {
     const response = await request<{
@@ -426,19 +432,28 @@ export default function PluginProjectWorkspace({
     setProjects((values) => values.filter((item) => item.id !== id));
   }
   async function close() {
-    try {
-      await session.current?.flush();
-      const refreshed = await request<{ data: typeof projects }>(
-        "/plugin-projects",
-      );
-      setProjects(refreshed.data);
-      session.current?.dispose();
-      session.current = null;
-      setProject(null);
-      setStatus({ state: "saved" });
-    } catch (reason) {
-      fail(reason);
-    }
+    const closing = session.current;
+    if (!closing) return;
+    const isCurrent = () => mounted.current && session.current === closing;
+    await action(async () => {
+      while (isCurrent()) {
+        await closing.flush();
+        if (!isCurrent()) return;
+        const version = closing.savedVersion;
+        const refreshed = await request<{ data: typeof projects }>(
+          "/plugin-projects",
+        );
+        if (!isCurrent()) return;
+        if (!closing.isSaved || closing.savedVersion !== version) continue;
+
+        closing.dispose();
+        session.current = null;
+        setProjects(refreshed.data);
+        setProject(null);
+        setStatus({ state: "saved" });
+        return;
+      }
+    });
   }
   const groupedStoreItems = groupStoreVersions(storeItems);
   return (
@@ -513,49 +528,63 @@ export default function PluginProjectWorkspace({
             </div>
           )}
           <div className="min-h-0 min-w-0 flex-1" inert={acting}>
-            <PluginIde
-              key={project.id}
-              tenantId={tenantId}
-              initialFiles={project.files}
-              initialHistory={project.history}
-              projectId={project.id}
-              initialInstalledEditorExtensions={
-                project.installedEditorExtensions
+            <Suspense
+              fallback={
+                <RouteLoading
+                  compact
+                  className="p-4"
+                  label={tr(
+                    "Cargando editor…",
+                    "Loading editor…",
+                    "Carregando editor…",
+                  )}
+                />
               }
-              initialEditorExtensions={project.editorExtensions}
-              backLabel={tr(
-                "Volver a proyectos",
-                "Back to plugin projects",
-                "Voltar aos projetos de plugins",
-              )}
-              saveStatus={
-                <span data-save-state={status.state}>
-                  {status.state === "saved"
-                    ? tr("Guardado", "Saved", "Salvo")
-                    : status.state === "error"
-                      ? tr(
-                          "No se pudo guardar",
-                          "Could not save",
-                          "Não foi possível salvar",
-                        )
-                      : tr("Guardando…", "Saving…", "Salvando…")}
-                </span>
-              }
-              onInstalledExtensionsChange={async (draft) => {
-                latest.current = draft;
-                if (!session.current)
-                  throw new Error("Project session is unavailable.");
-                session.current.update(draft);
-                await session.current.flush();
-              }}
-              onDraftChange={(draft) => {
-                latest.current = draft;
-                session.current?.update(draft);
-              }}
-              canPublishShared={canPublishShared}
-              onClose={() => void close()}
-              onPublished={handlePublished}
-            />
+            >
+              <PluginIde
+                key={project.id}
+                tenantId={tenantId}
+                initialFiles={project.files}
+                initialHistory={project.history}
+                projectId={project.id}
+                initialInstalledEditorExtensions={
+                  project.installedEditorExtensions
+                }
+                initialEditorExtensions={project.editorExtensions}
+                backLabel={tr(
+                  "Volver a proyectos",
+                  "Back to plugin projects",
+                  "Voltar aos projetos de plugins",
+                )}
+                saveStatus={
+                  <span data-save-state={status.state}>
+                    {status.state === "saved"
+                      ? tr("Guardado", "Saved", "Salvo")
+                      : status.state === "error"
+                        ? tr(
+                            "No se pudo guardar",
+                            "Could not save",
+                            "Não foi possível salvar",
+                          )
+                        : tr("Guardando…", "Saving…", "Salvando…")}
+                  </span>
+                }
+                onInstalledExtensionsChange={async (draft) => {
+                  latest.current = draft;
+                  if (!session.current)
+                    throw new Error("Project session is unavailable.");
+                  session.current.update(draft);
+                  await session.current.flush();
+                }}
+                onDraftChange={(draft) => {
+                  latest.current = draft;
+                  session.current?.update(draft);
+                }}
+                canPublishShared={canPublishShared}
+                onClose={() => void close()}
+                onPublished={handlePublished}
+              />
+            </Suspense>
           </div>
         </section>
       ) : (

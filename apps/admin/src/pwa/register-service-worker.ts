@@ -1,6 +1,14 @@
+import {
+  getOnlineStatus,
+  verifyOnlineStatus,
+} from "../offline/connectivity-status";
 import { PUBLIC_VISITOR_ROUTE_DENYLIST } from "./deployment-recovery";
 
-const observedRegistrations = new WeakSet<ServiceWorkerRegistration>();
+const pendingRegistrations = new WeakMap<
+  ServiceWorkerContainer,
+  Promise<ServiceWorkerRegistration>
+>();
+const lastUpdateCheck = new WeakMap<ServiceWorkerRegistration, number>();
 const retiringControllers = new WeakSet<ServiceWorker>();
 const PUBLIC_WORKER_RETIRE_DEADLINE_MS = 5_000;
 
@@ -86,36 +94,55 @@ export async function retireAdministrativeWorkerForPublicRoute(
   }
 }
 
-/**
- * Registers the PWA Service Worker in both development and production environments.
- */
-export function registerPwaServiceWorker(): void {
+function registerBrowserWorker(workers: ServiceWorkerContainer) {
+  const pending = pendingRegistrations.get(workers);
+  if (pending) return pending;
+  const swUrl = import.meta.env.DEV ? "/dev-sw.js?dev-sw" : "/sw.js";
+  const request = workers.register(swUrl, {
+    scope: "/",
+    updateViaCache: "none",
+  });
+  pendingRegistrations.set(workers, request);
+  const clear = () => pendingRegistrations.delete(workers);
+  void request.then(clear, clear);
+  return request;
+}
+
+/** Register the worker and observe updates while the private app is mounted. */
+export function registerPwaServiceWorker(): (() => void) | undefined {
   if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
     return;
   }
 
+  const workers = navigator.serviceWorker;
+  const observer = new AbortController();
+  const signal = observer.signal;
   const register = () => {
-    const swUrl = import.meta.env.DEV ? "/dev-sw.js?dev-sw" : "/sw.js";
-
-    navigator.serviceWorker
-      .register(swUrl, { scope: "/", updateViaCache: "none" })
+    void registerBrowserWorker(workers)
       .then((registration) => {
-        if (!observedRegistrations.has(registration)) {
-          observedRegistrations.add(registration);
-          let lastCheck = -Infinity;
-          const check = () => {
+        if (signal.aborted) return;
+        const canCheck = () =>
+          !signal.aborted &&
+          document.visibilityState === "visible" &&
+          Date.now() - (lastUpdateCheck.get(registration) ?? -Infinity) >=
+            60_000;
+        const check = async () => {
+          if (!canCheck()) return;
+          if (!getOnlineStatus()) {
+            // Let the shared connectivity listeners process this event first.
+            await Promise.resolve();
             if (
-              document.visibilityState !== "visible" ||
-              navigator.onLine === false ||
-              Date.now() - lastCheck < 60_000
+              !canCheck() ||
+              !(await verifyOnlineStatus({ background: true, signal }))
             )
               return;
-            lastCheck = Date.now();
-            void registration.update().catch(() => undefined);
-          };
-          window.addEventListener("online", check);
-          document.addEventListener("visibilitychange", check);
-        }
+          }
+          if (!canCheck()) return;
+          lastUpdateCheck.set(registration, Date.now());
+          void registration.update().catch(() => undefined);
+        };
+        window.addEventListener("online", check, { signal });
+        document.addEventListener("visibilitychange", check, { signal });
         if (import.meta.env.DEV) {
           console.debug(
             "[PWA] Service worker registered successfully:",
@@ -124,11 +151,12 @@ export function registerPwaServiceWorker(): void {
         }
       })
       .catch((error: unknown) => {
-        if (import.meta.env.DEV) {
+        if (!signal.aborted && import.meta.env.DEV) {
           console.debug("[PWA] Service worker registration notice:", error);
         }
       });
   };
   if (document.readyState === "complete") register();
-  else window.addEventListener("load", register, { once: true });
+  else window.addEventListener("load", register, { once: true, signal });
+  return () => observer.abort();
 }

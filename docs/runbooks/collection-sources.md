@@ -24,6 +24,16 @@ Las conexiones JSON:API admiten únicamente destinos públicos HTTPS y recursos 
 
 ## Uso y alcance actual
 
+When a linked collection omits its total, the list marks the current page and
+shows the range of records returned on that page. The source's pagination
+metadata determines whether the next page is available.
+An empty page with a continuation keeps the current position and allows the
+user to advance. The tracked `ra-core` patch prevents the list controller from
+resetting to page one in that case.
+
+Linked collections open in the table view. Older saved pipeline views still
+apply their supported table settings, with stage filters omitted.
+
 En CRM, selecciona Plataforma o un dominio independiente y abre Integraciones OpenAPI → Fuentes y colecciones. Se puede vincular una colección del catálogo existente, registrar una fuente JSON:API y declarar sus campos, relaciones y operaciones. El identificador de la pantalla se propone a partir de la colección o recurso y reserva el siguiente sufijo disponible; sigue siendo editable. La administración permite renovar o quitar el token, eliminar fuentes sin vínculos y desvincular pantallas sin borrar registros del origen.
 
 Para una fuente JSON:API, el administrador indica la ruta fija del recurso y puede usar **Analizar recurso** antes de vincularlo. JSON:API no define un catálogo universal de recursos, por lo que la URL base no permite enumerarlos automáticamente. El análisis consulta exactamente una primera página de un registro, devuelve solo campos, relaciones, tipo y metadatos de paginación, y deja ese JSON editable. No devuelve valores de la muestra ni credenciales, no persiste la muestra y conserva los límites de HTTPS público, DNS, redirecciones, 10 segundos y 1 MB del adaptador remoto.

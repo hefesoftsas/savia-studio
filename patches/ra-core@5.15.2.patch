@@ -1,0 +1,60 @@
+diff --git a/dist/controller/list/useListController.cjs b/dist/controller/list/useListController.cjs
+index eb94ba4015ccf17b7cc3fad4035402b0efbc9ca3..b7f9490815cf5409687c34089e77e46de4d5bd0d 100644
+--- a/dist/controller/list/useListController.cjs
++++ b/dist/controller/list/useListController.cjs
+@@ -101,6 +101,7 @@ const useListController = (props = {}) => {
+         if (query.page <= 0 ||
+             (!isFetching &&
+                 query.page > 1 &&
++                pageInfo?.hasNextPage !== true &&
+                 (data == null || data?.length === 0))) {
+             // Query for a page that doesn't exist, set page to 1
+             queryModifiers.setPage(1);
+@@ -120,6 +121,7 @@ const useListController = (props = {}) => {
+         isFetching,
+         query.page,
+         query.perPage,
++        pageInfo?.hasNextPage,
+         data,
+         queryModifiers,
+         total,
+diff --git a/dist/controller/list/useListController.js b/dist/controller/list/useListController.js
+index d91a95b0ebd823465ae196f328304f8aa38616ae..ee4172127a9cf995be84be428f9142c8a49bd7ee 100644
+--- a/dist/controller/list/useListController.js
++++ b/dist/controller/list/useListController.js
+@@ -98,6 +98,7 @@ export const useListController = (props = {}) => {
+         if (query.page <= 0 ||
+             (!isFetching &&
+                 query.page > 1 &&
++                pageInfo?.hasNextPage !== true &&
+                 (data == null || data?.length === 0))) {
+             // Query for a page that doesn't exist, set page to 1
+             queryModifiers.setPage(1);
+@@ -117,6 +118,7 @@ export const useListController = (props = {}) => {
+         isFetching,
+         query.page,
+         query.perPage,
++        pageInfo?.hasNextPage,
+         data,
+         queryModifiers,
+         total,
+diff --git a/src/controller/list/useListController.ts b/src/controller/list/useListController.ts
+index 0b8968125245cc234edaf19dda38b841925e927a..f7df0e495dbc60b69ce0089431b2d12106d10823 100644
+--- a/src/controller/list/useListController.ts
++++ b/src/controller/list/useListController.ts
+@@ -170,6 +170,7 @@ export const useListController = <
+             query.page <= 0 ||
+             (!isFetching &&
+                 query.page > 1 &&
++                pageInfo?.hasNextPage !== true &&
+                 (data == null || data?.length === 0))
+         ) {
+             // Query for a page that doesn't exist, set page to 1
+@@ -190,6 +191,7 @@ export const useListController = <
+         isFetching,
+         query.page,
+         query.perPage,
++        pageInfo?.hasNextPage,
+         data,
+         queryModifiers,
+         total,

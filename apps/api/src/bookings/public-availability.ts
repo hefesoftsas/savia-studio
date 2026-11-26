@@ -10,7 +10,7 @@ import {
   type BookingService,
 } from "./contracts";
 import { assertBookingLinkSelection } from "./public-links";
-import { dateInZone, slotsForDate } from "./domain";
+import { dateInZone, overlapsBusy, slotsForDate } from "./domain";
 export type PublicAvailabilityDependencies = {
   now: () => number;
   loadBusy: (
@@ -91,21 +91,18 @@ export async function getBookingAvailability(
     businessTimeZone: settings.timeZone,
     days,
   };
-  // ±36h covers the full range of IANA offsets and adjacent business dates;
-  // trailing duration/buffer is included when querying occupied intervals.
+  // ±36h covers the full range of IANA offsets and adjacent business dates.
   const from = new Date(first - 36 * 3600000).toISOString();
-  const to = new Date(
-    last +
-      36 * 3600000 +
-      (service.durationMinutes + service.bufferMinutes) * 60000,
-  ).toISOString();
+  const to = new Date(last + 36 * 3600000).toISOString();
   if (
     Date.parse(to) < now + settings.leadMinutes * 60000 ||
     Date.parse(from) > now + settings.horizonDays * day
   )
     return output;
-  const busy = await deps.loadBusy(professional.principalId, from, to);
   const buckets = new Map(days.map((d) => [d.date, d.slots]));
+  const buffer = service.bufferMinutes * 60000;
+  let firstStart = Infinity;
+  let lastOccupiedEnd = -Infinity;
   const businessStart = Date.parse(
     dateInZone(from, settings.timeZone) + "T00:00:00Z",
   );
@@ -118,13 +115,37 @@ export async function getBookingAvailability(
       professional,
       service,
       new Date(date).toISOString().slice(0, 10),
-      busy,
+      [],
       now,
     )) {
-      buckets.get(dateInZone(slot.startsAt, displayTimeZone))?.push(slot);
+      const bucket = buckets.get(dateInZone(slot.startsAt, displayTimeZone));
+      if (!bucket) continue;
+      bucket.push(slot);
+      firstStart = Math.min(firstStart, Date.parse(slot.startsAt));
+      lastOccupiedEnd = Math.max(
+        lastOccupiedEnd,
+        Date.parse(slot.endsAt) + buffer,
+      );
     }
   }
-  for (const bucket of days)
-    bucket.slots.sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  if (!Number.isFinite(firstStart)) return output;
+
+  const busy = await deps.loadBusy(
+    professional.principalId,
+    new Date(firstStart).toISOString(),
+    new Date(lastOccupiedEnd).toISOString(),
+  );
+  for (const bucket of days) {
+    bucket.slots = bucket.slots
+      .filter(
+        (slot) =>
+          !overlapsBusy(
+            Date.parse(slot.startsAt),
+            Date.parse(slot.endsAt) + buffer,
+            busy,
+          ),
+      )
+      .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  }
   return output;
 }

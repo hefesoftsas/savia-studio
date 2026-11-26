@@ -1,10 +1,14 @@
+import { formatRetryTime } from "@/api/retry-after";
 import { Button } from "@/components/ui/button";
 import { useAppLocale, useMessages, intlLocale } from "@/i18n/core";
 import { DayPicker } from "react-day-picker";
 import { enUS, es, ptBR } from "react-day-picker/locale";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { bookingMessages } from "./booking-messages";
-import { publicBookingRequest } from "./public-booking-request";
+import {
+  publicBookingRequest,
+  type PublicBookingApiError,
+} from "./public-booking-request";
 import { publicBookingWizardMessages } from "./public-booking-wizard-messages";
 import type { BookingSelection, PublicBookingSlot } from "./booking-types";
 
@@ -30,6 +34,7 @@ type Props = {
   value: BookingSelection | undefined;
   onChange(selection: BookingSelection | undefined): void;
   onReadyChange?(ready: boolean): void;
+  onAvailabilityUnavailable?(): void;
   refreshKey?: number;
   hideHeading?: boolean;
   excludedStartAt?: string;
@@ -116,6 +121,7 @@ export function PublicBookingAvailability({
   value,
   onChange,
   onReadyChange,
+  onAvailabilityUnavailable,
   refreshKey = 0,
   hideHeading = false,
   excludedStartAt,
@@ -148,9 +154,12 @@ export function PublicBookingAvailability({
   );
   const [days, setDays] = useState<AvailabilityDay[]>([]);
   const [loading, setLoading] = useState(false);
-  const [requestError, setRequestError] = useState(false);
+  const [requestError, setRequestError] =
+    useState<PublicBookingApiError | null>(null);
+  const retryTime = formatRetryTime(requestError, intlLocale(locale));
   const [attempt, setAttempt] = useState(0);
   const requestId = useRef(0);
+  const reportUnavailable = useEffectEvent(() => onAvailabilityUnavailable?.());
   const excludedStart = excludedStartAt ? Date.parse(excludedStartAt) : null;
 
   const firstOfMonth = dayString(visibleMonth);
@@ -170,7 +179,7 @@ export function PublicBookingAvailability({
     const controller = new AbortController();
     const id = ++requestId.current;
     setLoading(true);
-    setRequestError(false);
+    setRequestError(null);
     setDays([]);
     const query = new URLSearchParams({
       serviceId,
@@ -198,7 +207,7 @@ export function PublicBookingAvailability({
                 ),
               }));
         setDays(bookableDays);
-        setRequestError(false);
+        setRequestError(null);
         if (
           !bookableDays.some(
             ({ date, slots }) => date === selectedDay && slots.length,
@@ -223,10 +232,12 @@ export function PublicBookingAvailability({
         }
         onReadyChange?.(true);
       })
-      .catch(() => {
+      .catch((error: PublicBookingApiError | undefined) => {
         if (!controller.signal.aborted && requestId.current === id) {
-          setRequestError(true);
+          setRequestError(error ?? new Error("Availability request failed"));
           setDays([]);
+          if (error?.status === 404 || error?.status === 409)
+            reportUnavailable();
         }
       })
       .finally(() => {
@@ -419,9 +430,15 @@ export function PublicBookingAvailability({
           {!loading && requestError && (
             <div className="grid gap-3 text-sm">
               <p role="alert" className="text-destructive">
-                {t(
-                  "Available times could not be loaded. Check your connection and retry.",
-                )}
+                {requestError.status === 429
+                  ? retryTime
+                    ? t("Too many booking requests. Try again after %{time}.", {
+                        time: retryTime,
+                      })
+                    : t("Too many booking requests. Try again shortly.")
+                  : t(
+                      "Available times could not be loaded. Check your connection and retry.",
+                    )}
               </p>
               <Button
                 type="button"

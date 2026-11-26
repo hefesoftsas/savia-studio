@@ -47,6 +47,19 @@ Desde la barra de administración de pantallas o el diálogo de nueva pantalla s
 
 Verificación: pruebas con nombres arbitrarios y pantallas ocultas, navegación contextual, relaciones, filtro de auditoría en D1, TypeScript y revisión visual en navegador.
 
+When a configurable Lucide or brand icon changes, the preview shows an empty
+slot until the newly selected icon is available.
+Configurable Lucide icons load on demand. Legacy aliases share the same lazy
+module as their canonical icon IDs.
+
+If a pipeline column loses its current page after a card moves, it opens the
+last available page. A column with no remaining cards returns to page one.
+Changing the board's search, filters or sort starts each column at page one.
+Dropping a card into its current column leaves the record version unchanged.
+Moving a card to another column refreshes the affected collection's records
+and summaries. If saving reports a conflict or a connection error, Studio
+rechecks both the source and destination columns.
+
 ## Addressable navigation tabs
 
 - `/studio?tenantId=<tenantId>&view=operations&tab=workflows|automations|reports|tasks|import` opens the corresponding operations tab. Missing or invalid tabs fall back to `tasks`.

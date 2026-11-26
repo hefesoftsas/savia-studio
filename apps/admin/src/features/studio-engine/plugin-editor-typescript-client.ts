@@ -19,69 +19,99 @@ type PendingRequest = {
   resolve: (entries: PluginEditorCompletionEntry[]) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+  removeAbortListener?: () => void;
 };
 
+type WorkerSession = { instance: Worker; hasResponded: boolean };
+
 const requestTimeoutMs = 5_000;
+const startupTimeoutMs = 20_000;
 const pending = new Map<number, PendingRequest>();
-let worker: Worker | undefined;
+let activeWorker: WorkerSession | undefined;
 let nextRequestId = 0;
 
-function rejectPending(error: Error) {
-  for (const request of pending.values()) {
-    clearTimeout(request.timeout);
-    request.reject(error);
-  }
-  pending.clear();
+function takePending(id: number) {
+  const request = pending.get(id);
+  if (!request) return;
+  pending.delete(id);
+  clearTimeout(request.timeout);
+  request.removeAbortListener?.();
+  return request;
 }
 
-function ensureWorker() {
-  if (worker) return worker;
-  const instance = new PluginEditorTypeScriptWorker();
-  instance.addEventListener("message", (event: MessageEvent<Response>) => {
-    const response = event.data;
-    const request = pending.get(response.id);
-    if (!request) return;
-    pending.delete(response.id);
-    clearTimeout(request.timeout);
-    if ("error" in response) request.reject(new Error(response.error));
-    else request.resolve(response.entries);
+function retireWorker(session: WorkerSession, error: Error) {
+  if (activeWorker !== session) return;
+  activeWorker = undefined;
+  session.instance.terminate();
+  for (const id of pending.keys()) takePending(id)?.reject(error);
+}
+
+function ensureWorker(): WorkerSession {
+  if (activeWorker) return activeWorker;
+  const session: WorkerSession = {
+    instance: new PluginEditorTypeScriptWorker(),
+    hasResponded: false,
+  };
+  session.instance.addEventListener(
+    "message",
+    (event: MessageEvent<Response>) => {
+      if (activeWorker !== session) return;
+      session.hasResponded = true;
+      const response = event.data;
+      const request = takePending(response.id);
+      if (!request) return;
+      if ("error" in response) request.reject(new Error(response.error));
+      else request.resolve(response.entries);
+    },
+  );
+  session.instance.addEventListener("error", () => {
+    retireWorker(session, new Error("TypeScript completion worker failed"));
   });
-  instance.addEventListener("error", () => {
-    rejectPending(new Error("TypeScript completion worker failed"));
-    instance.terminate();
-    if (worker === instance) worker = undefined;
-  });
-  worker = instance;
-  return instance;
+  activeWorker = session;
+  return session;
 }
 
 export function complete(
   files: PluginEditorFileMap,
   path: string,
   offset: number,
+  signal?: AbortSignal,
 ): Promise<PluginEditorCompletionEntry[]> {
+  if (signal?.aborted) return Promise.resolve([]);
   const id = ++nextRequestId;
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error("TypeScript completion timed out"));
-    }, requestTimeoutMs);
-    pending.set(id, { resolve, reject, timeout });
     try {
+      const session = ensureWorker();
+      const timeout = setTimeout(
+        () =>
+          retireWorker(session, new Error("TypeScript completion timed out")),
+        session.hasResponded ? requestTimeoutMs : startupTimeoutMs,
+      );
+      const cancel = () => takePending(id)?.resolve([]);
+      pending.set(id, {
+        resolve,
+        reject,
+        timeout,
+        removeAbortListener: signal
+          ? () => signal.removeEventListener("abort", cancel)
+          : undefined,
+      });
+      signal?.addEventListener("abort", cancel, { once: true });
       const request: Request = { id, files, path, offset };
-      ensureWorker().postMessage(request);
+      session.instance.postMessage(request);
     } catch (error) {
-      pending.delete(id);
-      clearTimeout(timeout);
+      takePending(id);
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
 }
 
 export function disposePluginEditorTypeScriptClient() {
-  worker?.terminate();
-  worker = undefined;
-  rejectPending(new Error("TypeScript completion worker was disposed"));
+  if (activeWorker)
+    retireWorker(
+      activeWorker,
+      new Error("TypeScript completion worker was disposed"),
+    );
 }
 
 export class PluginEditorTypescriptClient {

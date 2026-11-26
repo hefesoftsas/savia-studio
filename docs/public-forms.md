@@ -59,11 +59,20 @@ than the latest ZIP upload or compiled extension registry. Changing that
 configuration requires republishing. Visitors cannot choose connections, actions,
 execution mode, or provider flows. They enter vehicle and applicant information
 manually; private vehicle lookup endpoints remain protected.
+If the plate lookup takes more than ten seconds, the wizard unlocks the vehicle
+fields for manual entry and offers another lookup without clearing the plate.
+Repeated lookups refresh autofilled values and preserve manual edits. Changing
+the plate clears values still marked as autofilled, even after a partial result.
+Vehicle currency fields accept whole amounts with optional thousands grouping.
+Invalid signs and fractional values remain visible for correction.
 
 Quote links for `cotizador_por_pasos` render the public plugin wizard with the
 published product snapshot and three steps: vehicle, applicant and driver, and
-contact and quote. The birth date offers quick age presets mirroring the
-embedded wizard. The public experience omits authenticated history, CRM
+contact and quote. Age uses the entered calendar date and the visitor's local
+day. The quick age presets choose a birth year that matches the selected age.
+Pressing Enter in a form field validates and advances the current step. The
+quote is submitted only from the final step after verification.
+The public experience omits authenticated history, CRM
 records, provider configuration, and admin navigation; the private vehicle
 lookup endpoints stay protected and only the safe projection above is public.
 Changing quote settings or enabled products still invalidates the frozen
@@ -87,7 +96,12 @@ through the ZIP package.
 
 City fields offer DANE autocomplete through
 `GET /api/public/forms/:token/cities?search=`, scoped to the same quote link.
-Pressing Enter selects the first suggestion and the clear button resets the
+Only the latest search can update the suggestions, and timed-out searches
+leave the city code editable.
+Leaving the city control cancels the search. Choosing a suggestion returns
+focus to the city field.
+The arrow keys highlight a suggestion, Enter selects the highlighted result
+(or the first when none is highlighted), and the clear button resets the
 field. DANE codes are public reference data, so the endpoint returns a bounded list
 of code/city/department triples with no upstream internals and no provider
 cost. Applicant identity fields stay manual: looking up CRM records by
@@ -100,17 +114,17 @@ current submission: provider/product labels, premium, currency and supported cov
 labels. Coverage bullets come from the live provider breakdown when present;
 otherwise they fall back to the frozen plan catalog so each card still
 describes its policy (never quote numbers, raw responses, or customer data).
-Results render with the same shared comparator component as the embedded
-wizard (ranked cards, brand logos, plan badges, provider filter, compare-select
-up to four policies and the coverage comparison table), with retry actions, history,
-quote numbers and PDF export hidden by props. Visitors can print the
-results to PDF from the browser; the print stylesheet keeps only the reference
-and the quotes. While providers respond, the wizard shows a live waiting state
-with elapsed time instead of a bare spinner, and paints each finished
-provider through the same shared comparator as responses arrive: the browser polls the anonymous
-per-submission status endpoint every 3 seconds (well under the burst rate
-limit), which only exposes the same safe projection. Raw provider responses, credentials and customer identifiers are never
-returned. A single submission can call each enabled provider once, so its cost
+The public results list shows the provider and product, alongside the quoted
+amount in COP or the current status. Visitors can print the reference and
+results to PDF from the browser. Print output hides the language selector,
+cookie notice and action buttons. An invalid quote row is counted as
+unavailable and leaves the other results visible. While providers respond, the wizard shows
+elapsed time and any progress it receives from the anonymous per-submission
+status endpoint, checking about every five seconds while the tab is visible
+and the submission is pending. Links configured for acknowledgement only keep prices out
+of both the receipt and progress responses. Raw provider responses, credentials
+and customer identifiers are never returned. A single submission can call
+each enabled provider once, so its cost
 scales with the number of enabled products. Provider calls run with bounded
 concurrency (10 at a time) so the visitor wait stays flat as products grow. Daily budgets count submissions, not
 provider calls; start with a small budget for public quotations.
@@ -140,6 +154,10 @@ Missing configuration fails closed. Public-host deployments reject Turnstile tes
 keys; fake Siteverify responses are injected only by tests. Captcha validation uses
 Cloudflare's server-side verification, checks hostname, `public_submit` action and
 link identifier, and has a timeout. Browser-only captcha validation is insufficient.
+If verification fails to load or complete on a public form or quote wizard,
+**Retry verification** reloads the challenge and preserves the entered values.
+A new submission or a language change starts verification without showing the
+previous challenge's error.
 
 ## Local development
 
@@ -151,6 +169,9 @@ configuration applies. Preview and production therefore always fail closed when
 unconfigured. The public page reports `captchaProvider: "disabled"`, mounts no
 widget, and submits immediately. The admin Vite server proxies local `/s/` short
 links to the API so they resolve to the same public form as the canonical link.
+Distinct local submissions can share the development verification value and
+remain individually retryable. With verification enabled, a consumed challenge
+requires a fresh challenge for a new submission.
 Never set `SAVIA_DISABLE_CAPTCHA` outside local
 development.
 
@@ -163,6 +184,10 @@ so it can never pass as a real provider response. Never set
 `SAVIA_MOCK_QUOTES` outside local development.
 
 ## Security and reliability boundary
+
+The public page waits up to 15 seconds for the form definition, including the
+response body. Visitors can retry loading the same link after a connection or
+service failure. An expired or revoked link prompts them to request a new one.
 
 The public page loads independently of the administrative app: no session bootstrap,
 workspace replica, IndexedDB initialization, or administrative synchronization.
@@ -200,6 +225,13 @@ status (validation, provider, or policy messages) instead of a generic error;
 only unexpected failures stay a sanitized 503 with no provider details. The browser retains the submission identifier
 after an uncertain response and does not silently start a new request. Revocation
 blocks new reservations; it cannot undo provider calls already started.
+If a link is revoked or its workspace deactivated during verification, the
+request is rejected as unavailable without consuming a submission slot.
+An HTTP 408 also preserves the original submission identifier and values.
+Once a daily limit is reached, the API returns the next UTC midnight in
+`Retry-After`. The form shows the reset time in the visitor's browser time zone.
+Replay conflicts are identified separately from other HTTP 409 responses. If
+configuration changes invalidate a link, the form asks for a replacement link.
 
 Submission reservations and acknowledgements are retained to preserve deduplication.
 They contain hashes instead of raw IP addresses/captcha tokens, and no native form
@@ -240,8 +272,19 @@ The status endpoint includes the committed public receipt once a submission is
 complete. The client accepts that receipt even if the original POST is still
 waiting, and stops the duplicate request. A bounded POST wait retains the same
 submission identity for recovery. Status polling never executes provider flows.
-The final screen keeps the safe comparison already exposed by the public status
-endpoint when the receipt contains only a reference. Private record identifiers
+The POST deadline covers both the connection and the response body.
+A committed receipt is still available if the provider progress lookup fails.
+A recorded failure ends the waiting state and directs the visitor to the form
+owner before resubmission. The status response omits provider error details.
+A late POST response cannot replace the receipt recovered from status.
+After a lost submission response, the visible wizard checks the same
+submission a bounded number of times while it waits for a receipt, including
+after temporary failures in the status connection.
+Each status check times out after five seconds so a stalled response cannot
+prevent those recovery attempts.
+The final screen keeps completed provider results and failures already exposed
+by the public status endpoint when the receipt contains only a reference.
+Pending progress is hidden on the final screen. Private record identifiers
 and payloads remain unavailable. One outer progress indicator owns the waiting
 state; the embedded comparator does not duplicate it.
 

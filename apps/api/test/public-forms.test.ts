@@ -724,6 +724,69 @@ it("atomically caps concurrent submissions and replays only the original proof w
       .first("n"),
   ).toBe(1);
 });
+it.each(["link revoked", "workspace deactivated"])(
+  "keeps a submission unregistered when its %s during verification",
+  async (change) => {
+    const tenantId = change === "link revoked" ? 880041 : 880042;
+    let linkId = "";
+    const instance = app({
+      fetch: (async () => {
+        if (change === "link revoked") {
+          await env.DB.prepare(
+            "UPDATE public_forms SET revoked_at=? WHERE id=?",
+          )
+            .bind(new Date().toISOString(), linkId)
+            .run();
+        } else {
+          await env.DB.prepare("UPDATE tenants SET is_active=0 WHERE id=?")
+            .bind(tenantId)
+            .run();
+        }
+        return Response.json({
+          success: true,
+          hostname: "forms.savia.test",
+          action: "public_submit",
+          cdata: linkId,
+        });
+      }) as typeof fetch,
+    });
+    const link = await publish(instance, await object(undefined, tenantId), {
+      tenantId,
+    });
+    linkId = link.id;
+    const response = await submit(instance, link, { name: "One" });
+    expect(response.status).toBe(404);
+    expect(
+      await env.DB.prepare(
+        "SELECT count(*) n FROM public_form_submissions WHERE form_id=?",
+      )
+        .bind(link.id)
+        .first("n"),
+    ).toBe(0);
+  },
+);
+
+it("labels a replay conflict separately from other public form conflicts", async () => {
+  const instance = app();
+  const link = await publish(instance, await object());
+  const id = crypto.randomUUID();
+  const proof = "captcha-" + crypto.randomUUID();
+  expect(
+    (await submit(instance, link, { name: "One" }, id, proof)).status,
+  ).toBe(200);
+  const repeated = await submit(
+    instance,
+    link,
+    { name: "One" },
+    id,
+    "other-proof",
+  );
+  expect(repeated.status).toBe(409);
+  expect(await repeated.json()).toMatchObject({
+    error: { code: "PUBLIC_SUBMISSION_ALREADY_REGISTERED" },
+  });
+});
+
 it("fails closed for missing captcha configuration and incorrect challenge binding", async () => {
   const instance = app();
   const name = await object();
@@ -908,6 +971,12 @@ it("applies IP and tenant quotas durably even without the optional rate limiter"
     },
   );
   expect(response.status).toBe(429);
+  expect(response.headers.get("Retry-After")).toBe(
+    new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toUTCString(),
+  );
+  expect(await response.json()).toMatchObject({
+    error: { code: "PUBLIC_SUBMISSION_DAILY_LIMIT" },
+  });
   await env.DB.prepare(
     "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<1000) INSERT INTO public_form_submissions(form_id,submission_id,tenant_id,ip_hash,day,fingerprint,captcha_hash,state,created_at) SELECT ?, 'seed-'||n, ?, 'different-ip', ?, 'fingerprint', 'seed-'||n||?, 'failed', ? FROM seq",
   )
@@ -980,10 +1049,15 @@ it("returns only opted-in safe quote results and coalesces simultaneous duplicat
     result: { status: "quoted", amount: 123 },
   });
   expect(execute).toHaveBeenCalledTimes(1);
-  expect(
-    (await submit(instance, link, { name: "One" }, crypto.randomUUID(), proof))
-      .status,
-  ).toBe(429);
+  const reusedProof = await submit(
+    instance,
+    link,
+    { name: "One" },
+    crypto.randomUUID(),
+    proof,
+  );
+  expect(reusedProof.status).toBe(403);
+  expect(await reusedProof.text()).toContain("Complete a new challenge.");
   const privateResultLink = await publish(instance, name, {
     kind: "quote",
     returnResult: false,
@@ -1058,7 +1132,7 @@ it("returns the public service quote presentation", async () => {
   ).json()) as any;
   expect(recordDefinition).not.toHaveProperty("presentation");
 });
-it("skips captcha verification for the local development bypass", async () => {
+it("accepts distinct local submissions with the same development verification value", async () => {
   const instance = app({
     disableCaptcha: true,
     publicOrigin: "http://127.0.0.1:5173",
@@ -1073,9 +1147,50 @@ it("skips captcha verification for the local development bypass", async () => {
   ).json()) as any;
   expect(definition.captchaProvider).toBe("disabled");
   expect(definition).not.toHaveProperty("siteKey");
-  const response = await submit(instance, link, { name: "Local" });
+  const firstId = crypto.randomUUID();
+  const values = { name: "Local" };
+  const response = await submit(
+    instance,
+    link,
+    values,
+    firstId,
+    "local-bypass",
+  );
   expect(response.status, await response.clone().text()).toBe(200);
-  expect(await response.json()).toMatchObject({ ok: true });
+  const receipt = await response.json();
+  expect(receipt).toMatchObject({ ok: true });
+  const second = await submit(
+    instance,
+    link,
+    { name: "Another local submission" },
+    crypto.randomUUID(),
+    "local-bypass",
+  );
+  expect(second.status).toBe(200);
+  expect(
+    await (
+      await submit(instance, link, values, firstId, "local-bypass")
+    ).json(),
+  ).toEqual(receipt);
+  const oldHash = Array.from(
+    new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode("local-bypass"),
+      ),
+    ),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+  await env.DB.prepare(
+    "UPDATE public_form_submissions SET captcha_hash=? WHERE form_id=? AND submission_id=?",
+  )
+    .bind(oldHash, link.id, firstId)
+    .run();
+  expect(
+    await (
+      await submit(instance, link, values, firstId, "local-bypass")
+    ).json(),
+  ).toEqual(receipt);
   expect(verify.mock.calls.length).toBe(calls);
 });
 it("ignores the bypass flag outside localhost origins", async () => {
@@ -1236,109 +1351,148 @@ it("serves bounded city suggestions for quote links without upstream internals",
     ).status,
   ).toBe(503);
 });
-it("serves per-product quote progress for a known submission only", async () => {
-  const quoteStatus = vi.fn(async () => ({
-    items: [
-      {
-        flowId: "flow-a",
-        label: "Provider A · Product A",
-        provider: "Provider A",
-        status: "quoting",
-      },
-    ],
-  }));
-  const quote = {
-    publish: async () => ({
-      fields: [
-        { name: "name", label: "Name", type: "text" as const, required: true },
+it.each([false, true])(
+  "serves per-product progress with public prices enabled = %s",
+  async (returnResult) => {
+    const result = { premiumTotal: 1250000, currency: "COP" };
+    const quoteStatus = vi.fn(async () => ({
+      items: [
+        {
+          flowId: "flow-a",
+          label: "Provider A · Product A",
+          provider: "Provider A",
+          status: "quoting",
+          result,
+        },
       ],
-      snapshot: { frozen: "policy" },
-    }),
-    validate: async ({ values }: any) => values,
-    execute: async () => undefined,
-    quoteStatus,
-  };
-  const instance = app({ quote });
-  const link = await publish(instance, await object(), { kind: "quote" });
-  const submissionId = crypto.randomUUID();
-  await env.DB.prepare(
-    "INSERT INTO public_form_submissions(form_id,submission_id,tenant_id,ip_hash,day,fingerprint,captcha_hash,state,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-  )
-    .bind(
-      link.id,
-      submissionId,
-      "tenant:880011",
-      "iphash",
-      new Date().toISOString().slice(0, 10),
-      "fingerprint",
-      "captchahash",
-      "reserved",
-      new Date().toISOString(),
+    }));
+    const quote = {
+      publish: async () => ({
+        fields: [
+          {
+            name: "name",
+            label: "Name",
+            type: "text" as const,
+            required: true,
+          },
+        ],
+        snapshot: { frozen: "policy" },
+      }),
+      validate: async ({ values }: any) => values,
+      execute: async () => undefined,
+      quoteStatus,
+    };
+    const instance = app({ quote });
+    const link = await publish(instance, await object(), {
+      kind: "quote",
+      returnResult,
+    });
+    const submissionId = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO public_form_submissions(form_id,submission_id,tenant_id,ip_hash,day,fingerprint,captcha_hash,state,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
     )
-    .run();
-  const found = await instance.request(
-    "https://api.test/api/public/forms/" +
-      link.token +
-      "/status/" +
-      submissionId,
-  );
-  expect(found.status).toBe(200);
-  expect(await found.json()).toEqual({
-    items: [
-      {
-        flowId: "flow-a",
-        label: "Provider A · Product A",
-        provider: "Provider A",
-        status: "quoting",
-      },
-    ],
-  });
-  expect(quoteStatus).toHaveBeenCalledWith(
-    expect.objectContaining({ submission: submissionId }),
-  );
-  // Unknown submissions 404 without revealing link state.
-  expect(
-    (
-      await instance.request(
-        "https://api.test/api/public/forms/" +
-          link.token +
-          "/status/" +
-          crypto.randomUUID(),
+      .bind(
+        link.id,
+        submissionId,
+        "tenant:880011",
+        "iphash",
+        new Date().toISOString().slice(0, 10),
+        "fingerprint",
+        submissionId,
+        "reserved",
+        new Date().toISOString(),
       )
-    ).status,
-  ).toBe(404);
-  expect(
-    (
-      await instance.request(
-        "https://api.test/api/public/forms/" +
-          link.token +
-          "/status/not-a-uuid",
-      )
-    ).status,
-  ).toBe(400);
-  // Record links never serve quote progress.
-  const recordLink = await publish(app(), await object());
-  expect(
-    (
-      await instance.request(
-        "https://api.test/api/public/forms/" +
-          recordLink.token +
-          "/status/" +
-          submissionId,
-      )
-    ).status,
-  ).toBe(404);
-  expect(
-    (
-      await app().request(
-        "https://api.test/api/public/forms/" +
-          link.token +
-          "/status/" +
-          submissionId,
-      )
-    ).status,
-  ).toBe(404);
-});
+      .run();
+    const found = await instance.request(
+      "https://api.test/api/public/forms/" +
+        link.token +
+        "/status/" +
+        submissionId,
+    );
+    expect(found.status).toBe(200);
+    expect(await found.json()).toEqual({
+      items: [
+        {
+          flowId: "flow-a",
+          label: "Provider A · Product A",
+          provider: "Provider A",
+          status: "quoting",
+          ...(returnResult ? { result } : {}),
+        },
+      ],
+    });
+    expect(quoteStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ submission: submissionId }),
+    );
+    await env.DB.prepare(
+      "UPDATE public_form_submissions SET state='failed' WHERE form_id=? AND submission_id=?",
+    )
+      .bind(link.id, submissionId)
+      .run();
+    const failed = await instance.request(
+      `https://api.test/api/public/forms/${link.token}/status/${submissionId}`,
+    );
+    expect(failed.status).toBe(200);
+    expect(await failed.json()).toEqual({ state: "failed" });
+    expect(quoteStatus).toHaveBeenCalledTimes(1);
+    const receipt = { ok: true, reference: "committed-receipt" };
+    await env.DB.prepare(
+      "UPDATE public_form_submissions SET state='complete',response=? WHERE form_id=? AND submission_id=?",
+    )
+      .bind(JSON.stringify(receipt), link.id, submissionId)
+      .run();
+    quoteStatus.mockRejectedValueOnce(
+      new Error("Progress storage unavailable"),
+    );
+    const recovered = await instance.request(
+      `https://api.test/api/public/forms/${link.token}/status/${submissionId}`,
+    );
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toEqual({ state: "complete", receipt });
+    // Unknown submissions 404 without revealing link state.
+    expect(
+      (
+        await instance.request(
+          "https://api.test/api/public/forms/" +
+            link.token +
+            "/status/" +
+            crypto.randomUUID(),
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await instance.request(
+          "https://api.test/api/public/forms/" +
+            link.token +
+            "/status/not-a-uuid",
+        )
+      ).status,
+    ).toBe(400);
+    // Record links never serve quote progress.
+    const recordLink = await publish(app(), await object());
+    expect(
+      (
+        await instance.request(
+          "https://api.test/api/public/forms/" +
+            recordLink.token +
+            "/status/" +
+            submissionId,
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await app().request(
+          "https://api.test/api/public/forms/" +
+            link.token +
+            "/status/" +
+            submissionId,
+        )
+      ).status,
+    ).toBe(404);
+  },
+);
 it("preserves safe provider failures instead of masking them as 503", async () => {
   const execute = vi.fn(async () => {
     throw new HTTPException(502, {
@@ -1646,7 +1800,7 @@ it("verifies self-hosted proof, preserves exact idempotent retries and rejects r
     crypto.randomUUID(),
     reencoded,
   );
-  expect(replay.status).toBe(429);
+  expect(replay.status).toBe(403);
   const count = await env.DB.prepare(
     "SELECT count(*) AS n FROM studio_records WHERE object_name=?",
   )

@@ -1,4 +1,7 @@
-import { useAppLocale } from "@/i18n/core";
+import { withRequestTimeout } from "@/api/request-timeout";
+import { formatRetryTime, retryDeadline } from "@/api/retry-after";
+import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
+import { publicFormsMessages } from "@/i18n/locales/public-forms";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { mountAltcha } from "./altcha-widget";
@@ -14,19 +17,28 @@ export const LOCAL_CAPTCHA_TOKEN = "local-bypass";
 
 export type PublicSubmissionValues = Record<string, string | number | boolean>;
 
+const submissionReceiptSchema = z.object({
+  ok: z.literal(true),
+  reference: z.string(),
+  result: z.unknown().optional(),
+});
+
 export type PublicSubmissionController = {
   formRef: React.RefObject<HTMLFormElement | null>;
   captchaElementRef: React.RefObject<HTMLDivElement | null>;
   captcha: string;
   captchaError: string;
+  retryVerification(): void;
   error: string;
   pending: boolean;
   uncertain: boolean;
   duplicate: boolean;
+  failed: boolean;
   receipt?: { reference: string; result?: unknown };
   /** Current submission identity for progress polling; null before submit. */
   submissionId: string | null;
   completeFromStatus(id: string, value: unknown): void;
+  failFromStatus(id: string): void;
   submit(values: PublicSubmissionValues): Promise<void>;
   startNew(): void;
 };
@@ -97,6 +109,7 @@ export function usePublicFormSubmission({
   endpoint: string;
 }): PublicSubmissionController {
   const locale = useAppLocale();
+  const t = useMessages(publicFormsMessages);
   const captchaElement = useRef<HTMLDivElement>(null);
   const widget = useRef<{ api: TurnstileApi; id: string } | null>(null);
   const altchaWidget = useRef<Awaited<ReturnType<typeof mountAltcha>> | null>(
@@ -113,10 +126,12 @@ export function usePublicFormSubmission({
   } | null>(null);
   const [captcha, setCaptcha] = useState("");
   const [captchaError, setCaptchaError] = useState("");
+  const [captchaAttempt, setCaptchaAttempt] = useState(0);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [duplicate, setDuplicate] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [submissionId, setSubmissionId] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<{
     reference: string;
@@ -132,7 +147,8 @@ export function usePublicFormSubmission({
   }, []);
 
   useEffect(() => {
-    if (receipt || duplicate) return;
+    if (receipt || duplicate || failed) return;
+    setCaptchaError("");
     if (!retryProof.current) setCaptcha("");
     let active = true;
     if (definition.captchaProvider === "disabled") {
@@ -171,7 +187,7 @@ export function usePublicFormSubmission({
           .catch(() => {
             if (active)
               setCaptchaError(
-                "No se pudo cargar la verificación. Revisa tu conexión y recarga la página.",
+                "No se pudo cargar la verificación. Revisa tu conexión y vuelve a intentarlo.",
               );
           });
       return () => {
@@ -212,7 +228,7 @@ export function usePublicFormSubmission({
       .catch(() => {
         if (active)
           setCaptchaError(
-            "No se pudo cargar la verificación. Revisa tu conexión y recarga la página.",
+            "No se pudo cargar la verificación. Revisa tu conexión y vuelve a intentarlo.",
           );
       });
     return () => {
@@ -230,89 +246,144 @@ export function usePublicFormSubmission({
     endpoint,
     receipt,
     duplicate,
+    failed,
+    captchaAttempt,
   ]);
 
-  function completeFromStatus(id: string, value: unknown) {
-    if (!alive.current || submission.current?.id !== id) return;
-    const parsed = z
-      .object({
-        ok: z.literal(true),
-        reference: z.string(),
-        result: z.unknown().optional(),
-      })
-      .safeParse(value);
-    if (!parsed.success) return;
-    setReceipt(parsed.data);
+  function retryVerification() {
+    if (busy.current) return;
+    setCaptchaError("");
+    setCaptchaAttempt((attempt) => attempt + 1);
+  }
+
+  function settleFromStatus(id: string) {
+    if (!alive.current || submission.current?.id !== id) return false;
+    const post = activePost.current;
+    activePost.current = null;
     setPending(false);
     setUncertain(false);
+    setDuplicate(false);
     setError("");
     busy.current = false;
-    activePost.current?.abort();
+    post?.abort();
+    return true;
+  }
+
+  function completeFromStatus(id: string, value: unknown) {
+    const parsed = submissionReceiptSchema.safeParse(value);
+    if (parsed.success && settleFromStatus(id)) setReceipt(parsed.data);
+  }
+
+  function failFromStatus(id: string) {
+    if (!receipt && settleFromStatus(id)) setFailed(true);
   }
 
   async function submit(values: PublicSubmissionValues) {
-    if (busy.current || !captcha || receipt || duplicate) return;
+    if (busy.current || !captcha || receipt || duplicate || failed) return;
     if (!submission.current) {
       submission.current = { id: crypto.randomUUID(), values };
     }
-    setSubmissionId(submission.current.id);
+    const current = submission.current;
+    const id = current.id;
+    setSubmissionId(id);
     busy.current = true;
     setPending(true);
     setError("");
-    const id = submission.current.id;
     const abort = new AbortController();
     activePost.current = abort;
-    const timeout = window.setTimeout(() => abort.abort(), 180_000);
+    const isCurrentPost = () =>
+      alive.current &&
+      activePost.current === abort &&
+      submission.current?.id === id;
     let keepProof = false;
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        signal: abort.signal,
-        credentials: "omit",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          submissionId: submission.current.id,
-          token: captcha,
-          values: submission.current.values,
-        }),
-      });
-      if (!alive.current || submission.current?.id !== id) return;
-      if (response.status === 409) {
-        setDuplicate(true);
-        return;
-      }
-      if (!response.ok) {
-        if (response.status >= 500) {
+      const result = await withRequestTimeout(
+        async (signal) => {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            signal,
+            credentials: "omit",
+            cache: "no-store",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              submissionId: id,
+              token: captcha,
+              values: current.values,
+            }),
+          });
+          if (!response.ok) {
+            const body =
+              response.status === 409
+                ? ((await response.json().catch(() => undefined)) as
+                    | { error?: string | { code?: string; message?: string } }
+                    | undefined)
+                : undefined;
+            const detail = body?.error;
+            return {
+              ok: false as const,
+              status: response.status,
+              retryAt: retryDeadline(response),
+              code: typeof detail === "object" ? detail?.code : undefined,
+              message: typeof detail === "string" ? detail : detail?.message,
+            };
+          }
+          return {
+            ok: true as const,
+            receipt: submissionReceiptSchema.parse(await response.json()),
+          };
+        },
+        180_000,
+        abort.signal,
+      );
+      if (!isCurrentPost()) return;
+      if (!result.ok) {
+        if (
+          result.status === 409 &&
+          (result.code === "PUBLIC_SUBMISSION_ALREADY_REGISTERED" ||
+            result.message === "Submission identifier already used." ||
+            result.message ===
+              "Submission already accepted. Do not send it again.")
+        ) {
+          setDuplicate(true);
+          return;
+        }
+        if (result.status === 408 || result.status >= 500) {
           setUncertain(true);
           keepProof = true;
         } else if (!uncertain) submission.current = null;
-        setError(publicError(response.status));
+        const replacedForm =
+          result.status === 409 &&
+          (result.message === "The form changed. Request a new link." ||
+            result.message ===
+              "La configuración cambió. Publica nuevamente el formulario." ||
+            result.message ===
+              "Configura y habilita el cotizador antes de publicar.");
+        const retryTime = formatRetryTime(result, intlLocale(locale));
+        setError(
+          retryTime
+            ? t(
+                "Se alcanzó el límite de envíos. Inténtalo después de %{time}.",
+                {
+                  time: retryTime,
+                },
+              )
+            : publicError(replacedForm ? 404 : result.status),
+        );
         return;
       }
-      const result = z
-        .object({
-          ok: z.literal(true),
-          reference: z.string(),
-          result: z.unknown().optional(),
-        })
-        .parse(await response.json());
-      if (alive.current && submission.current?.id === id) setReceipt(result);
+      setReceipt(result.receipt);
     } catch {
-      if (!busy.current || submission.current?.id !== id) return;
+      if (!isCurrentPost()) return;
       keepProof = true;
-      if (alive.current) {
-        setUncertain(true);
-        setError(
-          definition.captchaProvider === "altcha"
-            ? "No pudimos confirmar el envío. Puedes reintentar el mismo envío."
-            : "No pudimos confirmar el envío. Puedes reintentar con la misma solicitud después de verificarte de nuevo.",
-        );
-      }
+      setUncertain(true);
+      setError(
+        definition.captchaProvider === "altcha"
+          ? "No pudimos confirmar el envío. Puedes reintentar el mismo envío."
+          : "No pudimos confirmar el envío. Puedes reintentar con la misma solicitud después de verificarte de nuevo.",
+      );
     } finally {
-      window.clearTimeout(timeout);
-      if (activePost.current === abort) activePost.current = null;
-      if (submission.current && submission.current.id !== id) return;
+      if (activePost.current !== abort) return;
+      activePost.current = null;
       busy.current = false;
       if (alive.current) {
         setPending(false);
@@ -336,6 +407,7 @@ export function usePublicFormSubmission({
     setSubmissionId(null);
     setReceipt(undefined);
     setDuplicate(false);
+    setFailed(false);
     setUncertain(false);
     setError("");
     setCaptcha("");
@@ -347,29 +419,17 @@ export function usePublicFormSubmission({
     captchaElementRef: captchaElement,
     captcha,
     captchaError,
+    retryVerification,
     error,
     pending,
     uncertain,
     duplicate,
+    failed,
     receipt,
     submissionId,
     completeFromStatus,
+    failFromStatus,
     submit,
     startNew,
   };
 }
-
-export const quoteProjection = z.object({
-  quotes: z
-    .array(
-      z.object({
-        flowId: z.string().optional(),
-        provider: z.string(),
-        product: z.string(),
-        premiumTotal: z.number().finite().positive().max(1e12).nullable(),
-        currency: z.literal("COP"),
-      }),
-    )
-    .max(20),
-  unavailable: z.number().int().nonnegative(),
-});

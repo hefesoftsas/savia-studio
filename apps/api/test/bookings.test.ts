@@ -4,6 +4,7 @@ import { createApp } from "../src/app";
 import { PersonalCalendarService } from "../src/personal-calendars/service";
 import { createPersonalIntegrationProviderRegistry } from "../src/personal-integrations/providers";
 import { bootstrapSchema } from "../src/bookings/contracts";
+import { digest } from "../src/bookings/domain";
 import {
   AuthenticationError,
   type AppActor,
@@ -1860,6 +1861,68 @@ it("does not let another tenant or a nonmanager delete a booking link", async ()
   expect((await deleteLink(foreign.id, foreign.version)).status).toBe(404);
   expect((await deleteLink(team.id, team.version)).status).toBe(404);
 });
+it.each([
+  { table: "tenant_booking_request_receipts", status: 404, receipts: 0 },
+  { table: "tenant_bookings", status: 409, receipts: 1 },
+])(
+  "stops an in-flight booking if its link is deleted before writing $table",
+  async ({ table, status, receipts }) => {
+    let deleteLink: (() => Promise<void>) | undefined;
+    let beforeBatch: (() => Promise<void>) | undefined;
+    const db = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === "prepare")
+          return (sql: string) => {
+            if (deleteLink && sql.includes(`INSERT INTO ${table}(`)) {
+              beforeBatch = deleteLink;
+              deleteLink = undefined;
+            }
+            return target.prepare(sql);
+          };
+        if (property === "batch")
+          return async (statements: D1PreparedStatement[]) => {
+            const pending = beforeBatch;
+            beforeBatch = undefined;
+            await pending?.();
+            return target.batch(statements);
+          };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const f = await fixture(undefined, db);
+    const link = await personalLink(f);
+    deleteLink = async () => {
+      const deleted = await f.app.request(`${f.base}/public-links/${link.id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: link.version }),
+      });
+      expect(deleted.status).toBe(200);
+    };
+
+    const response = await f.app.request(`${link.base}/reservations`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify(f.payload),
+    });
+    expect(response.status).toBe(status);
+    const saved = await env.DB.batch([
+      env.DB.prepare("SELECT id FROM tenant_bookings WHERE tenant_id=?").bind(
+        f.tenantId,
+      ),
+      env.DB.prepare(
+        "SELECT id FROM tenant_booking_request_receipts WHERE link_id=?",
+      ).bind(link.id),
+    ]);
+    expect(saved[0].results).toHaveLength(0);
+    expect(saved[1].results).toHaveLength(receipts);
+  },
+);
+
 it("deletes a booking link with a revision while preserving appointment management", async () => {
   const f = await fixture(),
     link = await personalLink(f);
@@ -1935,12 +1998,41 @@ it("link daily admission counts failed attempts once and preserves identical res
   expect((await submit(key)).status).toBe(201);
   expect((await submit(key)).status).toBe(200);
   expect((await submit(crypto.randomUUID())).status).toBe(409);
-  expect((await submit(crypto.randomUUID())).status).toBe(429);
+  const limited = await submit(crypto.randomUUID());
+  expect(limited.status).toBe(429);
+  expect(await limited.json()).toMatchObject({
+    error: { code: "BOOKING_DAILY_LIMIT" },
+  });
+  const retryAt = Date.parse(limited.headers.get("Retry-After") ?? "");
+  expect(retryAt).toBeGreaterThan(Date.now());
+  expect(new Date(retryAt).toISOString()).toMatch(/T00:00:00\.000Z$/);
   expect((await submit(key)).status).toBe(200);
   expect(
     (await submit(key, { ...f.payload, customerName: "Different" })).status,
   ).toBe(409);
 });
+it("reports the reset time when the public availability minute limit is reached", async () => {
+  const f = await fixture();
+  const ip = "192.0.2.140";
+  const window = Math.floor(Date.now() / 60000);
+  const token = f.publicBase.split("/").at(-1);
+  for (const minute of [window, window + 1]) {
+    await env.DB.prepare(
+      "INSERT INTO tenant_booking_rate_limits(bucket,count,expires_at) VALUES(?,120,?)",
+    )
+      .bind(await digest(`${minute}:${ip}:read:${token}`), (minute + 2) * 60000)
+      .run();
+  }
+  const date = f.payload.startsAt.slice(0, 10);
+  const response = await f.app.request(
+    `${f.publicBase}/availability?serviceId=${f.serviceId}&from=${date}&to=${date}`,
+    { headers: { "cf-connecting-ip": ip } },
+  );
+  expect(response.status).toBe(429);
+  const retryAt = Date.parse(response.headers.get("Retry-After") ?? "");
+  expect([(window + 1) * 60000, (window + 2) * 60000]).toContain(retryAt);
+});
+
 it("anonymous booking bodies are capped at 32 KiB", async () => {
   const f = await fixture();
   const r = await f.app.request(`${f.publicBase}/reservations`, {
@@ -2233,6 +2325,29 @@ it("keeps cancellation available when changed service rules prevent rescheduling
       )
     ).status,
   ).toBe(409);
+  const connectionId = crypto.randomUUID();
+  await env.DB.prepare(
+    "INSERT INTO personal_integration_connections(id,principal_id,provider,nango_connection_id,nango_integration_id,status,scopes,created_at,updated_at) VALUES(?,?,'google_calendar',?,'calendar','connected','[]','now','now')",
+  )
+    .bind(connectionId, f.principalId, connectionId)
+    .run();
+  await env.DB.prepare(
+    "INSERT INTO tenant_booking_calendar_grants(tenant_id,principal_id,provider,connection_id) VALUES(?,?,'google_calendar',?)",
+  )
+    .bind(f.tenantId, f.principalId, connectionId)
+    .run();
+  const move = await f.app.request(`${manage}/reschedule`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      version: 1,
+      startsAt: new Date(
+        Date.parse(f.payload.startsAt) + 60 * 60000,
+      ).toISOString(),
+    }),
+  });
+  expect(move.status).toBe(409);
+  expect(JSON.stringify(await move.json())).toContain("The service changed.");
   const cancelled = await f.app.request(`${manage}/cancel`, {
     method: "POST",
     headers: { "content-type": "application/json" },

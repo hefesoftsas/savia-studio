@@ -13,6 +13,19 @@ import { paginationScope } from "./record-pagination";
 import { filterSchema } from "./query";
 
 type Index = RecordPerformance["indexes"][number];
+
+export function recordPerformanceIndexEntryTooLarge(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const index = Reflect.get(error, "constraint");
+  return (
+    Reflect.get(error, "code") === "54000" &&
+    Reflect.get(error, "routine") === "_bt_check_third_page" &&
+    Reflect.get(error, "table") === "studio_records" &&
+    typeof index === "string" &&
+    /^studio_perf_[a-f0-9]{40}$/.test(index)
+  );
+}
+
 export const recordIndexName = async (
   tenant: string,
   objectName: string,

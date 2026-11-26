@@ -1,11 +1,19 @@
-import { useAppLocale, useMessages } from "@/i18n/core";
+import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
 import { publicFormsMessages } from "@/i18n/locales/public-forms";
-import { PluginLocaleProvider } from "@savia/studio-shared/plugin-locale-react";
-import {
-  QuoteResults,
-  type QuoteBatchItem,
-} from "@savia/release-catalog/public-ui";
-import { quoteProjection } from "./public-form-submission";
+import { z } from "zod";
+
+const quoteProjection = z.object({
+  quotes: z.array(z.unknown()).max(20),
+  unavailable: z.number().int().nonnegative(),
+});
+
+const publicQuote = z.object({
+  flowId: z.string().optional(),
+  provider: z.string(),
+  product: z.string(),
+  premiumTotal: z.number().finite().positive().max(1e12).nullable(),
+  currency: z.literal("COP"),
+});
 
 export type PublicComparisonItem = {
   flowId: string;
@@ -15,41 +23,43 @@ export type PublicComparisonItem = {
   status: "succeeded" | "pending" | "failed";
 };
 
-/**
- * The embedded quote comparator reused verbatim in the anonymous context:
- * same cards, provider filter, progress track, compare-select (max 4) and
- * coverage comparison table. Only safe projection data ever reaches it — no quote
- * numbers, runs, history, vehicle info, retry handlers or PDF download —
- * so private sections stay hidden by construction, not by convention.
- */
 export function PublicComparison({ items }: { items: PublicComparisonItem[] }) {
   const t = useMessages(publicFormsMessages);
   const locale = useAppLocale();
-  const batchItems: QuoteBatchItem[] = items.map((item, index) => ({
-    productId: item.flowId || `${item.provider}-${item.product}-${index}`,
-    flowId: item.flowId,
-    label: item.product,
-    provider: item.provider,
-    status: item.status,
-    ...(item.premiumTotal !== null ? { premium: item.premiumTotal } : {}),
-    ...(item.status === "failed"
-      ? { error: t("Sin respuesta"), errorCode: "service_unavailable" }
-      : {}),
-  }));
+  if (!items.length) return null;
+  const currency = new Intl.NumberFormat(intlLocale(locale), {
+    style: "currency",
+    currency: "COP",
+    currencyDisplay: "code",
+  });
+  const statuses = {
+    succeeded: t("Consulta finalizada"),
+    pending: t("En espera"),
+    failed: t("Sin respuesta"),
+  };
   return (
-    <PluginLocaleProvider locale={locale}>
-      <div className="public-quote-embedded">
-        <QuoteResults
-          runs={[]}
-          loading={false}
-          batchItems={batchItems}
-          hasSelectedQuote={batchItems.length > 0}
-          planCatalog
-          hidePdfDownload
-          hideProgress
-        />
-      </div>
-    </PluginLocaleProvider>
+    <ul className="divide-y rounded-lg border bg-card text-left">
+      {items.map((item) => (
+        <li
+          key={item.flowId}
+          className="flex break-inside-avoid flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3"
+        >
+          <div className="min-w-0">
+            <span className="block break-words font-medium">
+              {item.provider}
+            </span>
+            <span className="block break-words text-sm text-muted-foreground">
+              {item.product}
+            </span>
+          </div>
+          <span className="text-sm tabular-nums">
+            {item.premiumTotal === null
+              ? statuses[item.status]
+              : currency.format(item.premiumTotal)}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -58,18 +68,26 @@ export function PublicReceiptResult({ result }: { result: unknown }) {
   const t = useMessages(publicFormsMessages);
   const projection = quoteProjection.safeParse(result);
   if (!projection.success) return null;
-  const { quotes, unavailable } = projection.data;
+  const { quotes } = projection.data;
+  const items = quotes.flatMap((entry, index) => {
+    const parsed = publicQuote.safeParse(entry);
+    if (!parsed.success) return [];
+    const quote = parsed.data;
+    return [
+      {
+        flowId: quote.flowId ?? `quote-${index}`,
+        provider: quote.provider,
+        product: quote.product,
+        premiumTotal: quote.premiumTotal,
+        status: "succeeded" as const,
+      },
+    ];
+  });
+  const unavailable =
+    projection.data.unavailable + quotes.length - items.length;
   return (
     <>
-      <PublicComparison
-        items={quotes.map((quote) => ({
-          flowId: quote.flowId ?? quote.product,
-          provider: quote.provider,
-          product: quote.product,
-          premiumTotal: quote.premiumTotal,
-          status: "succeeded" as const,
-        }))}
-      />
+      <PublicComparison items={items} />
       {unavailable > 0 && (
         <p className="public-form-help">
           {t(
@@ -108,8 +126,10 @@ export function parseStatusItems(value: unknown): PublicComparisonItem[] {
         : undefined;
     const premium =
       result &&
+      result.currency === "COP" &&
       typeof result.premiumTotal === "number" &&
-      result.premiumTotal > 0
+      result.premiumTotal > 0 &&
+      result.premiumTotal <= 1e12
         ? result.premiumTotal
         : null;
     items.push({

@@ -2,6 +2,7 @@ import { useMessages } from "@/i18n/core";
 import { recordsMessages } from "@/i18n/locales/records";
 import { useEffect, useRef, useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
+import { withRequestTimeout } from "@/api/request-timeout";
 import type { editor as MonacoEditorNamespace } from "monaco-editor/esm/vs/editor/editor.api";
 import {
   applyMonacoTheme,
@@ -56,7 +57,11 @@ export function MonacoCodeEditor({
   selection?: { lineNumber: number; column: number; endColumn: number };
   inlineCompletion?: {
     filename: string;
-    fetchCompletion: (prefix: string, suffix: string) => Promise<string | null>;
+    fetchCompletion: (
+      prefix: string,
+      suffix: string,
+      signal: AbortSignal,
+    ) => Promise<string | null>;
   };
 }) {
   const t = useMessages(recordsMessages);
@@ -67,6 +72,7 @@ export function MonacoCodeEditor({
   onChangeRef.current = onChange;
   const inlineCompletionRef = useRef(inlineCompletion);
   inlineCompletionRef.current = inlineCompletion;
+  const pendingCompletion = useRef<AbortController | null>(null);
   const valueRef = useRef(value);
   valueRef.current = value;
   const readOnlyRef = useRef(readOnly);
@@ -157,6 +163,7 @@ export function MonacoCodeEditor({
         });
         editorRef.current = editor;
         editor.onDidChangeModelContent(() => {
+          pendingCompletion.current?.abort();
           if (!programmaticChange.current)
             onChangeRef.current(editor!.getValue());
         });
@@ -176,26 +183,35 @@ export function MonacoCodeEditor({
                 // Inline completions are best-effort: never surface errors
                 // from the network or an unconfigured workspace.
                 onError: () => {},
-                requestHandler: ({ body }) => {
+                requestHandler: async ({ body }) => {
                   const fetchInline =
                     inlineCompletionRef.current?.fetchCompletion;
-                  if (!fetchInline)
-                    return Promise.resolve({ completion: null });
-                  const pending = fetchInline(
-                    body.completionMetadata.textBeforeCursor.slice(-8000),
-                    body.completionMetadata.textAfterCursor.slice(0, 8000),
-                  ).then(
-                    (completion) => ({ completion: completion ?? null }),
-                    () => ({ completion: null as string | null }),
-                  );
-                  const timedOut = new Promise<{ completion: null }>(
-                    (resolve) =>
-                      window.setTimeout(
-                        () => resolve({ completion: null }),
-                        15000,
-                      ),
-                  );
-                  return Promise.race([pending, timedOut]);
+                  if (disposed || readOnlyRef.current || !fetchInline)
+                    return { completion: null };
+                  pendingCompletion.current?.abort();
+                  const controller = new AbortController();
+                  pendingCompletion.current = controller;
+                  try {
+                    const completion = await withRequestTimeout(
+                      (signal) =>
+                        fetchInline(
+                          body.completionMetadata.textBeforeCursor.slice(-8000),
+                          body.completionMetadata.textAfterCursor.slice(
+                            0,
+                            8000,
+                          ),
+                          signal,
+                        ),
+                      undefined,
+                      controller.signal,
+                    );
+                    return { completion: completion ?? null };
+                  } catch {
+                    return { completion: null };
+                  } finally {
+                    if (pendingCompletion.current === controller)
+                      pendingCompletion.current = null;
+                  }
                 },
               },
             );
@@ -212,6 +228,7 @@ export function MonacoCodeEditor({
 
     return () => {
       disposed = true;
+      pendingCompletion.current?.abort();
       stopThemeObservation?.();
       stopInlineCompletion?.();
       editor?.dispose();
@@ -223,6 +240,7 @@ export function MonacoCodeEditor({
   }, [ariaLabel, language, contextDeclarations, semanticValidation]);
 
   useEffect(() => {
+    if (readOnly) pendingCompletion.current?.abort();
     editorRef.current?.updateOptions({ readOnly });
   }, [readOnly]);
 

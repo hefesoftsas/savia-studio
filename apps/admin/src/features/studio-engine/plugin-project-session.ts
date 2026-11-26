@@ -15,6 +15,7 @@ export class PluginProjectSession {
   private stopped = false;
   private latest: ProjectDraft;
   private acknowledged: string;
+  private needsConfirmation = false;
   private timer?: ReturnType<typeof setTimeout>;
   private pending?: Promise<void>;
   constructor(
@@ -27,8 +28,14 @@ export class PluginProjectSession {
     this.latest = initial;
     this.acknowledged = JSON.stringify(initial);
   }
+  get savedVersion() {
+    return this.version;
+  }
   get isSaved() {
-    return JSON.stringify(this.latest) === this.acknowledged;
+    return (
+      !this.needsConfirmation &&
+      JSON.stringify(this.latest) === this.acknowledged
+    );
   }
   update(next: ProjectDraft) {
     if (this.stopped) return;
@@ -53,10 +60,12 @@ export class PluginProjectSession {
     try {
       while (!this.stopped && !this.isSaved) {
         const snapshot = this.latest;
+        this.needsConfirmation = true;
         this.notify({ state: "saving" });
         const result = await this.save({ ...snapshot, version: this.version });
         this.version = result.version;
         this.acknowledged = JSON.stringify(snapshot);
+        this.needsConfirmation = false;
         this.recover(
           this.isSaved ? null : { ...this.latest, version: this.version },
         );

@@ -138,6 +138,42 @@ it("enforces current source policy and owner identity before native writes", asy
   ).toBe(404);
 });
 
+it("rejects unsafe pagination on linked database records", async () => {
+  const source = await call("sources", "POST", {
+    id: "pagination",
+    label: "Pagination",
+    kind: "mysql",
+    host: "db.internal",
+    database: "erp",
+    username: "reader",
+    password: "private",
+  });
+  expect(source.status).toBe(201);
+  const binding = await call("collection-bindings", "POST", {
+    name: "paged_orders",
+    label: "Paged orders",
+    sourceId: "pagination",
+    resource: "orders",
+    fields: {
+      id: { type: "Textbox", label: "ID" },
+      name: { type: "Textbox", label: "Name" },
+    },
+  });
+  expect(binding.status).toBe(201);
+  for (const page of ["Infinity", "9007199254740991"]) {
+    const response = await call(`records/paged_orders?perPage=3&page=${page}`);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      error: "Paginación inválida.",
+    });
+  }
+  const valid = await call("records/paged_orders?perPage=3&page=2");
+  expect(valid.status).toBe(200);
+  expect(await valid.json()).toMatchObject({
+    data: [{ id: "1", name: "Acme" }],
+  });
+});
+
 it("isolates sources and bindings for the same principal across tenants", async () => {
   const tenantA = makeApp("shared-principal", "source-isolation-a");
   const tenantB = makeApp("shared-principal", "source-isolation-b");

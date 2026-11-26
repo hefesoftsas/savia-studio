@@ -68,7 +68,7 @@ export function CookieConsentBanner() {
       <div
         role="region"
         aria-label={title}
-        className="fixed inset-x-3 bottom-3 z-50 sm:inset-x-6 lg:inset-x-auto lg:left-1/2 lg:w-[38rem] lg:-translate-x-1/2"
+        className="fixed inset-x-3 bottom-3 z-50 sm:inset-x-6 lg:inset-x-auto lg:left-1/2 lg:w-[38rem] lg:-translate-x-1/2 print:hidden"
       >
         <div className="rounded-2xl border border-border/70 bg-popover/95 p-4 shadow-xl shadow-black/10 backdrop-blur-md">
           <div className="flex items-start gap-3">

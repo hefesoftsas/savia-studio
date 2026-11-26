@@ -76,6 +76,12 @@ let activeFile = "";
 let navigation = "";
 let chain = Promise.resolve();
 const completions = new Map<string, (value: string | null) => void>();
+function cancelInlineCompletion(requestId: string) {
+  const finish = completions.get(requestId);
+  if (!finish) return;
+  finish(null);
+  send({ type: "savia-editor-completion-cancel", requestId });
+}
 let sequence = 0;
 const localEdits = new Map<string, number>();
 
@@ -364,14 +370,21 @@ async function start() {
           if (!Object.hasOwn(state.files, path)) return [];
           const files = completionFiles();
           files[path] = document.getText();
-          const entries = await typescript.complete(
-            files,
-            path,
-            document.offsetAt(position),
+          const controller = new AbortController();
+          const cancellation = token.onCancellationRequested(() =>
+            controller.abort(),
           );
+          const entries = await typescript
+            .complete(
+              files,
+              path,
+              document.offsetAt(position),
+              controller.signal,
+            )
+            .finally(() => cancellation.dispose());
+          if (token.isCancellationRequested) return [];
           const currentFiles = completionFiles();
           if (
-            token.isCancellationRequested ||
             state?.readOnly ||
             document.version !== version ||
             Object.keys(files).length !== Object.keys(currentFiles).length ||
@@ -449,10 +462,17 @@ async function start() {
           const finish = (value: string | null) => {
             completions.delete(requestId);
             clearTimeout(timeout);
+            cancellation.dispose();
             resolve(value);
           };
-          const timeout = setTimeout(() => finish(null), 10000);
+          const cancel = () => cancelInlineCompletion(requestId);
+          const timeout = setTimeout(cancel, 10_000);
+          const cancellation = token.onCancellationRequested(cancel);
           completions.set(requestId, finish);
+          if (token.isCancellationRequested) {
+            finish(null);
+            return;
+          }
           send({
             type: "savia-editor-completion",
             requestId,
@@ -598,6 +618,8 @@ async function start() {
   window.addEventListener(
     "pagehide",
     () => {
+      for (const requestId of completions.keys())
+        cancelInlineCompletion(requestId);
       transfers.clear();
       void thirdParty.dispose();
     },

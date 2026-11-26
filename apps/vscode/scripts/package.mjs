@@ -82,6 +82,6 @@ const bytes = await fs.readFile(output);
 const sha256 = createHash("sha256").update(bytes).digest("hex");
 await fs.writeFile(
   output + ".sha256",
-  `${sha256} ${output.split(/[\\/]/).pop()}\n`,
+  `${sha256} *${output.split(/[\\/]/).pop()}\n`,
 );
 console.log(`VSIX SHA-256: ${sha256}`);

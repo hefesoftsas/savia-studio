@@ -6,6 +6,7 @@ export type RecordCursorValue =
   | null
   | { rank: 0 | 1 | 2; number: string | number; text: string };
 export type RecordCursor = { value: RecordCursorValue; id: string };
+const MAX_CURSOR_TOKEN_LENGTH = 4096;
 
 function validCursorText(value: string): boolean {
   if (value.length > 500) return false;
@@ -29,6 +30,25 @@ function validCursorNumber(value: unknown): value is string | number {
   );
 }
 
+function validCursorValue(value: unknown): value is RecordCursorValue {
+  if (value === null) return true;
+  if (typeof value === "string") return validCursorText(value);
+  if (typeof value === "number") return Number.isFinite(value);
+  if (
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join(",") !== "number,rank,text"
+  )
+    return false;
+  const { number, rank, text } = value as Record<string, unknown>;
+  return (
+    (rank === 0 || rank === 1 || rank === 2) &&
+    validCursorNumber(number) &&
+    typeof text === "string" &&
+    validCursorText(text)
+  );
+}
+
 export async function paginationScope(values: unknown[]): Promise<string> {
   const hash = await crypto.subtle.digest(
     "SHA-256",
@@ -40,18 +60,19 @@ export async function paginationScope(values: unknown[]): Promise<string> {
 }
 export function encodeRecordCursor(
   scope: string,
-  value: RecordCursorValue,
+  value: RecordCursorValue | undefined,
   id: string,
-): string {
-  return btoa(
-    String.fromCharCode(
-      ...new TextEncoder().encode(JSON.stringify({ scope, value, id })),
-    ),
+): string | null {
+  if (!validCursorValue(value) || !validCursorText(id)) return null;
+  const payload = new TextEncoder().encode(
+    JSON.stringify({ scope, value, id }),
   );
+  if (Math.ceil(payload.length / 3) * 4 > MAX_CURSOR_TOKEN_LENGTH) return null;
+  return btoa(String.fromCharCode(...payload));
 }
 export function decodeRecordCursor(token: string, scope: string): RecordCursor {
   try {
-    if (token.length > 4096) throw new Error();
+    if (token.length > MAX_CURSOR_TOKEN_LENGTH) throw new Error();
     const data = JSON.parse(
       new TextDecoder().decode(
         Uint8Array.from(atob(token), (c) => c.charCodeAt(0)),
@@ -59,31 +80,11 @@ export function decodeRecordCursor(token: string, scope: string): RecordCursor {
     );
     if (
       data.scope !== scope ||
-      !(
-        typeof data.value === "string" ||
-        (typeof data.value === "number" && Number.isFinite(data.value)) ||
-        data.value === null ||
-        (data.value !== null &&
-          typeof data.value === "object" &&
-          !Array.isArray(data.value) &&
-          Object.keys(data.value).sort().join(",") === "number,rank,text" &&
-          [0, 1, 2].includes(data.value.rank) &&
-          validCursorNumber(data.value.number) &&
-          typeof data.value.text === "string" &&
-          validCursorText(data.value.text))
-      ) ||
+      !validCursorValue(data.value) ||
       typeof data.id !== "string" ||
-      data.id.length > 500
+      !validCursorText(data.id)
     )
       throw new Error();
-    if (typeof data.value === "string" && !validCursorText(data.value))
-      throw new Error();
-    if (data.value && typeof data.value === "object")
-      if (
-        !validCursorNumber(data.value.number) ||
-        !validCursorText(data.value.text)
-      )
-        throw new Error();
     return { value: data.value, id: data.id };
   } catch {
     return fail(

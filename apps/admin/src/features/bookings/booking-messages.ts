@@ -461,6 +461,27 @@ export const bookingMessages = {
     "Availability could not be saved. Reload and retry.",
     "Não foi possível salvar a disponibilidade. Recarregue e tente novamente.",
   ],
+  "Availability could not be saved (HTTP %{status}). %{message}": [
+    "No se pudo guardar la disponibilidad (HTTP %{status}). %{message}",
+    "Availability could not be saved (HTTP %{status}). %{message}",
+    "Não foi possível salvar a disponibilidade (HTTP %{status}). %{message}",
+  ],
+  "Availability could not be saved. Check your connection and retry.": [
+    "No se pudo guardar la disponibilidad. Comprueba tu conexión e inténtalo de nuevo.",
+    "Availability could not be saved. Check your connection and retry.",
+    "Não foi possível salvar a disponibilidade. Verifique sua conexão e tente novamente.",
+  ],
+  "Use up to 200 exception dates.": [
+    "Configura hasta 200 fechas de excepción.",
+    "Use up to 200 exception dates.",
+    "Configure até 200 datas de exceção.",
+  ],
+  "Check the exception for %{date}. Use up to four non-overlapping periods in five-minute increments, with each end after its start.":
+    [
+      "Revisa la excepción del %{date}. Usa hasta cuatro períodos sin superposiciones, en incrementos de cinco minutos y con el fin posterior al inicio.",
+      "Check the exception for %{date}. Use up to four non-overlapping periods in five-minute increments, with each end after its start.",
+      "Revise a exceção de %{date}. Use até quatro períodos sem sobreposição, em incrementos de cinco minutos e com o término após o início.",
+    ],
   Exceptions: ["Excepciones", "Exceptions", "Exceções"],
   "Add exception": ["Añadir excepción", "Add exception", "Adicionar exceção"],
   "Exception date": ["Fecha de excepción", "Exception date", "Data da exceção"],
@@ -655,6 +676,12 @@ export const bookingMessages = {
     "The appointment could not be refreshed. Try again.",
     "Não foi possível atualizar o agendamento. Tente novamente.",
   ],
+  "We could not verify the change. Refresh the appointment before making another change.":
+    [
+      "No pudimos verificar el cambio. Actualiza la cita antes de hacer otro cambio.",
+      "We could not verify the change. Refresh the appointment before making another change.",
+      "Não foi possível verificar a alteração. Atualize o agendamento antes de fazer outra alteração.",
+    ],
   "Cancel reservation": [
     "Cancelar reserva",
     "Cancel reservation",
@@ -808,6 +835,47 @@ export const bookingMessages = {
     "Retry booking",
     "Tentar agendamento novamente",
   ],
+  "The previous booking could not be confirmed.": [
+    "No se pudo confirmar la reserva anterior.",
+    "The previous booking could not be confirmed.",
+    "Não foi possível confirmar o agendamento anterior.",
+  ],
+  "Booking options changed. Review the available options.": [
+    "Las opciones de reserva cambiaron. Revisa las opciones disponibles.",
+    "Booking options changed. Review the available options.",
+    "As opções de agendamento mudaram. Confira as opções disponíveis.",
+  ],
+  "This booking link is no longer available. Ask the booking owner for a new link.":
+    [
+      "Este enlace de reserva ya no está disponible. Pide un nuevo enlace a quien lo compartió.",
+      "This booking link is no longer available. Ask the booking owner for a new link.",
+      "Este link de agendamento não está mais disponível. Peça um novo link a quem o compartilhou.",
+    ],
+  "Retry previous booking": [
+    "Reintentar reserva anterior",
+    "Retry previous booking",
+    "Tentar agendamento anterior novamente",
+  ],
+  "The daily booking limit was reached. Try again after %{time}.": [
+    "Se alcanzó el límite diario de reservas. Inténtalo después de %{time}.",
+    "The daily booking limit was reached. Try again after %{time}.",
+    "O limite diário de agendamentos foi atingido. Tente novamente após %{time}.",
+  ],
+  "The daily booking limit was reached. Try again after midnight UTC.": [
+    "Se alcanzó el límite diario de reservas. Inténtalo después de la medianoche UTC.",
+    "The daily booking limit was reached. Try again after midnight UTC.",
+    "O limite diário de agendamentos foi atingido. Tente novamente após a meia-noite UTC.",
+  ],
+  "Too many booking requests. Try again shortly.": [
+    "Hay demasiadas solicitudes de reserva. Inténtalo en un momento.",
+    "Too many booking requests. Try again shortly.",
+    "Há muitas solicitações de agendamento. Tente novamente em instantes.",
+  ],
+  "Too many booking requests. Try again after %{time}.": [
+    "Hay demasiadas solicitudes de reserva. Inténtalo después de %{time}.",
+    "Too many booking requests. Try again after %{time}.",
+    "Há muitas solicitações de agendamento. Tente novamente após %{time}.",
+  ],
   "Appointment confirmed": [
     "Cita confirmada",
     "Appointment confirmed",
@@ -854,6 +922,11 @@ export const bookingMessages = {
     "Reintentar verificación",
     "Retry verification",
     "Tentar verificação novamente",
+  ],
+  "Complete verification again to retry your booking.": [
+    "Completa la verificación de nuevo para reintentar la reserva.",
+    "Complete verification again to retry your booking.",
+    "Conclua a verificação novamente para tentar o agendamento.",
   ],
   Reschedule: ["Cambiar horario", "Reschedule", "Remarcar"],
   Cancel: ["Cerrar", "Cancel", "Fechar"],

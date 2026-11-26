@@ -1,4 +1,5 @@
-import { useAppLocale, useMessages } from "@/i18n/core";
+import { formatRetryTime } from "@/api/retry-after";
+import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -8,7 +9,11 @@ import { bookingMessages } from "./booking-messages";
 import { publicBookingWizardMessages } from "./public-booking-wizard-messages";
 import { PublicBookingAvailability } from "./public-booking-availability";
 import { PublicBookingSummary } from "./public-booking-summary";
-import { publicBookingRequest as publicRequest } from "./public-booking-request";
+import {
+  canRetryPublicBookingLoad,
+  publicBookingRequest as publicRequest,
+  type PublicBookingApiError,
+} from "./public-booking-request";
 import type { BookingLinkScope, BookingSelection } from "./booking-types";
 import {
   BookingConference,
@@ -43,6 +48,12 @@ const createIdempotencyKey = () =>
   globalThis.crypto?.randomUUID?.() ??
   `booking-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+type BookingSubmission = {
+  key: string;
+  body: string;
+  selection: BookingSelection;
+};
+
 export function PublicBookingPage({ token }: { token: string }) {
   return <PublicBookingLink key={token} token={token} />;
 }
@@ -58,6 +69,10 @@ function PublicBookingLink({ token }: { token: string }) {
   >(undefined);
   const [catalog, setCatalog] = useState<PublicCatalog>();
   const [loading, setLoading] = useState(true);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [catalogLoadError, setCatalogLoadError] = useState<
+    "unavailable" | "retryable" | "other"
+  >();
   const [error, setError] = useState("");
   const [serviceId, setServiceId] = useState("");
   const [professionalId, setProfessionalId] = useState("");
@@ -74,6 +89,8 @@ function PublicBookingLink({ token }: { token: string }) {
   const stepHeadingRef = useRef<HTMLHeadingElement>(null);
   const previousStepRef = useRef(step);
   const [busy, setBusy] = useState(false);
+  const [unconfirmedBooking, setUnconfirmedBooking] =
+    useState<BookingSubmission>();
   const [reservation, setReservation] = useState<{
     selection: BookingSelection;
     status: "confirmed" | "cancelled";
@@ -88,12 +105,13 @@ function PublicBookingLink({ token }: { token: string }) {
   }, [step]);
 
   useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
     void publicRequest<PublicCatalog>(
       `/api/public/bookings/${encodeURIComponent(token)}`,
+      { signal: controller.signal },
     )
       .then((data) => {
-        if (!active) return;
+        if (controller.signal.aborted) return;
         data.linkScope ??= { kind: "team" };
         data.fixedProfessionalId ??= null;
         data.fixedServiceId ??= null;
@@ -120,16 +138,22 @@ function PublicBookingLink({ token }: { token: string }) {
         if (data.captcha.captchaProvider === "disabled")
           setCaptchaToken("local-bypass");
       })
-      .catch(() => {
-        if (active) setCatalog(undefined);
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const status = (error as PublicBookingApiError | undefined)?.status;
+        setCatalogLoadError(
+          status === 404 || status === 410
+            ? "unavailable"
+            : canRetryPublicBookingLoad(error)
+              ? "retryable"
+              : "other",
+        );
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       });
-    return () => {
-      active = false;
-    };
-  }, [token]);
+    return () => controller.abort();
+  }, [token, loadAttempt]);
 
   useEffect(() => {
     if (
@@ -208,7 +232,15 @@ function PublicBookingLink({ token }: { token: string }) {
     [catalog, selectedService],
   );
 
-  async function submit(event: FormEvent) {
+  function reloadCatalog() {
+    setLoading(true);
+    setCatalog(undefined);
+    setAvailabilityReady(false);
+    setCaptchaToken("");
+    setLoadAttempt((attempt) => attempt + 1);
+  }
+
+  function submit(event: FormEvent) {
     event.preventDefault();
     if (
       !catalog ||
@@ -244,7 +276,20 @@ function PublicBookingLink({ token }: { token: string }) {
         key: createIdempotencyKey(),
         customerLocale: locale,
       };
+    void sendBooking({
+      key: idempotency.current.key,
+      body: JSON.stringify({
+        ...body,
+        customerLocale: idempotency.current.customerLocale,
+      }),
+      selection,
+    });
+  }
+
+  async function sendBooking(submission: BookingSubmission) {
+    if (!catalog || busy) return;
     setBusy(true);
+    setUnconfirmedBooking(undefined);
     setError("");
     try {
       const result = await publicRequest<{
@@ -259,16 +304,13 @@ function PublicBookingLink({ token }: { token: string }) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": idempotency.current.key,
+          "Idempotency-Key": submission.key,
         },
-        body: JSON.stringify({
-          ...body,
-          customerLocale: idempotency.current.customerLocale,
-        }),
+        body: submission.body,
       });
       setReservation({
         selection: {
-          ...selection,
+          ...submission.selection,
           slot: {
             startsAt: result.reservation.startsAt,
             endsAt: result.reservation.endsAt,
@@ -279,28 +321,53 @@ function PublicBookingLink({ token }: { token: string }) {
         managementUrl: result.managementUrl,
       });
     } catch (requestError) {
-      const status =
-        requestError &&
-        typeof requestError === "object" &&
-        "status" in requestError
-          ? requestError.status
-          : undefined;
-      const code =
-        requestError &&
-        typeof requestError === "object" &&
-        "code" in requestError
-          ? requestError.code
-          : undefined;
-      if (status === 403 || status === 409) {
-        if (catalog.captcha.captchaProvider !== "disabled") {
-          setCaptchaToken("");
-          setCaptchaAttempt((attempt) => attempt + 1);
-        }
-        if (status === 409) {
-          setSelection(undefined);
-          setSlotsAttempt((attempt) => attempt + 1);
-          setStep(2);
-        }
+      const { status, code } = (requestError as PublicBookingApiError) ?? {};
+      const requiresVerification =
+        catalog.captcha.captchaProvider !== "disabled";
+      const dailyLimit = status === 429 && code === "BOOKING_DAILY_LIMIT";
+      const outcomeUncertain =
+        typeof status !== "number" || status === 408 || status >= 500;
+      if (
+        requiresVerification &&
+        (status === 403 || status === 409 || dailyLimit || outcomeUncertain)
+      ) {
+        setCaptchaToken("");
+        setCaptchaAttempt((attempt) => attempt + 1);
+      }
+      if (status === 403 && requiresVerification) {
+        setError(t("Complete verification again to retry your booking."));
+        return;
+      }
+      if (status === 429) {
+        const retryTime = formatRetryTime(requestError, intlLocale(locale));
+        setError(
+          dailyLimit
+            ? retryTime
+              ? t(
+                  "The daily booking limit was reached. Try again after %{time}.",
+                  { time: retryTime },
+                )
+              : t(
+                  "The daily booking limit was reached. Try again after midnight UTC.",
+                )
+            : retryTime
+              ? t("Too many booking requests. Try again after %{time}.", {
+                  time: retryTime,
+                })
+              : t("Too many booking requests. Try again shortly."),
+        );
+        return;
+      }
+      if (status === 404 || status === 410) {
+        setError(t("Booking options changed. Review the available options."));
+        reloadCatalog();
+        return;
+      }
+      if (outcomeUncertain) setUnconfirmedBooking(submission);
+      if (status === 409) {
+        setSelection(undefined);
+        setSlotsAttempt((attempt) => attempt + 1);
+        setStep(2);
       }
       setError(
         status === 409
@@ -328,10 +395,24 @@ function PublicBookingLink({ token }: { token: string }) {
     );
   if (!catalog)
     return (
-      <main className="mx-auto max-w-2xl px-4 py-10">
+      <main className="mx-auto grid max-w-2xl gap-3 px-4 py-10">
         <p role="alert" className="text-sm text-destructive">
-          {t("Booking settings could not be loaded.")}
+          {catalogLoadError === "unavailable"
+            ? t(
+                "This booking link is no longer available. Ask the booking owner for a new link.",
+              )
+            : t("Booking settings could not be loaded.")}
         </p>
+        {catalogLoadError === "retryable" && (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-fit"
+            onClick={reloadCatalog}
+          >
+            {t("Retry")}
+          </Button>
+        )}
       </main>
     );
   if (reservation)
@@ -459,6 +540,25 @@ function PublicBookingLink({ token }: { token: string }) {
           </p>
         )}
         <fieldset disabled={busy} className="grid min-w-0 gap-6 border-0 p-0">
+          {step === 2 && unconfirmedBooking && (
+            <section className="grid gap-3 rounded-lg border bg-card p-4">
+              <p className="text-sm">
+                {t("The previous booking could not be confirmed.")}
+              </p>
+              <PublicBookingSummary
+                catalog={catalog}
+                selection={unconfirmedBooking.selection}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                className="w-fit"
+                onClick={() => void sendBooking(unconfirmedBooking)}
+              >
+                {t("Retry previous booking")}
+              </Button>
+            </section>
+          )}
           {step === 1 && selectionStep && (
             <section
               aria-labelledby="booking-step-heading"

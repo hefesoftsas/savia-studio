@@ -2031,6 +2031,9 @@ export function createCollectionSourceApp(
       perPage = Math.max(1, Math.floor(Number(params.perPage) || 25));
     if (perPage > 100)
       fail("Las colecciones enlazadas admiten hasta 100 registros por página.");
+    const pageEnd = page * perPage;
+    if (operation === "list" && !Number.isSafeInteger(pageEnd))
+      fail("Paginación inválida.");
     if (config.kind === "domain") {
       const queryable = supportsBoundDomainQuery(config);
       if (
@@ -2101,6 +2104,7 @@ export function createCollectionSourceApp(
         );
       }
       if (operation === "list") {
+        const offset = pageEnd - perPage;
         if (queryable) {
           const rows = await queryableDomainRows(
             db,
@@ -2110,18 +2114,17 @@ export function createCollectionSourceApp(
             params,
             provider,
           );
-          const start = (page - 1) * perPage;
           result = {
-            data: rows.slice(start, start + perPage),
+            data: rows.slice(offset, pageEnd),
             total: rows.length,
             page,
             perPage,
-            hasNext: start + perPage < rows.length,
+            hasNext: pageEnd < rows.length,
           };
         } else {
           const query = {
             limit: Math.min(100, perPage + 1),
-            offset: (page - 1) * perPage,
+            offset,
             ...(params.q ? { q: params.q } : {}),
           };
           if (params.q && !collection.listQuerySchema?.shape.q)
@@ -2134,7 +2137,7 @@ export function createCollectionSourceApp(
               ? await collection.list(db, {
                   ...query,
                   limit: 1,
-                  offset: query.offset + perPage,
+                  offset: pageEnd,
                 })
               : undefined;
           result = {
@@ -2148,7 +2151,7 @@ export function createCollectionSourceApp(
             perPage,
             hasNext:
               response.page.total !== undefined
-                ? page * perPage < response.page.total
+                ? pageEnd < response.page.total
                 : probe
                   ? probe.data.length > 0
                   : response.data.length > perPage,

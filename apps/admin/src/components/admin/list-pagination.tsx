@@ -70,14 +70,13 @@ export const ListPagination = ({
   const hasNextPage =
     sourceHasNextPage && (maxPage === undefined || page < maxPage);
 
-  const hasKnownTotal = typeof total === "number" && total >= 0;
+  const hasKnownTotal =
+    typeof total === "number" && Number.isSafeInteger(total) && total >= 0;
   const isEmpty = data.length === 0 && (!hasKnownTotal || total === 0);
   const pageStart = (page - 1) * perPage + 1;
   const pageEnd = hasKnownTotal
     ? Math.min(page * perPage, total)
-    : hasNextPage
-      ? page * perPage
-      : pageStart + Math.max(data.length, 1) - 1;
+    : pageStart + Math.max(data.length, 1) - 1;
   const rangeTranslationKey = isEmpty
     ? "ra.navigation.empty_page_range_info"
     : hasKnownTotal
@@ -89,7 +88,7 @@ export const ListPagination = ({
   const boundaryCount = 1;
   const siblingCount = 1;
   const count = Math.min(
-    total ? Math.ceil(total / perPage) : 1,
+    hasKnownTotal ? Math.max(1, Math.ceil(total / perPage)) : 1,
     maxPage ?? Infinity,
   );
 
@@ -98,7 +97,10 @@ export const ListPagination = ({
     return Array.from({ length }, (_, i) => start + i);
   };
 
-  const startPages = range(1, Math.min(boundaryCount, count));
+  const startPages =
+    !hasKnownTotal && page > 1
+      ? [1, page]
+      : range(1, Math.min(boundaryCount, count));
   const endPages = range(
     Math.max(count - boundaryCount + 1, boundaryCount + 1),
     count,

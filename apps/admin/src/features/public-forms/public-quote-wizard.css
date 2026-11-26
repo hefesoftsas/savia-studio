@@ -274,7 +274,8 @@
 }
 
 .public-quote-suggestions button:hover,
-.public-quote-suggestions button:focus-visible {
+.public-quote-suggestions button:focus-visible,
+.public-quote-suggestions [aria-selected="true"] > button {
   background: var(--muted);
   outline: 2px solid var(--ring);
   outline-offset: -2px;

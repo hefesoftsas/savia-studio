@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   dialectFor,
   registerDialect,
@@ -9,6 +10,7 @@ import {
 } from "@savia/db/dialect";
 import { postgresDialect } from "@savia/db/postgres-dialect";
 import { openSqliteDatabase } from "../src/sqlite";
+import { migratePostgres } from "../src/postgres/migrations";
 import {
   withPostgresFixture,
   postgresTestUrl,
@@ -285,11 +287,20 @@ test.runIf(Boolean(postgresTestUrl) || postgresTestsRequired)(
     const sqlite = openSqliteDatabase(":memory:");
     try {
       const expected = await contract(sqlite, sqliteDialect);
-      await withPostgresFixture(async (db) => {
+      await withPostgresFixture(async (db, connectionString) => {
+        await migratePostgres({
+          connectionString,
+          schema: "savia_core",
+          directory: fileURLToPath(
+            new URL("../../../packages/db/postgres", import.meta.url),
+          ),
+          seed: false,
+        });
         expect(await contract(db, postgresDialect)).toEqual(expected);
       });
     } finally {
       sqlite.close();
     }
   },
+  30_000,
 );

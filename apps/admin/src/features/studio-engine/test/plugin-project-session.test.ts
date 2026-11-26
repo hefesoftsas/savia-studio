@@ -61,3 +61,75 @@ it("retains recovery content and does not overwrite a conflicted version", async
   expect(save).toHaveBeenCalledTimes(1);
   session.dispose();
 });
+
+it("keeps the draft unsaved when undoing a change already being saved", async () => {
+  let acknowledgeEdit!: (value: { version: number }) => void;
+  let acknowledgeUndo!: (value: { version: number }) => void;
+  const save = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          acknowledgeEdit = resolve;
+        }),
+    )
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          acknowledgeUndo = resolve;
+        }),
+    );
+  const session = new PluginProjectSession(
+    1,
+    draft("original"),
+    save,
+    vi.fn(),
+    vi.fn(),
+  );
+
+  session.update(draft("edited"));
+  const pending = session.flush();
+  session.update(draft("original"));
+  expect(session.isSaved).toBe(false);
+
+  acknowledgeEdit({ version: 2 });
+  await Promise.resolve();
+  expect(save).toHaveBeenLastCalledWith({ ...draft("original"), version: 2 });
+  expect(session.isSaved).toBe(false);
+  acknowledgeUndo({ version: 3 });
+  await pending;
+  expect(session.isSaved).toBe(true);
+  session.dispose();
+});
+
+it("retries the current draft if its earlier save was interrupted after an undo", async () => {
+  let interrupt!: (reason: Error) => void;
+  const save = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          interrupt = reject;
+        }),
+    )
+    .mockResolvedValue({ version: 2 });
+  const session = new PluginProjectSession(
+    1,
+    draft("original"),
+    save,
+    vi.fn(),
+    vi.fn(),
+  );
+
+  session.update(draft("edited"));
+  const pending = session.flush();
+  session.update(draft("original"));
+  interrupt(new Error("Lost response"));
+  await expect(pending).rejects.toThrow("Lost response");
+  expect(session.isSaved).toBe(false);
+
+  await session.flush();
+  expect(save).toHaveBeenLastCalledWith({ ...draft("original"), version: 1 });
+  expect(session.isSaved).toBe(true);
+  session.dispose();
+});
