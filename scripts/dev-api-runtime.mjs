@@ -199,10 +199,11 @@ if (
     ],
     { cwd: repository, stdio: "inherit", detached: true },
   );
-  for (const signal of ["SIGINT", "SIGTERM"])
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"])
     process.on(signal, () => {
       try {
-        process.kill(-child.pid, signal);
+        // The detached runtime misses the terminal hangup. Ask it to stop.
+        process.kill(-child.pid, signal === "SIGHUP" ? "SIGTERM" : signal);
       } catch {}
     });
   child.on("error", () => {
