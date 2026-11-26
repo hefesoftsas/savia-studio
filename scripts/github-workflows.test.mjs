@@ -657,6 +657,7 @@ test("CodeQL scans affected PR languages or manual selections without push or sc
     /github\.event\.pull_request\.base\.sha \|\| github\.sha/,
   );
   assert.match(source, /run: node scripts\/codeql-plan\.mjs/);
+  assert.doesNotMatch(source, /uses: actions\/checkout@v[1-4](?:[.\s]|$)/);
   assert.match(source, /needs: changes/);
   assert.match(source, /if: needs\.changes\.outputs\.should_scan == 'true'/);
   assert.match(source, /fromJSON\(needs\.changes\.outputs\.languages\)/);
