@@ -371,7 +371,8 @@ export class BetterAuthOAuthSession implements AuthSession {
     const callback = new URL(this.navigation.currentUrl());
     const code = callback.searchParams.get("code");
     const state = callback.searchParams.get("state");
-    if (!code || !state) {
+    const authorizationFailed = Boolean(callback.searchParams.get("error"));
+    if (!state || Boolean(code) === authorizationFailed) {
       throw new Error(
         "La respuesta de Better Auth no contiene código y estado.",
       );
@@ -386,7 +387,11 @@ export class BetterAuthOAuthSession implements AuthSession {
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ code, state }),
+        body: JSON.stringify(
+          authorizationFailed
+            ? { state, authorizationFailed }
+            : { code, state },
+        ),
       },
     );
     if (!response.ok) {
@@ -437,8 +442,11 @@ export class BetterAuthOAuthSession implements AuthSession {
       const callback = new URL(this.navigation.currentUrl());
       return (
         callback.pathname === "/auth/callback" &&
-        Boolean(callback.searchParams.get("code")) &&
-        Boolean(callback.searchParams.get("state"))
+        Boolean(callback.searchParams.get("state")) &&
+        Boolean(
+          callback.searchParams.get("code") ||
+          callback.searchParams.get("error"),
+        )
       );
     } catch {
       return false;

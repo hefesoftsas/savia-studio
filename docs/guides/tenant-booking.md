@@ -36,9 +36,9 @@ reports that the workspace is missing or inaccessible, **Retry** resolves it
 again from the current tab and date.
 On a Savia workspace hostname, **Choose another organization** opens the
 Bookings picker for the same environment and keeps the requested tab and date.
-If the identity provider rejects the sign-in code or cannot finish the exchange
-for a valid Bookings transaction, **Sign in again** starts a new transaction
-for the same workspace, tab, and date.
+If the identity provider returns an error during authorization or during the
+code exchange for a valid Bookings transaction, **Sign in again** starts a new
+transaction for the same workspace, tab, and date.
 
 Open **Bookings** in the tenant navigation. Administrators use a five-step setup wizard: **Details → Team → Services → Hours → Review and publish**. Details include the public title, description and IANA time zone; expand **Booking rules** to configure advance notice, booking horizon, cancellation cutoff and reminders. Add professionals from the tenant's users, assign them to services, then configure their weekly schedules. Moving between steps preserves unsaved edits. A service specifies its duration and trailing buffer. Durations, buffers and availability boundaries use five-minute increments; offered start times use fifteen-minute increments.
 

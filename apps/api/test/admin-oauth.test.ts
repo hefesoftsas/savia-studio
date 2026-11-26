@@ -843,6 +843,62 @@ describe("admin OAuth bridge", () => {
       });
     });
 
+    it("returns the Bookings destination when authorization stops before a code is issued", async () => {
+      const f = fixture();
+      const search = new URLSearchParams({
+        resume: "bookings",
+        return_to: tenantOrigin,
+        booking_query: "tab=reservations&date=2026-11-25&ignored=1",
+      });
+      const authorize = await f.app.request(
+        `${canonicalOrigin}/api/auth/admin/authorize?${search}`,
+      );
+      expect(authorize.status).toBe(302);
+      const state = new URL(
+        authorize.headers.get("location")!,
+      ).searchParams.get("state");
+      const failure = () =>
+        f.app.request(`${canonicalOrigin}/api/auth/admin/callback`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: canonicalOrigin,
+          },
+          body: JSON.stringify({ authorizationFailed: true, state }),
+        });
+
+      const response = await failure();
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({
+        error: {
+          code: "OAUTH_AUTHORIZATION_FAILED",
+          message: "The authorization request did not complete",
+        },
+        returnOrigin: tenantOrigin,
+        returnRoute: "bookings",
+        returnBookingQuery: "tab=reservations&date=2026-11-25",
+      });
+      expect(
+        response.headers
+          .getSetCookie()
+          .some((value) => value.startsWith("savia.admin_refresh_token")),
+      ).toBe(false);
+      const replay = await failure();
+      expect(replay.status).toBe(400);
+      await expect(replay.json()).resolves.toEqual({
+        error: {
+          code: "INVALID_OAUTH_STATE",
+          message: "The login transaction is invalid or expired",
+        },
+      });
+      expect(
+        f.authFetch.mock.calls.some(
+          ([request]) =>
+            new URL(request.url).pathname === "/api/auth/oauth2/token",
+        ),
+      ).toBe(false);
+    });
+
     it.each([canonicalOrigin, "http://127.0.0.1:5173"])(
       "resumes bookings without a cross-origin return at %s",
       async (origin) => {

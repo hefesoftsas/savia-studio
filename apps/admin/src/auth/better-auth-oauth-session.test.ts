@@ -318,6 +318,56 @@ describe("BetterAuthOAuthSession", () => {
     );
   });
 
+  it.each(["handleCallback", "getAccessToken"] as const)(
+    "recovers the Bookings destination on a provider error through %s",
+    async (method) => {
+      const apiUrl = "https://savia-preview.hefesoft.com";
+      const returnOrigin = "https://clinic.savia-preview.hefesoft.com";
+      const fetcher = vi.fn().mockResolvedValueOnce(
+        Response.json(
+          {
+            error: {
+              code: "OAUTH_AUTHORIZATION_FAILED",
+              message: "The authorization request did not complete",
+            },
+            returnOrigin,
+            returnRoute: "bookings",
+            returnBookingQuery: "tab=reservations&date=2026-11-25",
+          },
+          { status: 401 },
+        ),
+      );
+      const session = new BetterAuthOAuthSession({
+        apiUrl,
+        navigation: {
+          currentUrl: () =>
+            `${apiUrl}/auth/callback?error=access_denied&state=original-state&error_description=Private+provider+details`,
+          redirect: vi.fn(),
+        },
+        fetcher,
+      });
+      const retry = new URL("/api/auth/admin/authorize", apiUrl);
+      retry.search = new URLSearchParams({
+        return_to: returnOrigin,
+        resume: "bookings",
+        booking_query: "tab=reservations&date=2026-11-25",
+      }).toString();
+      await expect(session[method]()).rejects.toMatchObject({
+        retryHref: retry.href,
+      });
+      expect(fetcher).toHaveBeenCalledExactlyOnceWith(
+        `${apiUrl}/api/auth/admin/callback`,
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            state: "original-state",
+            authorizationFailed: true,
+          }),
+        }),
+      );
+    },
+  );
+
   it.each([undefined, "https://clinic.savia-preview.hefesoft.com"])(
     "starts a fresh authorization to Bookings after a rejected exchange with return origin %s",
     async (returnOrigin) => {

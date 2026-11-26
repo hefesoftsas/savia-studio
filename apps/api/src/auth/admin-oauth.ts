@@ -450,17 +450,21 @@ async function rememberSessionOrigin(
   ]);
 }
 
-function callbackInput(
-  value: unknown,
-): { code: string; state: string } | undefined {
+type CallbackInput =
+  | { state: string; code: string }
+  | { state: string; authorizationFailed: true };
+
+function callbackInput(value: unknown): CallbackInput | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const candidate = value as { code?: unknown; state?: unknown };
-  return typeof candidate.code === "string" &&
-    candidate.code.length > 0 &&
-    typeof candidate.state === "string" &&
-    candidate.state.length > 0
-    ? { code: candidate.code, state: candidate.state }
-    : undefined;
+  const { code, state, authorizationFailed } = value as {
+    code?: unknown;
+    state?: unknown;
+    authorizationFailed?: unknown;
+  };
+  if (typeof state !== "string" || !state) return undefined;
+  if (authorizationFailed === true)
+    return code === undefined ? { state, authorizationFailed } : undefined;
+  return typeof code === "string" && code ? { state, code } : undefined;
 }
 
 async function requestAuthJson(
@@ -808,7 +812,7 @@ export function registerAdminOAuthRoutes(
         {
           error: {
             code: "VALIDATION_ERROR",
-            message: "A callback code and state are required",
+            message: "A callback state and authorization result are required",
           },
         },
         { status: 400, headers },
@@ -850,6 +854,18 @@ export function registerAdminOAuthRoutes(
           ...(bookingResume[1] ? { returnBookingQuery: bookingResume[1] } : {}),
         }
       : undefined;
+    if ("authorizationFailed" in input) {
+      return Response.json(
+        {
+          error: {
+            code: "OAUTH_AUTHORIZATION_FAILED",
+            message: "The authorization request did not complete",
+          },
+          ...bookingDestination,
+        },
+        { status: 401, headers },
+      );
+    }
     const exchange = await requestAuthJson(
       service!,
       "https://savia-auth.internal/api/auth/oauth2/token",
