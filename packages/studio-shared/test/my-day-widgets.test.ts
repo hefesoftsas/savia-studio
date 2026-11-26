@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createMyDayWidgetId,
   defaultMyDayWidgets,
@@ -127,7 +127,28 @@ describe("my-day widgets layout", () => {
     );
     expect(ids.size).toBe(50);
     for (const id of ids) {
-      expect(id).toMatch(/^[a-z0-9_-]{1,48}$/);
+      expect(id).toMatch(/^w_[a-z0-9]{12}$/);
+    }
+  });
+
+  it("draws again when random bytes fall outside the uniform alphabet range", () => {
+    const random = vi
+      .spyOn(crypto, "getRandomValues")
+      .mockImplementationOnce((bytes) => {
+        (bytes as Uint8Array).set([
+          252, 253, 0, 35, 251, 36, 71, 1, 2, 3, 4, 5,
+        ]);
+        return bytes;
+      })
+      .mockImplementationOnce((bytes) => {
+        (bytes as Uint8Array).set([6, 7]);
+        return bytes;
+      });
+    try {
+      expect(createMyDayWidgetId()).toBe("w_a99a9bcdefgh");
+      expect(random).toHaveBeenCalledTimes(2);
+    } finally {
+      random.mockRestore();
     }
   });
 });
