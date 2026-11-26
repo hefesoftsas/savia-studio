@@ -131,7 +131,7 @@ export default defineConfig({
             // verbatim forces every deployment to download tens of MB before
             // the replacement worker can activate, which times out the
             // post-deploy recovery on mobile networks. Keep only the boot
-            // shell closure (+ index, css, top-level statics); the rest stays
+            // shell's scripts and styles (+ index and top-level statics); the rest stays
             // on-demand via runtimeCaching.
             const shell = new Set(offlineShellAssets.keys());
             const manifest = [
@@ -141,11 +141,7 @@ export default defineConfig({
                 // The embedded Flows bundle is served as a separate child
                 // application and loads on demand through /flows-ui/*.
                 if (entry.url.startsWith("flows-ui/")) return false;
-                if (!entry.url.startsWith("assets/")) return true;
-                // Boot CSS is not part of the JS closure walk; it stays
-                // precached (few small files) so first paint is styled.
-                if (entry.url.endsWith(".css")) return true;
-                return false;
+                return !entry.url.startsWith("assets/");
               }),
               ...[...offlineShellAssets]
                 .filter(([url]) => !entries.some((entry) => entry.url === url))
