@@ -62,13 +62,27 @@ it("activates the generated replacement worker without waiting for old tabs to c
       "/plugin-editor.html?version=2",
       "/downloads/savia-plugin-authoring-0.1.0.vsix",
       "/downloads/savia-plugin-authoring-0.1.0.vsix.sha256",
+      "/api/auth/get-session",
+      "/v1/tenants",
+      "/health",
+      "/docs?theme=dark",
+      "/openapi.json",
+      "/mcp",
+      "/webhooks/whatsapp",
+      "/s/b/0123456789abcdef",
+      "/s/p/0123456789abcdef01234567",
+      "/.well-known/oauth-protected-resource",
     ]) {
       expect(
         navigationDenylist.some((pattern) => pattern.test(path)),
         path,
       ).toBe(true);
     }
-    for (const path of ["/plugin-studio", "/office-suite?tab=documents"]) {
+    for (const path of [
+      "/plugin-studio",
+      "/office-suite?tab=documents",
+      "/docs-guide",
+    ]) {
       expect(
         navigationDenylist.some((pattern) => pattern.test(path)),
         path,

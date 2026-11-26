@@ -20,6 +20,9 @@ with an eight-second deadline, released when the last subscriber unmounts.
 Cancelled or superseded results cannot overwrite a newer online state. Checks
 use Savia's API without credentials.
 
+The offline shell sends API documentation, health checks, and short links to
+the network. Short links resolve on the server before opening their destination.
+
 The recovery fallback can outlive the application root after a failed boot or
 chunk load. An explicit update temporarily retains the shared verifier and waits
 for a bounded check even when no UI subscribers remain, then releases it.
