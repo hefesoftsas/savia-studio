@@ -28,6 +28,44 @@ describe("form html field", () => {
     ).toBe("<div>Ok</div>");
   });
 
+  it("filters unsupported links without changing safe links or visible text", () => {
+    const container = document.createElement("div");
+    container.innerHTML = sanitizeFormHtml(
+      "<p>Protocol names include javascript: and data:text/html.</p>" +
+        '<a href="example:manual">Unsupported manual</a>' +
+        '<a href="https://example.test/manual">Online manual</a>' +
+        '<a href="/docs/manual">Local manual</a>',
+    );
+
+    expect({
+      text: container.querySelector("p")?.textContent,
+      destinations: [...container.querySelectorAll("a")].map((link) =>
+        link.getAttribute("href"),
+      ),
+    }).toEqual({
+      text: "Protocol names include javascript: and data:text/html.",
+      destinations: [null, "https://example.test/manual", "/docs/manual"],
+    });
+  });
+
+  it("preserves formatting and declarative field actions", () => {
+    const container = document.createElement("div");
+    container.innerHTML = sanitizeFormHtml(
+      '<p class="help"><strong>Choose a region</strong></p>' +
+        '<button type="button" data-savia-set-value="region" data-savia-value="North">North</button>',
+    );
+
+    expect(container.querySelector(".help strong")?.textContent).toBe(
+      "Choose a region",
+    );
+    const button = container.querySelector("button");
+    expect(button?.type).toBe("button");
+    expect(resolveSavinaSetValueAction(button, {})).toEqual({
+      field: "region",
+      value: "North",
+    });
+  });
+
   it("setValue in script context only allows known fields", () => {
     const setValue = vi.fn();
     const ctx = buildFormHtmlRuntimeContext({
