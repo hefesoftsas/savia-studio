@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, writeFile, rm, access } from "node:fs/promises";
+import {
+  mkdtemp,
+  writeFile,
+  rm,
+  access,
+  readdir,
+  readFile,
+} from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -148,7 +155,7 @@ test("deployment initializes only its bound revision, validates readiness and re
   }
 });
 
-test("restarts a failed remote session before initializing the bound revision once", async () => {
+test("restarts a remote session that exits by signal before initializing the bound revision once", async () => {
   const directory = await mkdtemp(join(tmpdir(), "auth-session-retry-"));
   const configPath = join(directory, "auth.json");
   await writeFile(configPath, JSON.stringify(config));
@@ -165,7 +172,8 @@ test("restarts a failed remote session before initializing the bound revision on
           const nonce = JSON.parse(readFileSync(path, "utf8")).vars.PROBE_NONCE;
           probes.push({ path, nonce });
           const child = new EventEmitter();
-          if (probes.length === 1) queueMicrotask(() => child.emit("exit", 1));
+          if (probes.length === 1)
+            queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
           return child;
         },
         request: async (url, options) => {
@@ -185,6 +193,13 @@ test("restarts a failed remote session before initializing the bound revision on
     assert.equal(probes.length, 2);
     assert.notEqual(probes[0].nonce, probes[1].nonce);
     for (const { path } of probes) await assert.rejects(access(path), /ENOENT/);
+    const diagnosticDirectory = join(directory, "command-errors");
+    const [diagnosticFile] = await readdir(diagnosticDirectory);
+    const diagnostic = JSON.parse(
+      await readFile(join(diagnosticDirectory, diagnosticFile), "utf8"),
+    );
+    assert.equal(diagnostic.exitcode, null);
+    assert.equal(diagnostic.signal, "SIGTERM");
     assert.deepEqual(
       (await readRuntimeTimings(directory)).map(({ label, outcome }) => ({
         label,
@@ -227,7 +242,6 @@ test("failed remote session preserves private diagnostics and reports a safe sta
       ),
       /session unavailable/,
     );
-    const { readdir, readFile } = await import("node:fs/promises");
     const records = await readdir(join(directory, "command-errors"));
     assert.equal(records.length, 2);
     for (const name of records) {

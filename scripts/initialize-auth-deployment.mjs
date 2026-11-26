@@ -138,7 +138,7 @@ async function initializeAuthSession({
   const directory = await mkdtemp(join(tmpdir(), "savia-auth-deployment-"));
   let child,
     exited = false,
-    exitCode = null,
+    processExit,
     stdout = "",
     stderr = "";
   try {
@@ -184,9 +184,9 @@ async function initializeAuthSession({
     child.stderr?.on("data", (chunk) => {
       stderr = (stderr + chunk.toString()).slice(-65_536);
     });
-    child.on("exit", (code) => {
+    child.on("exit", (exitCode, signal) => {
       exited = true;
-      exitCode = code;
+      processExit = { exitCode, signal };
     });
     child.on("error", () => {
       exited = true;
@@ -217,7 +217,7 @@ async function initializeAuthSession({
     );
     if (!ready || exited) {
       report("Auth preparation: remote session unavailable.");
-      if (exitCode !== null)
+      if (processExit)
         throw new AuthSessionExitedError(
           "Auth initialization session unavailable",
         );
@@ -263,7 +263,7 @@ async function initializeAuthSession({
       directory: env.SAVIA_RUNTIME_OPERATION_DIRECTORY,
       executable: "wrangler",
       operation: "auth-initialization-session",
-      error: { exitCode, stdout, stderr },
+      error: { ...processExit, stdout, stderr },
     });
     throw error;
   } finally {
