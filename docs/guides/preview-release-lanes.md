@@ -297,10 +297,11 @@ one native backup-gate check. Full CI uses the three standard API shards. Other
 shared code and unrelated mixed changes retain full validation.
 
 A push to `main` may reuse CI from a merged same-repository pull request for
-application source and test changes or for Pulumi scripts and their tests.
-CI compares GitHub's associated PR and successful
-workflow attempt with the exact Git tree and first parent recorded by a step in
-the PR classification job.
+changes to application source and tests, Pulumi scripts and tests, and the
+Auth initialization helper and its tests. A pull request can combine these
+paths. CI compares GitHub's associated PR and successful workflow attempt
+with the exact Git tree and first parent recorded by a step in the PR
+classification job. That attempt must complete both contract jobs successfully.
 Missing evidence, changed workflow or dependency files, and a different base
 or tree run the usual validation. Public source safety still runs on `main`,
 and publication still requires a successful `main` workflow run.
