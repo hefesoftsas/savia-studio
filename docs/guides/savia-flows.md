@@ -92,8 +92,8 @@ The Admin development proxy preserves its public Host header. Socket ticket
 CSRF checks and returned WebSocket URLs therefore use the browser's origin,
 even though the API listens on a different local port.
 
-Setting `SAVIA_FLOWS_ENABLED=0` skips Flows in the full local stack. No cloud
-deployment pipeline or production service binding is enabled by this change.
+Setting `SAVIA_FLOWS_ENABLED=0` skips Flows in the full local stack. Admin hides
+the Flows menu entry and shows an availability message for saved links.
 
 ## Persistence and recovery
 

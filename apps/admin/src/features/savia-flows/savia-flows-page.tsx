@@ -15,6 +15,7 @@ import {
   saviaFlowsGateState,
   type FlowsTheme,
 } from "./bridge";
+import { isSaviaFlowsDisabled } from "./availability";
 
 const forwardedTokens = [
   "--background",
@@ -62,6 +63,17 @@ export function readSaviaFlowsTheme(): FlowsTheme {
 export const saviaFlowsFrameKey = (tenantId: number) => `tenant-${tenantId}`;
 
 export function SaviaFlowsPage({ services }: { services: AppServices }) {
+  const t = useMessages(automationMessages);
+  if (isSaviaFlowsDisabled())
+    return (
+      <p className="p-6" role="status">
+        {t("Savia Flows is disabled in this environment.")}
+      </p>
+    );
+  return <SaviaFlowsEditor services={services} />;
+}
+
+function SaviaFlowsEditor({ services }: { services: AppServices }) {
   const t = useMessages(automationMessages);
   const { canAccess, isPending } = useCanAccess({
     resource: "savia-flows",

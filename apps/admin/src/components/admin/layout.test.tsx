@@ -154,6 +154,25 @@ describe("admin layout", () => {
     expect(screen.getByRole("link", { name: "Volver a Savia" })).toBeVisible();
   });
 
+  it("keeps the regular navigation on a disabled Flows link", () => {
+    vi.stubEnv("VITE_SAVIA_FLOWS_DISABLED", "true");
+    try {
+      render(
+        <MemoryRouter initialEntries={["/savia-flows"]}>
+          <Layout>
+            <p>Flows unavailable</p>
+          </Layout>
+        </MemoryRouter>,
+      );
+      expect(screen.getByText("Navigation")).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Mostrar u ocultar menú" }),
+      ).toBeVisible();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("returns to Savia and restores its navigation", async () => {
     render(
       <MemoryRouter initialEntries={["/savia-flows?tenantId=0"]}>

@@ -30,6 +30,9 @@ it("builds an isolated Preview without the checkout's API URL or Flows assets", 
     );
     expect(config.env.VITE_SAVIA_API_URL).toBeUndefined();
     expect(config.build.outDir).toBe(assetsDir);
+    expect(config.define?.["import.meta.env.VITE_SAVIA_FLOWS_DISABLED"]).toBe(
+      JSON.stringify("true"),
+    );
     expect(
       config.plugins.some(({ name }) => name === "savia-flows-assets"),
     ).toBe(false);
@@ -38,3 +41,34 @@ it("builds an isolated Preview without the checkout's API URL or Flows assets", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.each([
+  { command: "serve" as const, enabled: "0", disabled: true },
+  { command: "serve" as const, enabled: "1", disabled: false },
+  { command: "build" as const, enabled: "0", disabled: false },
+])(
+  "propagates Flows availability for $command with local Flows $enabled",
+  async ({ command, enabled, disabled }) => {
+    vi.stubEnv("SAVIA_FLOWS_ENABLED", enabled);
+    vi.stubEnv("SAVIA_CI_FLOWS_ENABLED", undefined);
+    try {
+      const config = await resolveConfig(
+        {
+          configFile: fileURLToPath(
+            new URL("../vite.config.ts", import.meta.url),
+          ),
+          logLevel: "silent",
+        },
+        command,
+      );
+      expect(config.define?.["import.meta.env.VITE_SAVIA_FLOWS_DISABLED"]).toBe(
+        disabled ? JSON.stringify("true") : undefined,
+      );
+      expect(
+        config.plugins.some(({ name }) => name === "savia-flows-assets"),
+      ).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  },
+);

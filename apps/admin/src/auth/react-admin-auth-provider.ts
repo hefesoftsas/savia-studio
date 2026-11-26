@@ -1,5 +1,6 @@
 import { beginLogout } from "./logout-progress";
 import type { AuthProvider } from "ra-core";
+import { isSaviaFlowsDisabled } from "@/features/savia-flows/availability";
 import { ApiClientError } from "../api/api-client";
 import type { AuthPermissions, AuthSession } from "./auth-session";
 
@@ -72,6 +73,7 @@ export function createReactAdminAuthProvider(
     getIdentity: () => session.getIdentity(),
     getPermissions: () => session.getPermissions(),
     canAccess: async ({ resource, action }) => {
+      if (resource === "savia-flows" && isSaviaFlowsDisabled()) return false;
       const permissions = await session.getPermissions();
       const isPlatformAdmin = permissions.canManageIdentity;
       if (resource === "access-control")

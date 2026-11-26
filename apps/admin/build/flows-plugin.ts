@@ -78,13 +78,33 @@ function buildFlows(): Promise<void> {
   });
 }
 
+function flowsDisabled(command: "build" | "serve"): boolean {
+  return command === "build"
+    ? process.env.SAVIA_CI_FLOWS_ENABLED === "false"
+    : (process.env.SAVIA_FLOWS_ENABLED || "1") !== "1";
+}
+
+export function flowsAvailabilityPlugin(): Plugin {
+  return {
+    name: "savia-flows-availability",
+    config(_config, { command }) {
+      if (flowsDisabled(command))
+        return {
+          define: {
+            "import.meta.env.VITE_SAVIA_FLOWS_DISABLED": JSON.stringify("true"),
+          },
+        };
+    },
+  };
+}
+
 /** Isolate the embedded editor's router/CSS while serving it from Savia's origin. */
 export function flowsPlugin(): Plugin {
   let mode: "build" | "serve";
   return {
     name: "savia-flows-assets",
     apply: (_config, { command }) =>
-      command !== "build" || process.env.SAVIA_CI_FLOWS_ENABLED !== "false",
+      command !== "build" || !flowsDisabled(command),
     configResolved(config) {
       mode = config.command;
     },
@@ -92,9 +112,17 @@ export function flowsPlugin(): Plugin {
       if (mode === "build") await buildFlows();
     },
     configureServer(server) {
+      const disabled = flowsDisabled("serve");
       server.middlewares.use("/flows-ui", async (request, response, next) => {
         if (request.method !== "GET" && request.method !== "HEAD")
           return next();
+        if (disabled) {
+          response.statusCode = 404;
+          response.setHeader("content-type", "text/plain; charset=utf-8");
+          response.setHeader("cache-control", "no-store");
+          response.end("Savia Flows is disabled in this environment.");
+          return;
+        }
         let path: string;
         try {
           path = decodeURIComponent(
