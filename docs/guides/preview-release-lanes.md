@@ -54,7 +54,9 @@ When `SAVIA_PREVIEW_PLUGIN_EDITOR_ORIGIN` is set, a read-only main-push workflow
 can compile both frontends while CI runs. After CI succeeds, Preview accepts
 the completed same-repository artifact only for its exact revision, Git tree,
 verified frontend origin, toolchain, and file hashes. An unavailable or
-mismatched artifact leads to the usual build from source. The warmup workflow
+mismatched artifact leads to the usual build from source. Preview compiles
+Admin and the standalone plugin editor from explicit build settings and skips
+dotenv files. The artifact proof includes that policy. The warmup workflow
 checks the main push range before installing dependencies. It skips release
 tooling and other non-runtime changes, as well as scoped backend-only changes.
 Preview still plans from the last verified deployment. If an earlier change

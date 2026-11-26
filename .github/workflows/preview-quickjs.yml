@@ -38,6 +38,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @savia/admin run build
+        env:
+          SAVIA_ADMIN_IGNORE_ENV_FILES: "true"
+          SAVIA_CI_FLOWS_ENABLED: ${{ vars.SAVIA_CI_FLOWS_ENABLED }}
       - uses: actions/upload-artifact@v4
         id: upload_assets
         with:

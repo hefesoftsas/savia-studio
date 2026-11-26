@@ -107,6 +107,9 @@ jobs:
         if: ${{ inputs.action == 'deploy' }}
         working-directory: ${{ env.SAVIA_RELEASE_SOURCE_ROOT }}
         run: pnpm --filter @savia/admin run build
+        env:
+          SAVIA_ADMIN_IGNORE_ENV_FILES: "true"
+          SAVIA_CI_FLOWS_ENABLED: ${{ vars.SAVIA_CI_FLOWS_ENABLED }}
 
       - uses: ./.github/actions/install-pulumi
 

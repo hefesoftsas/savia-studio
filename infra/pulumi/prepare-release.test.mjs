@@ -339,7 +339,7 @@ test("a full Preview release uses verified warm assets or rebuilds the full Work
     }),
     client: { api: async () => ({ subdomain: "test-account" }) },
     render: async () => events.push("render"),
-    run: async (binary, args) => {
+    run: async (binary, args, { env }) => {
       if (binary === "pnpm" && args[0] === "--version")
         return { stdout: "11.24.0\n" };
       if (binary === "git")
@@ -353,6 +353,7 @@ test("a full Preview release uses verified warm assets or rebuilds the full Work
                   ? "CREATE TABLE incompatible_change (id INTEGER)"
                   : "",
         };
+      assert.equal(env.SAVIA_ADMIN_IGNORE_ENV_FILES, "true");
       events.push(args.at(-1));
       return { stdout: "" };
     },
@@ -385,6 +386,7 @@ test("a full Preview release uses verified warm assets or rebuilds the full Work
         assert.equal(revision, "b".repeat(40));
         assert.equal(tree, "b".repeat(40));
         assert.equal(pnpmVersion, "11.24.0");
+        assert.equal(env.SAVIA_ADMIN_IGNORE_ENV_FILES, "true");
         assert.equal(
           env.VITE_PLUGIN_EDITOR_RUNTIME_URL,
           "https://savia-plugin-editor-preview.test-account.workers.dev/plugin-editor",

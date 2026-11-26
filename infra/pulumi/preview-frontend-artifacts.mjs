@@ -99,6 +99,7 @@ async function buildIdentity({
       buildEnvironmentSha256: sha256(
         JSON.stringify({
           values: buildEnvironment,
+          ignoreDotenvFiles: env.SAVIA_ADMIN_IGNORE_ENV_FILES === "true",
           flowsFrontendEnabled: env.SAVIA_CI_FLOWS_ENABLED !== "false",
         }),
       ),

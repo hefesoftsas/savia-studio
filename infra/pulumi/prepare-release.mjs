@@ -58,6 +58,8 @@ export async function prepareEnvironmentRelease(
   if (descriptor.kind === "application") {
     const outputs = await readOutputs(environment, { env, run });
     operationEnv = { ...env, ...renderEnvFromOutputs(outputs, root) };
+    if (environment === "preview")
+      operationEnv.SAVIA_ADMIN_IGNORE_ENV_FILES = "true";
     await render(operationEnv);
     const bundleFlows =
       outputs.flowsEnabled &&

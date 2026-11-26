@@ -160,6 +160,9 @@ export async function runBranchDeployment(
       ].includes(key),
     ),
   );
+  buildEnv.SAVIA_ADMIN_IGNORE_ENV_FILES = "true";
+  if (env.SAVIA_CI_FLOWS_ENABLED === "false")
+    buildEnv.SAVIA_CI_FLOWS_ENABLED = "false";
   const sourceRevision = dry
     ? undefined
     : (

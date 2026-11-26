@@ -408,6 +408,17 @@ test("QuickJS PR previews require an explicit label on same-repository main PRs"
   assert.doesNotMatch(preview, /cleanup:|preview-destroy\.mjs/);
 });
 
+test("branch Preview frontend builds use isolated settings and respect the Flows switch", async () => {
+  for (const name of ["preview-environment.yml", "preview-quickjs.yml"]) {
+    const preview = await workflow(name);
+    assert.match(
+      preview,
+      /run: pnpm --filter @savia\/admin run build\s+env:\s+SAVIA_ADMIN_IGNORE_ENV_FILES: "true"\s+SAVIA_CI_FLOWS_ENABLED: \$\{\{ vars\.SAVIA_CI_FLOWS_ENABLED \}\}/,
+      name,
+    );
+  }
+});
+
 test("production import is disabled unless explicitly enabled", async () => {
   const source = await workflow("import-savia-request-variables.yml");
   assert.match(source, /vars\.PRODUCTION_OPERATIONS_ENABLED == 'true'/);
