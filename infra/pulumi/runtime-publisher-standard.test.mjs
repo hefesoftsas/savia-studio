@@ -601,7 +601,7 @@ test("the concrete standard publisher uses existing helpers and never places sec
   }
 });
 
-test("Preview CI flow opt-out skips Flows mutations while preserving its API binding", async () => {
+test("Preview CI flow opt-out needs no Flows bundle and preserves its API binding", async () => {
   const root = await mkdtemp(join(tmpdir(), "savia-core-only-release-"));
   try {
     const source = join(root, "source");
@@ -623,23 +623,25 @@ test("Preview CI flow opt-out skips Flows mutations while preserving its API bin
       release: {
         directory: source,
         configs: Object.fromEntries(
-          names.map((name) => [
-            `${name}.json`,
-            {
-              name,
-              main: "worker.mjs",
-              ...(name === "savia-agencies-preview"
-                ? {
-                    services: [
-                      { binding: "SAVIA_FLOWS", service: "savia-flows-preview" },
-                    ],
-                  }
-                : {}),
-              ...(name === "savia-flows-preview"
-                ? { vars: { SAVIA_FLOWS_POLICY_GENERATION: "100" } }
-                : {}),
-            },
-          ]),
+          names
+            .filter((name) => name !== "savia-flows-preview")
+            .map((name) => [
+              `${name}.json`,
+              {
+                name,
+                main: "worker.mjs",
+                ...(name === "savia-agencies-preview"
+                  ? {
+                      services: [
+                        {
+                          binding: "SAVIA_FLOWS",
+                          service: "savia-flows-preview",
+                        },
+                      ],
+                    }
+                  : {}),
+              },
+            ]),
         ),
       },
       destination: join(root, "artifact"),
@@ -677,7 +679,8 @@ test("Preview CI flow opt-out skips Flows mutations while preserving its API bin
       env,
       root,
       recoveryDirectory: join(root, "recovery"),
-      capture: async () => assert.fail("Flows recovery capture must be skipped"),
+      capture: async () =>
+        assert.fail("Flows recovery capture must be skipped"),
       encrypt: async () => {},
       openWriteControl: async () =>
         assert.fail("Flows opt-out must not use the Flows write lease"),

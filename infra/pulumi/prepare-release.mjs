@@ -59,6 +59,9 @@ export async function prepareEnvironmentRelease(
     const outputs = await readOutputs(environment, { env, run });
     operationEnv = { ...env, ...renderEnvFromOutputs(outputs, root) };
     await render(operationEnv);
+    const bundleFlows =
+      outputs.flowsEnabled &&
+      (environment !== "preview" || env.SAVIA_CI_FLOWS_ENABLED !== "false");
     const apps = [
       "api",
       "auth",
@@ -68,7 +71,7 @@ export async function prepareEnvironmentRelease(
       "connector-gateway",
       "hook-executor",
       "backup-coordinator",
-      ...(outputs.flowsEnabled ? ["flows/api"] : []),
+      ...(bundleFlows ? ["flows/api"] : []),
       ...(environment === "preview" ? ["plugin-editor-runtime"] : []),
     ];
     const includesFrontend = codeOnly?.targets.includes("gateway") ?? false;

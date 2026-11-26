@@ -141,6 +141,47 @@ test("frozen bindings stay inside the selected environment and existing data ide
   );
 });
 
+test("Flows opt-out allows only its missing bundle without dropping the live API binding", () => {
+  const flows = "savia-flows-preview";
+  const preview = { ...inputs, workers: [...inputs.workers, { name: flows }] };
+  const core = structuredClone(configs);
+  core[1].services = [{ binding: "SAVIA_FLOWS", service: flows }];
+  const options = { skipPreviewFlows: true };
+  assert.equal(assertRuntimeBindings(preview, core, options), true);
+  assert.equal(
+    assertRuntimeBindings(preview, [...core, { name: flows }], options),
+    true,
+  );
+  assert.throws(() => assertRuntimeBindings(preview, core), /missing/i);
+  assert.throws(
+    () => assertRuntimeBindings(preview, core.slice(1), options),
+    /missing/i,
+  );
+  assert.throws(
+    () => assertRuntimeBindings(inputs, core, options),
+    /crosses environment/i,
+  );
+  assert.throws(
+    () =>
+      assertRuntimeBindings(
+        {
+          ...inputs,
+          environment: "production",
+          workers: [{ name: "savia-agencies" }, { name: "savia-flows" }],
+          adoptionManifest: { profile: {}, resources: [] },
+        },
+        [
+          {
+            name: "savia-agencies",
+            services: [{ binding: "SAVIA_FLOWS", service: "savia-flows" }],
+          },
+        ],
+        options,
+      ),
+    /missing/i,
+  );
+});
+
 test("verified Preview code scope allows exactly selected configs while checking bindings against full ownership", () => {
   const partial = [configs[1]],
     revision = "b".repeat(40),

@@ -79,6 +79,75 @@ test("standard preparation derives actual binding IDs and freezes the exact sour
   assert.equal(result.sourceRevision, "b".repeat(40));
 });
 
+test("full Preview preparation bundles provisioned Flows only when enabled", async () => {
+  const accountId = "a".repeat(32);
+  const names = resolveInfraNames({
+    environment: "preview",
+    documentsBucket: "savia-documents-preview",
+    publicOrigin: "https://savia-preview.hefesoft.com",
+  });
+  for (const flowsSetting of ["false", "true", undefined]) {
+    await prepareEnvironmentRelease(
+      { environment: "preview", destination: "/tmp/not-created-flows-profile" },
+      {
+        env: {
+          CLOUDFLARE_ACCOUNT_ID: accountId,
+          SAVIA_CI_FLOWS_ENABLED: flowsSetting,
+        },
+        readOutputs: async () => ({
+          cloudflareAccountId: accountId,
+          authD1Id: "auth-id",
+          domainD1Id: "domain-id",
+          documentsBucketName: names.bucket,
+          resolvedEnvironment: "preview",
+          resolvedPublicOrigin: names.publicOrigin,
+          workerNames: names.workers,
+          databaseNames: names.databases,
+          deletionProtected: false,
+          flowsEnabled: true,
+          flowsExecutionEnabled: true,
+          flowsResources: {
+            databaseId: "flows-db-id",
+            kvNamespaceId: "flows-kv-id",
+            workerName: names.flows.worker,
+            workflowName: names.flows.workflow,
+            queueName: names.flows.queue,
+            deadLetterQueueName: names.flows.deadLetterQueue,
+            buckets: names.flows.buckets,
+          },
+          plannedFlowsResourceNames: names.flows,
+        }),
+        client: { api: async () => ({ subdomain: "test-account" }) },
+        render: async (env) => {
+          assert.equal(env.SAVIA_FLOWS_PROVISIONED, "true");
+          assert.equal(
+            JSON.parse(env.SAVIA_FLOWS_RESOURCES).workerName,
+            "savia-flows-preview",
+          );
+        },
+        run: async (binary) => ({
+          stdout: binary === "git" ? "b".repeat(40) : "",
+        }),
+        freeze: async ({ configs, assetsReady }) => {
+          await assetsReady;
+          assert.equal(
+            configs.some((path) =>
+              path.endsWith("flows/api/wrangler.preview.jsonc"),
+            ),
+            flowsSetting !== "false",
+          );
+          assert.ok(
+            configs.some((path) =>
+              path.endsWith("apps/api/wrangler.preview.jsonc"),
+            ),
+          );
+          return {};
+        },
+      },
+    );
+  }
+});
+
 test("verified Preview code scope is selected before builds and freezes only its Worker targets", async () => {
   const accountId = "a".repeat(32),
     names = resolveInfraNames({
