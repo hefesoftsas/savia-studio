@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -323,4 +325,53 @@ test("exposes Admin inside a container while preserving browser OAuth URLs", asy
     commands,
     /@savia\/auth exec wrangler dev --local --ip 127\.0\.0\.1/,
   );
+});
+
+test("can verify Admin forwarding and reject a successful HTML fallback", async (t) => {
+  let adminServesShell = false;
+  let interruptOpenApi = true;
+  const server = createServer((request, response) => {
+    const path = request.url.split("/").at(-1);
+    if (request.url.startsWith("/admin/") && adminServesShell) {
+      response.setHeader("content-type", "text/html");
+      response.end("<html>Admin shell</html>");
+      return;
+    }
+    if (path === "docs") {
+      response.end("<html>Scalar API reference</html>");
+      return;
+    }
+    if (path === "openapi.json" && interruptOpenApi) {
+      interruptOpenApi = false;
+      response.writeHead(200, { "content-length": 64, connection: "close" });
+      response.end("{");
+      return;
+    }
+    response.end(
+      JSON.stringify(
+        path === "health"
+          ? { status: "ok", database: "ok" }
+          : { openapi: "3.1.0", paths: { "/health": {} } },
+      ),
+    );
+  });
+  t.after(() => server[Symbol.asyncDispose]());
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const verify = (adminUrl) =>
+    executeFile("sh", ["scripts/verify-local-stack.sh"], {
+      env: { ...process.env, API_URL: `${origin}/api`, ADMIN_URL: adminUrl },
+      timeout: 5000,
+    });
+  assert.match((await verify("")).stdout, /Local stack verified/);
+  assert.match(
+    (await verify(`${origin}/admin`)).stdout,
+    /Local Admin proxy verified/,
+  );
+  adminServesShell = true;
+  await assert.rejects(verify(`${origin}/admin`), {
+    code: 1,
+    stderr: `Expected ${origin}/admin/health to report status: ok and database: ok\n`,
+  });
 });
