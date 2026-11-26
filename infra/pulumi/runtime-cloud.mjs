@@ -148,6 +148,7 @@ export function createRuntimeCloudClient(
   }
   async function readSnapshot({
     allowUndeployed = false,
+    includeBootstrapState = false,
     includeDependencies = false,
     observeFlowsPolicy = true,
   } = {}) {
@@ -194,6 +195,8 @@ export function createRuntimeCloudClient(
             : undefined,
         };
       }
+      if (includeBootstrapState && typeof native.deployed_on !== "string")
+        throw new Error("Unknown Worker publication state");
       const path = `/workers/scripts/${worker.name}`;
       const deployment = await readApi(`${path}/deployments`);
       const versions = deployment.deployments?.[0]?.versions;
@@ -225,6 +228,13 @@ export function createRuntimeCloudClient(
           .filter((binding) => binding.type === "plain_text")
           .map((binding) => [binding.name, binding.text]),
       );
+      if (includeBootstrapState) {
+        workerVersion.bootstrapPlaceholder =
+          flags.SAVIA_RUNTIME_BOOTSTRAP === "true";
+        workerVersion.retained =
+          flags.SAVIA_RUNTIME_RETIRED === "true" ||
+          flags.SAVIA_RUNTIME_WARMUP === "true";
+      }
       const dependencies = includeDependencies
         ? [
             ...new Set(

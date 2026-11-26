@@ -416,6 +416,11 @@ bindings, execution policy and schedules in order. Results retain input order;
 a failure stops new reads and settles in-flight requests before returning an
 error. Production and other environments retain serial Worker reads.
 
+Application bootstrap identifies placeholders and retained Workers from the
+version already serving traffic in its fresh snapshot. It reuses that observation
+for deployed Workers and rechecks an undeployed identity before publishing a
+placeholder. A later uploaded version cannot change this bootstrap decision.
+
 Preview account inventory reuses service and foreign Durable Object dependency
 names from those same serving-version bindings, avoiding a second script-settings
 request for every deployed Worker. It returns only validated dependency names;

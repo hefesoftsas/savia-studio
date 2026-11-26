@@ -3,9 +3,12 @@ import { join } from "node:path";
 
 export async function bootstrapRuntimeWorkers(
   inputs,
-  { client, directory, runWrangler },
+  { client, directory, observedWorkerVersions, runWrangler },
 ) {
   const pending = [];
+  const observedWorkers = observedWorkerVersions
+    ? new Map(observedWorkerVersions.map((worker) => [worker.name, worker]))
+    : null;
   // Verify every target before the first publication.
   for (const worker of inputs.workers) {
     if (
@@ -14,6 +17,19 @@ export async function bootstrapRuntimeWorkers(
       !/^[a-f\d]{32}$/.test(worker.cloudId)
     )
       throw new Error("Invalid bootstrap identity");
+    if (observedWorkers) {
+      const observed = observedWorkers.get(worker.name);
+      if (observed?.cloudId !== worker.cloudId)
+        throw new Error("Bootstrap Worker identity mismatch");
+      if (observed.versionId !== null) {
+        if (typeof observed.versionId !== "string" || !observed.versionId)
+          throw new Error("Unknown Worker publication state");
+        if (observed.bootstrapPlaceholder === true)
+          pending.push({ name: worker.name, publish: false });
+        continue;
+      }
+    }
+    // Recheck undeployed identities before creating a placeholder.
     const native = await client.api(`/workers/workers/${worker.cloudId}`);
     if (native.id !== worker.cloudId || native.name !== worker.name)
       throw new Error("Bootstrap Worker identity mismatch");
@@ -22,6 +38,8 @@ export async function bootstrapRuntimeWorkers(
     else {
       if (typeof native.deployed_on !== "string")
         throw new Error("Unknown Worker publication state");
+      if (observedWorkers)
+        throw new Error("Worker publication state changed during bootstrap");
       const settings = await client.api(
         `/workers/scripts/${worker.name}/settings`,
       );

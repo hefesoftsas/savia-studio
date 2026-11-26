@@ -250,13 +250,16 @@ export function createRuntimeOperations(
       // The release still captures a fresh snapshot for recovery before deploy.
       if (codeOnlyRelease) return { createdWorkers: [] };
       let retained = false,
-        paused = false;
+        paused = false,
+        observedWorkerVersions;
       if (environment.kind === "application") {
         const observation = await readSnapshot({
           allowUndeployed: true,
+          includeBootstrapState: true,
         });
+        observedWorkerVersions = observation.workerVersions;
         if (
-          observation.workerVersions.some(
+          observedWorkerVersions.some(
             (worker) => !managesWorker(worker) && worker.versionId === null,
           )
         )
@@ -264,22 +267,9 @@ export function createRuntimeOperations(
             "The existing Preview Flows Worker must be deployed before publishing the runtime without Flows.",
           );
         paused = !!observation.maintenanceWorkerNames?.length;
-        for (const worker of observation.workerVersions.filter(
-          (row) => managesWorker(row) && row.versionId !== null,
-        )) {
-          const settings = await client.api(
-            `/workers/scripts/${worker.name}/settings`,
-          );
-          retained ||=
-            settings.bindings?.some(
-              (binding) =>
-                binding.type === "plain_text" &&
-                ["SAVIA_RUNTIME_RETIRED", "SAVIA_RUNTIME_WARMUP"].includes(
-                  binding.name,
-                ) &&
-                binding.text === "true",
-            ) ?? false;
-        }
+        retained = observedWorkerVersions.some(
+          (worker) => managesWorker(worker) && worker.retained === true,
+        );
       }
       bootstrap = await bootstrapRuntimeWorkers(
         {
@@ -289,6 +279,7 @@ export function createRuntimeOperations(
         {
           client,
           directory: await work(),
+          observedWorkerVersions,
           runWrangler,
         },
       );
