@@ -519,8 +519,10 @@ packages through their configured catalog.
 
 The `ci-config` profile runs the contract suite and public-source safety checks
 for the exact orchestration allowlist in `scripts/preview-change-plan.mjs`.
-It includes the CI, Preview, CodeQL and Coverage workflows and named release and
-security selectors. It does not include arbitrary workflow or script directories.
+It includes the CI, Preview, CodeQL and Coverage workflows, named release and
+security selectors, and the Preview frontend warmup and migration diagnostic
+workflows with their contract-tested helpers. It does not include arbitrary
+workflow or script directories.
 Classifier and required-gate edits, dependency files, test-distribution helpers,
 unknown files and mixtures with application changes retain full CI.
 

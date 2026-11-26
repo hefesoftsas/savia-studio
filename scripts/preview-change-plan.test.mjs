@@ -421,13 +421,20 @@ test("CI selects ci-config only for the explicit orchestration path allowlist", 
     ".github/workflows/codeql.yml",
     ".github/workflows/coverage.yml",
     ".github/workflows/deploy-preview.yml",
+    ".github/workflows/inspect-preview-migration-failure.yml",
+    ".github/workflows/preview-frontend-warmup.yml",
+    "infra/pulumi/environment-workflow.test.mjs",
+    "infra/pulumi/preview-command-diagnostics.mjs",
+    "infra/pulumi/preview-command-diagnostics.test.mjs",
     "scripts/codeql-plan.mjs",
     "scripts/codeql-plan.test.mjs",
     "scripts/github-workflows.test.mjs",
+    "scripts/preview-code-release.test.mjs",
     "scripts/preview-release-plan.mjs",
     "scripts/preview-release-plan.test.mjs",
     "scripts/preview-component-evidence.mjs",
     "scripts/preview-component-evidence.test.mjs",
+    "scripts/warm-preview-frontend.mjs",
   ];
   for (const path of allowedPaths) f.put(path, "// baseline\n");
   f.put("docs/guides/ci.md", "CI guide\n");
@@ -442,10 +449,14 @@ test("CI selects ci-config only for the explicit orchestration path allowlist", 
 
   for (const path of [
     ".github/workflows/other.yml",
+    ".github/workflows/deploy-cloudflare.yml",
     "scripts/other-ci-helper.mjs",
     "package.json",
     "pnpm-lock.yaml",
+    "apps/admin/src/example.tsx",
+    "apps/admin/vite.config.ts",
     "apps/api/src/index.ts",
+    "infra/pulumi/runtime-operations.mjs",
   ]) {
     const scenario = fixture(t);
     scenario.put(".github/workflows/ci.yml", "name: CI\n");
