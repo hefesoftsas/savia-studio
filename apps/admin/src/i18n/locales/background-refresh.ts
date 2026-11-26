@@ -17,5 +17,10 @@ export const backgroundRefreshMessages = {
     "The workspace could not be identified. Retry to continue.",
     "Não foi possível identificar a organização. Tente novamente para continuar.",
   ],
+  "Choose another organization": [
+    "Elegir otra organización",
+    "Choose another organization",
+    "Escolher outra organização",
+  ],
   Retry: ["Reintentar", "Retry", "Tentar novamente"],
 } as const satisfies MessageCatalog;

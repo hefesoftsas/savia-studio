@@ -6,10 +6,12 @@ import { backgroundRefreshMessages } from "@/i18n/locales/background-refresh";
 export function TenantScopeBoundary({
   status,
   retry,
+  organizationPickerHref,
   children,
 }: {
   status?: "platform" | "loading" | "resolved" | "error" | "unavailable";
   retry?: () => void;
+  organizationPickerHref?: string;
   children: ReactNode;
 }) {
   const t = useMessages(backgroundRefreshMessages);
@@ -24,11 +26,22 @@ export function TenantScopeBoundary({
   return (
     <section role="alert" className="grid justify-items-start gap-3 p-6">
       <p>{t("Workspace could not be resolved")}</p>
-      {retry ? (
-        <Button variant="outline" onClick={retry}>
-          {t("Retry")}
-        </Button>
-      ) : null}
+      {(retry || organizationPickerHref) && (
+        <div className="flex flex-wrap gap-2">
+          {retry && (
+            <Button type="button" variant="outline" onClick={retry}>
+              {t("Retry")}
+            </Button>
+          )}
+          {organizationPickerHref && (
+            <Button asChild variant="ghost">
+              <a href={organizationPickerHref}>
+                {t("Choose another organization")}
+              </a>
+            </Button>
+          )}
+        </div>
+      )}
     </section>
   );
 }

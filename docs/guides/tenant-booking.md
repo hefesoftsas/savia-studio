@@ -34,6 +34,8 @@ If your session expires in Bookings, signing in again opens the same view.
 On a dedicated hostname, Bookings waits for a valid workspace. If the server
 reports that the workspace is missing or inaccessible, **Retry** resolves it
 again from the current tab and date.
+On a Savia workspace hostname, **Choose another organization** opens the
+Bookings picker for the same environment and keeps the requested tab and date.
 If the identity provider rejects the sign-in code or cannot finish the exchange
 for a valid Bookings transaction, **Sign in again** starts a new transaction
 for the same workspace, tab, and date.

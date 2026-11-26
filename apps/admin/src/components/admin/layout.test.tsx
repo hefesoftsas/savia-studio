@@ -1,3 +1,4 @@
+// @vitest-environment-options {"url":"https://clinic.savia-preview.hefesoft.com/"}
 import {
   cleanup,
   fireEvent,
@@ -7,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { useCurrentTenant } from "@/features/tenants/use-current-tenant";
 import { Layout } from "./layout";
 
 vi.mock("ra-core", async (importOriginal) => {
@@ -67,6 +69,9 @@ vi.mock("@/features/notifications/notification-bell", () => ({
 vi.mock("@/pwa", () => ({
   PwaInstallBanner: () => <div data-testid="pwa-install-banner" />,
 }));
+vi.mock("@/features/tenants/use-current-tenant", () => ({
+  useCurrentTenant: vi.fn(() => ({})),
+}));
 
 afterEach(cleanup);
 
@@ -91,6 +96,43 @@ function RouteControls() {
 }
 
 describe("admin layout", () => {
+  it("lets a blocked Bookings user choose another organization with the same tab and date", () => {
+    vi.mocked(useCurrentTenant).mockReturnValueOnce({
+      isDedicated: true,
+      slug: "clinic",
+      name: "Clinic",
+      kind: "commercial",
+      id: null,
+      monogram: "C",
+      isPlatformAdmin: false,
+      isLoading: false,
+      scopeStatus: "error",
+      retry: vi.fn(),
+    });
+    render(
+      <MemoryRouter
+        initialEntries={[
+          "/BOOKINGS/?tab=reservations&date=2026-11-25&ignored=1",
+        ]}
+      >
+        <Layout>
+          <p>Protected appointments</p>
+        </Layout>
+      </MemoryRouter>,
+    );
+
+    expect(
+      screen.queryByText("Protected appointments"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", {
+        name: /Choose another organization|Elegir otra organización/,
+      }),
+    ).toHaveAttribute(
+      "href",
+      "https://savia-preview.hefesoft.com/#/bookings?tab=reservations&date=2026-11-25",
+    );
+  });
   it.each([
     "/savia-flows?tenantId=0",
     "/savia-flows/",
