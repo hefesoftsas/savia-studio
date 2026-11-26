@@ -18,6 +18,9 @@ The server remains authoritative for both widget layout and calendar data. The
 in-memory copy is only a display aid between route mounts, and older in-flight
 responses are discarded after a newer refresh or an identity change.
 
+New widget IDs use the `w_` prefix followed by twelve uniformly selected
+lowercase letters or digits.
+
 The optional Office documents widget reads recent Savia and connected-drive
 documents only while Office suite is enabled for the active tenant. It shows at
 most five links ordered by their most recent update or creation time. It does

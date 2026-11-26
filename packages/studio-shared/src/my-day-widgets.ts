@@ -156,9 +156,19 @@ export function parseMyDayWidgets(value: unknown): MyDayWidgetsLayout {
 
 export function createMyDayWidgetId(): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  const suffixLength = 12;
+  // Each character must be represented by the same number of byte values.
+  const byteLimit = 256 - (256 % alphabet.length);
   let suffix = "";
-  for (const byte of bytes) suffix += alphabet[byte % alphabet.length];
+  while (suffix.length < suffixLength) {
+    const bytes = crypto.getRandomValues(
+      new Uint8Array(suffixLength - suffix.length),
+    );
+    for (const byte of bytes) {
+      if (byte >= byteLimit) continue;
+      suffix += alphabet[byte % alphabet.length];
+    }
+  }
   return `w_${suffix}`;
 }
 
