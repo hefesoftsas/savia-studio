@@ -1,9 +1,86 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   classifyPreviewCodeChanges,
   derivePreviewCodeScope,
 } from "./preview-code-release.mjs";
+
+test("the frontend warmup plans exact main pushes before requiring build inputs", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "savia-frontend-warmup-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const git = (...args) =>
+    execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  git("init", "-b", "main");
+  git("config", "user.email", "test@example.test");
+  git("config", "user.name", "Release test");
+  git("config", "commit.gpgsign", "false");
+  const commit = (path, text) => {
+    const filepath = join(cwd, path);
+    mkdirSync(dirname(filepath), { recursive: true });
+    writeFileSync(filepath, text);
+    git("add", path);
+    git("commit", "-m", "Fixture update");
+    return git("rev-parse", "HEAD");
+  };
+  const plan = (base) => {
+    const output = join(cwd, "workflow-output");
+    writeFileSync(output, "");
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL("./warm-preview-frontend.mjs", import.meta.url)),
+        "--plan",
+      ],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          GITHUB_EVENT_NAME: "push",
+          GITHUB_REF: "refs/heads/main",
+          GITHUB_SHA: git("rev-parse", "HEAD"),
+          GITHUB_OUTPUT: output,
+          PREVIEW_PUSH_BASE: base,
+          PREVIEW_PLUGIN_EDITOR_ORIGIN: "",
+        },
+      },
+    );
+    return readFileSync(output, "utf8");
+  };
+  commit("apps/admin/src/view.tsx", "export const value = 1;\n");
+  const initial = commit(
+    "apps/api/src/service.ts",
+    "export const value = 1;\n",
+  );
+  const tooling = commit(
+    "infra/pulumi/prepare-release.mjs",
+    "export const value = 1;\n",
+  );
+  assert.equal(plan(initial), "needed=false\n");
+  const backend = commit(
+    "apps/api/src/service.ts",
+    "export const value = 2;\n",
+  );
+  assert.equal(plan(tooling), "needed=false\n");
+  commit("apps/admin/src/view.tsx", "export const value = 2;\n");
+  assert.equal(plan(backend), "needed=true\n");
+  assert.equal(plan("0".repeat(40)), "needed=true\n");
+});
+
 const file = (
   path,
   before = "export const x = 1",
@@ -132,7 +209,7 @@ test("scope requires a verified ancestor and exact source reads; errors fail clo
     return {
       stdout:
         args[0] === "diff"
-          ? "apps/api/src/auth/admin-oauth.ts\n"
+          ? "apps/api/src/auth/admin-oauth.ts\0"
           : args[0] === "show"
             ? "export const x = 1"
             : "",
@@ -192,7 +269,7 @@ test("derivation skips non-runtime paths before reading files absent from the ba
     run: async (_, args) => {
       if (args[0] === "diff")
         return {
-          stdout: "apps/auth/src/lib/utils.ts\ndocs/new-release-guide.md\n",
+          stdout: "apps/auth/src/lib/utils.ts\0docs/new-release-guide.md\0",
         };
       if (args[0] === "show" && args[1].includes("docs/"))
         throw Error("new guide missing from baseline");

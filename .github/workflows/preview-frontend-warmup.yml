@@ -21,6 +21,7 @@ jobs:
     env:
       PNPM_CONFIG_STRICT_DEP_BUILDS: "false"
       SAVIA_CI_FLOWS_ENABLED: ${{ vars.SAVIA_CI_FLOWS_ENABLED }}
+      PREVIEW_PUSH_BASE: ${{ github.event.before }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,13 +38,19 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - name: Check whether this push needs frontend assets
+        id: plan
+        run: node scripts/warm-preview-frontend.mjs --plan
+
+      - name: Install dependencies
+        if: ${{ steps.plan.outputs.needed == 'true' }}
+        run: pnpm install --frozen-lockfile
 
       - name: Prepare frontend assets from the exact main revision
+        if: ${{ steps.plan.outputs.needed == 'true' }}
         id: warmup
         run: node scripts/warm-preview-frontend.mjs "$RUNNER_TEMP/savia-frontend-assets"
         env:
-          PREVIEW_PUSH_BASE: ${{ github.event.before }}
           PREVIEW_PLUGIN_EDITOR_ORIGIN: ${{ vars.SAVIA_PREVIEW_PLUGIN_EDITOR_ORIGIN }}
           NODE_OPTIONS: "--max-old-space-size=1536"
 

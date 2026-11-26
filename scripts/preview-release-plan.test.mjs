@@ -489,6 +489,7 @@ test("workflow, tests, documentation, and known asset-only files do not require 
   assert.equal(
     releaseRuntimeChanged([
       ".github/workflows/deploy-preview.yml",
+      ".github/workflows/preview-frontend-warmup.yml",
       ".github/workflows/inspect-preview-backup-gate.yml",
       ".github/workflows/ci.yml",
       ".github/workflows/codeql.yml",
@@ -499,6 +500,7 @@ test("workflow, tests, documentation, and known asset-only files do not require 
       "scripts/admin-test-durations.json",
       "scripts/contract-check-gate.mjs",
       "scripts/preview-release-plan.mjs",
+      "scripts/warm-preview-frontend.mjs",
       "scripts/preview-component-evidence.mjs",
       "scripts/inspect-preview-backup-gate.mjs",
       "scripts/inspect-production-backup-gate.mjs",

@@ -55,7 +55,11 @@ can compile both frontends while CI runs. After CI succeeds, Preview accepts
 the completed same-repository artifact only for its exact revision, Git tree,
 verified frontend origin, toolchain, and file hashes. An unavailable or
 mismatched artifact leads to the usual build from source. The warmup workflow
-receives no deployment credentials.
+checks the main push range before installing dependencies. It skips release
+tooling and other non-runtime changes, as well as scoped backend-only changes.
+Preview still plans from the last verified deployment. If an earlier change
+needs frontend assets, the deploy job builds them from source when a warm
+artifact is unavailable. The warmup workflow receives no deployment credentials.
 
 The complete lane preserves the established write pause, drain, Durable Object
 snapshot, coherent D1/R2 backup, encrypted archive, infrastructure, migration,
