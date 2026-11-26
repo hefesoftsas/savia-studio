@@ -61,8 +61,13 @@ verified frontend origin, toolchain, and file hashes. An unavailable or
 mismatched artifact leads to the usual build from source. Preview compiles
 Admin and the standalone plugin editor from explicit build settings and skips
 dotenv files. The artifact proof includes that policy. The warmup workflow
-checks the main push range before installing dependencies. It skips release
+checks the main push range before setting up pnpm or restoring its cache. It skips release
 tooling and other non-runtime changes, as well as scoped backend-only changes.
+Set `SAVIA_PREVIEW_HOSTED_FRONTEND_REVISION` to the pinned plugin commit only
+after confirming that the hosted assembly changes frontend inputs. A matching
+pin skips standalone warmup. A different or unset revision uses the usual
+planning rules. The deploy job checks the assembled source before accepting any
+standalone frontend artifact.
 Preview still plans from the last verified deployment. If an earlier change
 needs frontend assets, the deploy job builds them from source when a warm
 artifact is unavailable. The warmup workflow receives no deployment credentials.

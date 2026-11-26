@@ -95,6 +95,23 @@ test("Preview frontend warmup runs from main without deployment credentials", as
   assert.match(warmup, /run: node scripts\/warm-preview-frontend\.mjs --plan/);
   assert.match(
     warmup,
+    /SAVIA_PREVIEW_HOSTED_FRONTEND_REVISION: \$\{\{ vars\.SAVIA_PREVIEW_HOSTED_FRONTEND_REVISION \}\}/,
+  );
+  const planIndex = warmup.indexOf(
+    "run: node scripts/warm-preview-frontend.mjs --plan",
+  );
+  assert.ok(planIndex < warmup.indexOf("uses: pnpm/action-setup"));
+  assert.ok(planIndex < warmup.indexOf("cache: pnpm"));
+  assert.match(
+    warmup,
+    /name: Set up pnpm\s+if: \$\{\{ steps\.plan\.outputs\.needed == 'true' \}\}\s+uses: pnpm\/action-setup/,
+  );
+  assert.match(
+    warmup,
+    /name: Restore pnpm store\s+if: \$\{\{ steps\.plan\.outputs\.needed == 'true' \}\}/,
+  );
+  assert.match(
+    warmup,
     /name: Install dependencies\s+if: \$\{\{ steps\.plan\.outputs\.needed == 'true' \}\}\s+run: pnpm install --frozen-lockfile/,
   );
   assert.match(
