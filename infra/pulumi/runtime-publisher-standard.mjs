@@ -15,6 +15,7 @@ import { buildSecretUploads } from "../../scripts/upload-cloudflare-secrets.mjs"
 import { withBackupWriteLease } from "../../scripts/production-backup-gate.mjs";
 import { startPreviewWriteLeaseTransport } from "../../scripts/flows-maintenance-transport.mjs";
 import { PREVIEW_PUBLIC_ORIGIN } from "./naming.mjs";
+import { hasRequiredWorkerConfigs } from "./runtime-bindings.mjs";
 import { recordRuntimeTiming } from "./runtime-timing.mjs";
 import { verifyRuntimeArtifact, publishRuntime } from "./runtime-publisher.mjs";
 import {
@@ -378,7 +379,7 @@ export async function createStandardPublisher(
       runWrangler,
     });
   }
-  if (byName.size !== inputs.workers.length)
+  if (!hasRequiredWorkerConfigs(inputs, byName, !flowsReleaseEnabled))
     throw new Error("Missing prepared standard Workers");
   const uploads = buildSecretUploads(inputs.environment, env).filter(
     (upload) => flowsReleaseEnabled || upload.worker !== roleNames.flows,
@@ -419,7 +420,8 @@ export async function createStandardPublisher(
       backupEnabled,
       runtimeState,
       flowsPolicyGeneration: finalFlowsGeneration,
-      desiredFlows: !!configs.flows,
+      desiredFlows:
+        Boolean(configs.flows) || (!flowsReleaseEnabled && provisionedFlows),
       configs,
       recoveryDirectory,
       migrationDirectory,

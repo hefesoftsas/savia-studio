@@ -52,7 +52,29 @@ export function expectedPreviewCodeOnlyWorkers(releaseSource) {
     throw new Error("Invalid verified Preview code scope");
   return targets.map((target) => codeOnlyWorkerNames[target]).sort();
 }
-export function assertRuntimeBindings(inputs, configs, { releaseSource } = {}) {
+export function hasRequiredWorkerConfigs(
+  { environment, workers },
+  prepared,
+  skipPreviewFlows = false,
+) {
+  const names = new Set(workers.map(({ name }) => name));
+  return (
+    names.size === workers.length &&
+    [...names].every(
+      (name) =>
+        prepared.has(name) ||
+        (skipPreviewFlows &&
+          environment === "preview" &&
+          name === "savia-flows-preview"),
+    )
+  );
+}
+
+export function assertRuntimeBindings(
+  inputs,
+  configs,
+  { releaseSource, skipPreviewFlows = false } = {},
+) {
   const policy = resourcePolicy(
       inputs.environment,
       inputs.adoptionManifest?.profile ?? {},
@@ -151,7 +173,7 @@ export function assertRuntimeBindings(inputs, configs, { releaseSource } = {}) {
       throw new Error(
         "Prepared Workers do not exactly match verified code scope",
       );
-  } else if (seen.size !== own.size)
+  } else if (!hasRequiredWorkerConfigs(inputs, seen, skipPreviewFlows))
     throw new Error("Missing prepared Worker profile");
   return true;
 }

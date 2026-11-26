@@ -225,6 +225,7 @@ export function createRuntimeOperations(
       );
       assertRuntimeBindings(inputs, configs, {
         releaseSource: manifest.releaseSource,
+        skipPreviewFlows,
       });
       if (environment.kind === "application")
         publisher = await createStandardPublisher(inputs, {
