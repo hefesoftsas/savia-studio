@@ -196,6 +196,8 @@ content.
 ## Typical issues
 
 - **Port taken**: admin bumps its own port; pin it with `SAVIA_ADMIN_PORT`.
+  Stop the stack with Ctrl-C before restarting. If the terminal sends a
+  hangup signal, the launcher shuts down the local Workers.
 - **Two Wrangers on the same state**: a single runtime owns
   `apps/api/.wrangler/state`; do not start another one over it.
 - **Postgres**: only a source for legacy imports (`pnpm legacy:postgres`).

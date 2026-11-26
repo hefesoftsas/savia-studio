@@ -502,6 +502,8 @@ test("workflow, tests, documentation, and known asset-only files do not require 
       "scripts/contract-check-gate.mjs",
       "scripts/preview-release-plan.mjs",
       "scripts/warm-preview-frontend.mjs",
+      "scripts/dev-local.sh",
+      "scripts/dev-api-runtime.mjs",
       "scripts/verify-local-stack.sh",
       "scripts/preview-component-evidence.mjs",
       "scripts/inspect-preview-backup-gate.mjs",

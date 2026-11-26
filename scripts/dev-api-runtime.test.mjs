@@ -1,10 +1,89 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import {
+  copyFile,
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { prepareApiRuntime } from "./dev-api-runtime.mjs";
+
+test("stops the detached API process when the launcher receives SIGHUP", async (t) => {
+  const root = await mkdtemp(resolve(tmpdir(), "savia-runtime-hangup-"));
+  let runtime;
+  let workerPid;
+  t.after(async () => {
+    if (runtime?.exitCode === null && runtime.signalCode === null)
+      runtime.kill("SIGKILL");
+    if (workerPid) {
+      try {
+        process.kill(-workerPid, "SIGKILL");
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(resolve(root, "scripts"));
+  await copyFile(
+    new URL("./dev-api-runtime.mjs", import.meta.url),
+    resolve(root, "scripts/dev-api-runtime.mjs"),
+  );
+  for (const app of ["api", "connector-gateway"]) {
+    await mkdir(resolve(root, `apps/${app}`), { recursive: true });
+    await writeFile(
+      resolve(root, `apps/${app}/wrangler.jsonc`),
+      JSON.stringify({ name: app, main: "src/index.ts" }),
+    );
+  }
+  await writeFile(
+    resolve(root, "pnpm"),
+    `#!/bin/sh
+exec "$SAVIA_TEST_NODE" -e '
+  const server = require("node:http").createServer((_, response) => response.end("ok"));
+  server.listen(0, "127.0.0.1", () => console.log(process.pid, server.address().port));
+'
+`,
+    { mode: 0o700 },
+  );
+  runtime = spawn(process.execPath, ["scripts/dev-api-runtime.mjs"], {
+    cwd: root,
+    env: {
+      PATH: `${root}:${process.env.PATH}`,
+      SAVIA_TEST_NODE: process.execPath,
+      SAVIA_FLOWS_ENABLED: "0",
+    },
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  const [ready] = await once(runtime.stdout, "data", {
+    signal: AbortSignal.timeout(5000),
+  });
+  const [pid, port] = ready.toString().trim().split(" ").map(Number);
+  assert.ok(pid > 0 && port > 0);
+  workerPid = pid;
+  const checkPort = () =>
+    fetch(`http://127.0.0.1:${port}`, {
+      signal: AbortSignal.timeout(2000),
+      headers: { connection: "close" },
+    });
+  assert.equal(await (await checkPort()).text(), "ok");
+
+  const exit = once(runtime, "exit", { signal: AbortSignal.timeout(5000) });
+  runtime.kill("SIGHUP");
+  await exit;
+  await assert.rejects(
+    checkPort(),
+    (error) => error.cause?.code === "ECONNREFUSED",
+  );
+});
 
 test("enables the private local Flows binding only for an explicitly enabled local runtime", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "savia-flows-core-config-"));

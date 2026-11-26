@@ -28,7 +28,7 @@ start_process() {
 }
 
 stop_processes() {
-  trap - EXIT INT TERM
+  trap - EXIT HUP INT TERM
   for process in $processes; do
     kill "${process%%:*}" 2>/dev/null || true
   done
@@ -110,6 +110,7 @@ require_free_port() {
 }
 
 trap stop_processes EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
