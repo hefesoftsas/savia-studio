@@ -7,12 +7,19 @@ import { PwaInstallBanner } from "@/pwa";
 import { CookieConsentBanner } from "@/consent/cookie-consent-banner";
 import type { ErrorInfo } from "react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  buildTenantHostname,
+  KNOWN_CANONICAL_HOSTS,
+  normalizeCanonicalHost,
+} from "@savia/tenant-host";
+import { normalizeBookingRouteQuery } from "@savia/tenant-host/bookings-route";
 import { cn } from "@/lib/utils";
 import type { CoreLayoutProps } from "ra-core";
 import { useTranslate } from "ra-core";
 import { ErrorBoundary } from "react-error-boundary";
 import {
   Link,
+  matchPath,
   useLocation,
   useNavigate,
   useNavigationType,
@@ -237,11 +244,24 @@ function RouteScreenContextSync() {
 }
 
 export const Layout = (props: CoreLayoutProps) => {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const hasModuleNavigation =
     pathname === "/savia-flows" || pathname.startsWith("/savia-flows/");
   const closingSession = useLogoutPending();
   const tenant = useCurrentTenant();
+  const { slug } = tenant;
+  const platformHost =
+    tenant.scopeStatus === "error" && slug && matchPath("/bookings", pathname)
+      ? KNOWN_CANONICAL_HOSTS.find(
+          (host) =>
+            buildTenantHostname(slug, host) ===
+            normalizeCanonicalHost(window.location.hostname),
+        )
+      : undefined;
+  const bookingQuery = platformHost ? normalizeBookingRouteQuery(search) : "";
+  const organizationPickerHref = platformHost
+    ? `https://${platformHost}/#/bookings${bookingQuery ? `?${bookingQuery}` : ""}`
+    : undefined;
   const [errorInfo, setErrorInfo] = useState<ErrorInfo | undefined>(undefined);
   const handleError = (_: unknown, info: ErrorInfo) => {
     setErrorInfo(info);
@@ -309,6 +329,7 @@ export const Layout = (props: CoreLayoutProps) => {
                   <TenantScopeBoundary
                     status={tenant.scopeStatus}
                     retry={tenant.retry}
+                    organizationPickerHref={organizationPickerHref}
                   >
                     {props.children}
                   </TenantScopeBoundary>
