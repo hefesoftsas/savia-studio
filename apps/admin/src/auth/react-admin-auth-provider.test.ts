@@ -258,6 +258,41 @@ describe("React Admin authentication provider", () => {
     ).resolves.toBe(false);
   });
 
+  it.each([
+    ["a platform administrator without memberships", true, [], true],
+    [
+      "an organization member",
+      false,
+      [{ tenantId: 101, role: "viewer" }],
+      true,
+    ],
+    ["an account without either role", false, [], false],
+  ])(
+    "shows Bookings for %s according to access",
+    async (_, canManageIdentity, memberships, visible) => {
+      const provider = createReactAdminAuthProvider({
+        checkSession: vi.fn(),
+        clearSession: vi.fn(),
+        getAccessToken: vi.fn(),
+        getIdentity: vi.fn(),
+        getPermissions: vi.fn().mockResolvedValue({
+          canReadDocuments: true,
+          canExecuteCommands: canManageIdentity,
+          canManageIdentity,
+          memberships,
+        }),
+        handleCallback: vi.fn(),
+        login: vi.fn(),
+        logout: vi.fn(),
+        getAuthorizeUrl: vi.fn(),
+      });
+
+      await expect(
+        provider.canAccess?.({ resource: "bookings", action: "list" }),
+      ).resolves.toBe(visible);
+    },
+  );
+
   it("exposes private CRM connections to tenant members", async () => {
     const session = {
       checkSession: vi.fn(),

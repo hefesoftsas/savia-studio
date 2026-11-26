@@ -7,6 +7,8 @@ Booking is a native, optional tenant capability. It starts disabled and unpublis
 ## Set up and publish
 
 When you open **Bookings** from the Savia platform, choose an organization to open **Bookings** in its workspace. If Savia asks you to sign in to that workspace, it opens **Bookings** after sign-in. The picker lists active commercial organizations you can access. If the list is empty, ask an administrator for access.
+Platform administrators can open **Bookings** from the menu even without a
+membership in a commercial organization.
 The sign-in return also works for links with a trailing slash or a
 case-insensitive match of the Bookings route.
 Signing in from the platform portal or local Admin also resumes Bookings on
