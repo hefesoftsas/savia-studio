@@ -37,9 +37,11 @@ trusted proxy. SSO initiation honors `Retry-After` for at most two retries.
 The fixture signs in a Savia bootstrap administrator, enrolls its local TOTP,
 creates tenant users in two tenants, configures a SAML provider with Keycloak's
 generated realm metadata, and enrolls TOTP for the SSO user. It submits
-Keycloak's actual form-posted SAML assertion to Savia, requires a second-factor
-challenge before creating a session, and carries an OAuth authorization through
-SAML login, MFA, consent, authorization-code redemption, and token issuance. It
+Keycloak's actual form-posted SAML assertion to Savia. The runner decodes HTML
+references in form actions and field values once, preserving literal entity
+text in values like `RelayState`. The test requires a second-factor challenge
+before creating a session and carries an OAuth authorization through SAML
+login, MFA, consent, authorization-code redemption, and token issuance. It
 also checks that tampered assertions, replays, unknown identities, and
 cross-tenant identities are denied, tenant password login is blocked in
 SSO-only mode, pending SAML MFA challenges stop working after provider changes,
