@@ -32,6 +32,7 @@ const RUNTIME_IGNORED_PATHS = new Set([
   "scripts/dev-local.sh",
   "scripts/dev-api-runtime.mjs",
   "scripts/verify-local-stack.sh",
+  "scripts/preview-update.mjs",
   "scripts/preview-ci-reuse.mjs",
   "scripts/inspect-preview-backup-gate.mjs",
   "scripts/inspect-production-backup-gate.mjs",

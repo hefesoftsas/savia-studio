@@ -540,6 +540,22 @@ test("workflow, tests, documentation, and known asset-only files do not require 
   );
 });
 
+test("updating the manual branch command alone does not redeploy shared Preview", () => {
+  const manualChanges = [
+    "scripts/preview-update.mjs",
+    "scripts/preview-deploy.test.mjs",
+    "docs/runbooks/preview-environments.md",
+  ];
+  assert.equal(releaseRuntimeChanged(manualChanges), false);
+  for (const runtimePath of [
+    "apps/api/src/index.ts",
+    "apps/admin/src/main.tsx",
+    "packages/db/migrations/0001_example.sql",
+  ]) {
+    assert.equal(releaseRuntimeChanged([...manualChanges, runtimePath]), true);
+  }
+});
+
 test("legacy Office success survives a later plugin failure but incomplete uploads do not", () => {
   const artifacts = [
     {
