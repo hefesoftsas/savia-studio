@@ -27,8 +27,9 @@ a save is in progress.
 Each professional has a separate availability draft while Bookings is open.
 Switching professionals preserves pending hours and exceptions. Saving applies
 the selected professional's draft, so other professionals' drafts remain
-available. A newer saved schedule updates untouched exception dates and keeps
-pending additions, edits, and removals in the draft.
+available. The updated schedule keeps the current selection when that
+professional is still available. A newer saved schedule updates untouched
+exception dates and keeps pending additions, edits, and removals in the draft.
 Changing workspaces resets the booking form and its saving state. Leaving Bookings
 or choosing another workspace cancels any pending settings read. A response
 from the previous workspace applies only to the request that sent it.
@@ -38,6 +39,8 @@ reports that the workspace is missing or inaccessible, **Retry** resolves it
 again from the current tab and date.
 On a Savia workspace hostname, **Choose another organization** opens the
 Bookings picker for the same environment and keeps the requested tab and date.
+This option is also available if the server rejects access while loading
+booking settings or reservations after the workspace initially resolved.
 If the identity provider returns an error during authorization or during the
 code exchange for a valid Bookings transaction, **Sign in again** starts a new
 transaction for the same workspace, tab, and date.

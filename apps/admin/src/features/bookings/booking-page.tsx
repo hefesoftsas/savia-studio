@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useAppLocale, useMessages } from "@/i18n/core";
+import { TenantScopeBoundary } from "@/features/tenants/tenant-scope-boundary";
 import {
   useCallback,
   useEffect,
@@ -17,13 +18,14 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import {
   bookingTabs,
   readBookingRouteQuery,
   type BookingTab,
 } from "@savia/tenant-host/bookings-route";
 import { bookingMessages } from "./booking-messages";
+import { bookingOrganizationPickerHref } from "./booking-organization-link";
 import { bookingDayRange } from "./booking-date";
 import { bookingSetupMessages } from "./booking-setup-messages";
 import { validAvailabilityPeriods, validWeeklyHours } from "./booking-schedule";
@@ -186,13 +188,47 @@ function displayTime(iso: string, zone: string, locale: string) {
 type BookingPageProps = {
   services: Pick<AppServices, "apiClient">;
   tenantId: number;
+  hostname?: string;
 };
 
 export function BookingPage(props: BookingPageProps) {
-  return <BookingWorkspace key={props.tenantId} {...props} />;
+  return <BookingWorkspaceAccess key={props.tenantId} {...props} />;
 }
 
-function BookingWorkspace({ services, tenantId }: BookingPageProps) {
+function BookingWorkspaceAccess({
+  hostname = window.location.hostname,
+  ...props
+}: BookingPageProps) {
+  const { search } = useLocation();
+  const [unavailable, setUnavailable] = useState(false);
+  const onUnavailable = useCallback(() => setUnavailable(true), []);
+  if (unavailable)
+    return (
+      <TenantScopeBoundary
+        status="error"
+        retry={() => setUnavailable(false)}
+        organizationPickerHref={bookingOrganizationPickerHref(hostname, search)}
+      >
+        {null}
+      </TenantScopeBoundary>
+    );
+  return <BookingWorkspace {...props} onUnavailable={onUnavailable} />;
+}
+
+function workspaceUnavailable(error: unknown) {
+  return (
+    error instanceof ApiClientError &&
+    (error.status === 403 || error.status === 404)
+  );
+}
+
+function BookingWorkspace({
+  services,
+  tenantId,
+  onUnavailable,
+}: Pick<BookingPageProps, "services" | "tenantId"> & {
+  onUnavailable: () => void;
+}) {
   const t = useMessages(bookingMessages);
   const setupText = useMessages(bookingSetupMessages);
   const locale = useAppLocale();
@@ -278,14 +314,16 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
         setBootstrap(data);
         setSettings(data.settings);
       })
-      .catch(() => {
-        if (!signal.aborted) setBootstrapFailed(true);
+      .catch((error: unknown) => {
+        if (signal.aborted) return;
+        if (workspaceUnavailable(error)) onUnavailable();
+        else setBootstrapFailed(true);
       })
       .finally(() => {
         if (!signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [tenantId, services.apiClient, attempt]);
+  }, [tenantId, services.apiClient, attempt, onUnavailable]);
 
   const readReservationPage = useCallback(
     async (
@@ -310,12 +348,15 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
               : reservation;
           }),
         });
+      } catch (error) {
+        if (signal.aborted || !workspaceUnavailable(error)) throw error;
+        onUnavailable();
       } finally {
         if (updatesDuringReservationRead.current === updates)
           updatesDuringReservationRead.current = null;
       }
     },
-    [services.apiClient],
+    [services.apiClient, onUnavailable],
   );
 
   useEffect(() => {
@@ -595,19 +636,15 @@ function BookingWorkspace({ services, tenantId }: BookingPageProps) {
   const [selectedProfessional, setSelectedProfessional] = useState("");
   useEffect(() => {
     if (!bootstrap) return;
-    const existing = bootstrap.settings.professionals.find(
-      (item) => item.id === selectedProfessional,
-    );
-    const owned = bootstrap.settings.professionals.find(
-      (item) => item.principalId === bootstrap.principalId,
-    );
-    setSelectedProfessional(
-      existing?.id ??
-        owned?.id ??
-        bootstrap.settings.professionals[0]?.id ??
-        "",
-    );
-  }, [bootstrap, selectedProfessional]);
+    const { professionals } = bootstrap.settings;
+    setSelectedProfessional((current) => {
+      if (professionals.some((item) => item.id === current)) return current;
+      const owned = professionals.find(
+        (item) => item.principalId === bootstrap.principalId,
+      );
+      return owned?.id ?? professionals[0]?.id ?? "";
+    });
+  }, [bootstrap]);
   const scheduleProfessional = bootstrap?.canManage
     ? bootstrap.settings.professionals.find(
         (item) => item.id === selectedProfessional,
