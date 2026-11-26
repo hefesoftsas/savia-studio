@@ -38,6 +38,8 @@ reports that the workspace is missing or inaccessible, **Retry** resolves it
 again from the current tab and date.
 On a Savia workspace hostname, **Choose another organization** opens the
 Bookings picker for the same environment and keeps the requested tab and date.
+This option is also available if the server rejects access while loading
+booking settings or reservations after the workspace initially resolved.
 If the identity provider returns an error during authorization or during the
 code exchange for a valid Bookings transaction, **Sign in again** starts a new
 transaction for the same workspace, tab, and date.

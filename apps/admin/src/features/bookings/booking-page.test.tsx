@@ -178,12 +178,99 @@ function mount(
       <AppLocaleProvider>
         <MemoryRouter initialEntries={[initialEntry]}>
           {children}
-          <BookingPage services={{ apiClient } as never} tenantId={tenantId} />
+          <BookingPage
+            services={{ apiClient } as never}
+            tenantId={tenantId}
+            hostname="clinic.savia-preview.hefesoft.com"
+          />
         </MemoryRouter>
       </AppLocaleProvider>
     </StoreContextProvider>,
   );
 }
+
+it.each([403, 404])(
+  "lets users choose another organization if Bookings settings return HTTP %s",
+  async (status) => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiClientError(status, "UNAVAILABLE", "Workspace unavailable"),
+      )
+      .mockResolvedValueOnce({
+        data: {
+          settings,
+          candidates: [],
+          canManage: true,
+          principalId: "principal-1",
+          publicUrl: null,
+          calendar: { provider: null, status: "not_connected" },
+        },
+      })
+      .mockResolvedValue({ data: [] });
+    mount({ get }, 42, "/bookings?tab=reservations&date=2026-11-25&ignored=1");
+    expect(
+      await screen.findByRole("link", { name: "Choose another organization" }),
+    ).toHaveAttribute(
+      "href",
+      "https://savia-preview.hefesoft.com/#/bookings?tab=reservations&date=2026-11-25",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await screen.findByRole("heading", { name: "Reservations" }),
+    ).toBeVisible();
+    expect(
+      get.mock.calls.filter(([path]) => path === "/v1/tenants/42/booking"),
+    ).toHaveLength(2);
+    expect(
+      screen.queryByRole("link", { name: "Choose another organization" }),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it("offers workspace recovery when access is lost after Bookings settings load", async () => {
+  const get = vi
+    .fn()
+    .mockResolvedValueOnce({
+      data: {
+        settings,
+        candidates: [],
+        canManage: true,
+        principalId: "principal-1",
+        publicUrl: null,
+        calendar: { provider: null, status: "not_connected" },
+      },
+    })
+    .mockRejectedValueOnce(
+      new ApiClientError(403, "FORBIDDEN", "Reservation access denied"),
+    );
+  mount({ get }, 42, "/bookings?tab=reservations&date=2026-11-25");
+  expect(
+    await screen.findByRole("link", { name: "Choose another organization" }),
+  ).toHaveAttribute(
+    "href",
+    "https://savia-preview.hefesoft.com/#/bookings?tab=reservations&date=2026-11-25",
+  );
+  expect(
+    screen.queryByRole("heading", { name: "Reservations" }),
+  ).not.toBeInTheDocument();
+});
+
+it("offers an ordinary retry when Bookings settings are temporarily unavailable", async () => {
+  const get = vi
+    .fn()
+    .mockRejectedValue(
+      new ApiClientError(503, "SERVICE_UNAVAILABLE", "Unavailable"),
+    );
+  mount({ get });
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Booking settings could not be loaded.",
+  );
+  expect(screen.getByRole("button", { name: "Retry" })).toBeVisible();
+  expect(
+    screen.queryByRole("link", { name: "Choose another organization" }),
+  ).not.toBeInTheDocument();
+});
 
 it("loads booking settings and candidates, then saves the edited configuration", async () => {
   const apiClient = {
