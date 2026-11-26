@@ -7,7 +7,15 @@ const sha = /^[0-9a-f]{40}$/;
 const appPath =
   /^(apps|packages)\/[\w/-]+\/(src|test)\/[\w./-]+\.(?:[cm]?[jt]sx?|css)$/;
 const pulumiScriptPath = /^infra\/pulumi\/[\w-]+(?:\.test)?\.mjs$/;
+const authInitializerPath =
+  /^scripts\/initialize-auth-deployment(?:\.test)?\.mjs$/;
 const docsPath = /^docs\/[\w./-]+\.md$/;
+const reusablePaths = [
+  appPath,
+  pulumiScriptPath,
+  authInitializerPath,
+  docsPath,
+];
 
 export function previewMergeProofName(pull, base, tree, flowsDisabled = false) {
   return `Preview CI proof ${pull} ${base} ${tree}${flowsDisabled ? " (Flows skipped)" : ""}`;
@@ -47,9 +55,7 @@ export async function canReusePreviewCi({
       .filter(Boolean);
     if (
       !paths.length ||
-      ![appPath, pulumiScriptPath].some((scope) =>
-        paths.every((path) => scope.test(path) || docsPath.test(path)),
-      )
+      !paths.every((path) => reusablePaths.some((scope) => scope.test(path)))
     )
       return false;
     const tree = (await git(["rev-parse", `${commit}^{tree}`])).trim();
@@ -95,6 +101,15 @@ export async function canReusePreviewCi({
     const { jobs } = await request(
       `${prefix}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
     );
+    for (const name of ["Contract suite", "Contract tests"]) {
+      const matches = jobs.filter((job) => job.name === name);
+      if (
+        matches.length !== 1 ||
+        matches[0].status !== "completed" ||
+        matches[0].conclusion !== "success"
+      )
+        return false;
+    }
     const classifiers = jobs.filter(
       (job) => job.name === "Classify affected work",
     );

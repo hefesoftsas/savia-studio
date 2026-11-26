@@ -34,6 +34,11 @@ const classifier = (name = proofName, conclusion = "success") => ({
   conclusion: "success",
   steps: [{ name, conclusion, status: "completed" }],
 });
+const contractJobs = ["Contract suite", "Contract tests"].map((name) => ({
+  name,
+  status: "completed",
+  conclusion: "success",
+}));
 
 function check({
   parents = commit + " " + base,
@@ -41,13 +46,14 @@ function check({
   pulls = [pull],
   runs = [run],
   jobs = [classifier()],
+  contracts = contractJobs,
   flowsDisabled = false,
   request = async (path) => {
     if (path === `/repos/${repo}/commits/${commit}/pulls`) return pulls;
     if (path.startsWith(`/repos/${repo}/actions/workflows/ci.yml/runs?`))
       return { workflow_runs: runs };
     if (path === `/repos/${repo}/actions/runs/91/attempts/2/jobs?per_page=100`)
-      return { jobs };
+      return { jobs: [...jobs, ...contracts] };
     assert.fail(`Unexpected API request ${path}`);
   },
 } = {}) {
@@ -88,6 +94,24 @@ test("reuses the exact merge-tree proof for covered Pulumi source and tests", as
   );
 });
 
+test("reuses successful PR validation for mixed application and release tooling changes", async () => {
+  assert.equal(
+    await check({
+      paths: [
+        "apps/api/src/external-crm/hubspot-workspace.ts",
+        "apps/api/test/hubspot-workspace.test.ts",
+        "infra/pulumi/runtime-timing.mjs",
+        "scripts/initialize-auth-deployment.mjs",
+        "scripts/initialize-auth-deployment.test.mjs",
+        "docs/guides/preview-release-lanes.md",
+      ].join("\0"),
+      flowsDisabled: true,
+      jobs: [classifier(`${proofName} (Flows skipped)`)],
+    }),
+    true,
+  );
+});
+
 test("falls back when the push, PR, or tested tree cannot be proved", async () => {
   for (const scenario of [
     { parents: commit + " " + "e".repeat(40) },
@@ -96,7 +120,14 @@ test("falls back when the push, PR, or tested tree cannot be proved", async () =
     { paths: "infra/pulumi/backup.mjs\0infra/pulumi/Pulumi.preview.yaml\0" },
     { paths: "infra/pulumi/backup.mjs\0infra/pulumi/package-lock.json\0" },
     { paths: "infra/pulumi/backup.mjs\0scripts/preview-ci-reuse.mjs\0" },
-    { paths: "infra/pulumi/backup.mjs\0apps/api/src/runtime.ts\0" },
+    {
+      paths:
+        "apps/api/src/runtime.ts\0infra/pulumi/backup.mjs\0scripts/upload-cloudflare-secrets.mjs\0",
+    },
+    {
+      paths:
+        "apps/api/src/runtime.ts\0scripts/initialize-auth-deployment.mjs\0pnpm-lock.yaml\0",
+    },
     { pulls: [] },
     { pulls: [{ ...pull, number: 43 }] },
     { pulls: [{ ...pull, merge_commit_sha: head }] },
@@ -107,9 +138,17 @@ test("falls back when the push, PR, or tested tree cannot be proved", async () =
     },
     { runs: [{ ...run, event: "workflow_dispatch" }] },
     { runs: [{ ...run, conclusion: "failure" }] },
+    { runs: [{ ...run, status: "in_progress", conclusion: null }, run] },
     { jobs: [classifier(proofName.replace(tree, head))] },
     { jobs: [classifier(proofName, "skipped")] },
     { jobs: [{ ...classifier(), name: "Other job" }] },
+    { contracts: [contractJobs[1]] },
+    {
+      contracts: [
+        contractJobs[0],
+        { ...contractJobs[1], conclusion: "skipped" },
+      ],
+    },
     {
       request: async () => {
         throw new Error("GitHub unavailable");
