@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@form-eng/core": "1.6.1",
+    "dompurify": "3.5.0",
     "yaml": "^2.8.0",
     "zod": "^4.1.0"
   },

@@ -90,6 +90,10 @@ unlisted provider codes need normal review. Integration responses and
 user-authored content without translations are not automatically translated.
 Their owners must provide localized content when needed.
 
+FormHtml markup is sanitized after the selected locale's template is rendered.
+Supported formatting, links and `data-savia-set-value` buttons remain usable.
+Unsupported link schemes and executable HTML are removed before insertion.
+
 Tests also verify locale switching without remounting the real admin context,
 field/option labels, validation, interpolation, currency parsing and preservation
 of focused drafts. Browser verification should exercise all three languages,

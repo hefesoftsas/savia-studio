@@ -1581,6 +1581,9 @@ importers:
       '@form-eng/core':
         specifier: 1.6.1
         version: 1.6.1(react-hook-form@7.87.0(react@19.2.8))(react@19.2.8)
+      dompurify:
+        specifier: 3.5.0
+        version: 3.5.0
       yaml:
         specifier: ^2.8.0
         version: 2.9.0
@@ -7920,6 +7923,9 @@ packages:
 
   dompurify@3.4.15:
     resolution: {integrity: sha512-EUBjM+B+lkDE41iE82DDSCfkoPGfXx8IxFxPMjNzm/Uk4xDet77rTN9wqlxlVg71kK7XGuUMv6wUxJUwwv+Xyw==}
+
+  dompurify@3.5.0:
+    resolution: {integrity: sha512-LYC0ZkE8P1V42JsRYTwMdme/2ET8SpOc5AA2eOFjP/IadvRd2fwiT4TVz5vkfy0XUx12aS2UaRkTnfVPNOv9vw==}
 
   domutils@3.2.2:
     resolution: {integrity: sha512-6kZKyUajlDuqlHKVX1w7gyslj9MPIXzIFiz/rGu35uC1wMi+kMhQwGhl4lt9unC9Vb9INnY9Z3/ZA3+FhASLaw==}
@@ -20557,6 +20563,10 @@ snapshots:
       domelementtype: 2.3.0
 
   dompurify@3.4.15:
+    optionalDependencies:
+      '@types/trusted-types': 2.0.7
+
+  dompurify@3.5.0:
     optionalDependencies:
       '@types/trusted-types': 2.0.7
 
