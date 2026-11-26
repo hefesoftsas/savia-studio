@@ -13,6 +13,7 @@ import {
   normalizeCanonicalHost,
 } from "@savia/tenant-host";
 import { normalizeBookingRouteQuery } from "@savia/tenant-host/bookings-route";
+import { isSaviaFlowsDisabled } from "@/features/savia-flows/availability";
 import { cn } from "@/lib/utils";
 import type { CoreLayoutProps } from "ra-core";
 import { useTranslate } from "ra-core";
@@ -246,7 +247,8 @@ function RouteScreenContextSync() {
 export const Layout = (props: CoreLayoutProps) => {
   const { pathname, search } = useLocation();
   const hasModuleNavigation =
-    pathname === "/savia-flows" || pathname.startsWith("/savia-flows/");
+    !isSaviaFlowsDisabled() &&
+    (pathname === "/savia-flows" || pathname.startsWith("/savia-flows/"));
   const closingSession = useLogoutPending();
   const tenant = useCurrentTenant();
   const { slug } = tenant;

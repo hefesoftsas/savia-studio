@@ -7,7 +7,7 @@ import { reactSandboxPlugin } from "./build/react-sandbox-plugin.ts";
 import { pluginIdeRuntimePlugin } from "./build/plugin-ide-runtime.ts";
 import { compactBrandIcons } from "./build/compact-brand-icons.ts";
 import { saviaManualChunk } from "./build/manual-chunks.ts";
-import { flowsPlugin } from "./build/flows-plugin.ts";
+import { flowsAvailabilityPlugin, flowsPlugin } from "./build/flows-plugin.ts";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
@@ -78,6 +78,7 @@ export default defineConfig({
       },
     },
     react(),
+    flowsAvailabilityPlugin(),
     flowsPlugin(),
     pluginDevelopmentReload(),
     officePlugin(),

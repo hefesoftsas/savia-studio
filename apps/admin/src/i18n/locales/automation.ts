@@ -10,6 +10,11 @@ export const automationMessages = {
     "Savia Flows is available to active tenant members.",
     "Savia Flows está disponível para membros ativos do tenant.",
   ],
+  "Savia Flows is disabled in this environment.": [
+    "Savia Flows está desactivado en este entorno.",
+    "Savia Flows is disabled in this environment.",
+    "Savia Flows está desativado neste ambiente.",
+  ],
   "Choose an active tenant to use Savia Flows.": [
     "Elige un tenant activo para usar Savia Flows.",
     "Choose an active tenant to use Savia Flows.",

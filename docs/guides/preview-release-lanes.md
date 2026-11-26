@@ -476,9 +476,10 @@ The release plan keeps the existing Flows Worker in the verified ownership
 profile even though the release artifact omits that Worker. Preview continues
 to verify the deployed Worker identity and version without querying its
 execution policy database when Flows is disabled.
-New Preview frontend builds omit the embedded Flows editor. Preview only
-reuses prepared frontend assets built with the same setting. Production uses
-its own deployment settings.
+New Preview frontend builds omit the embedded Flows editor and hide its menu
+entry. Saved links show its availability without loading the editor. Preview
+only reuses prepared assets built with the same setting. Production uses its
+own deployment settings.
 The exact-tree CI proof includes the Flows setting so a run can only be reused
 under the same policy.
 

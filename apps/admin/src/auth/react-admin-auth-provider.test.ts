@@ -369,26 +369,40 @@ describe("React Admin authentication provider", () => {
     ).resolves.toBe(true);
   });
 
-  it("allows active tenant members into Savia Flows while the gateway scopes their actions", async () => {
-    const session = {
-      checkSession: vi.fn(),
-      clearSession: vi.fn(),
-      getAccessToken: vi.fn(),
-      getIdentity: vi.fn(),
-      getPermissions: vi.fn().mockResolvedValue({
-        canReadDocuments: true,
-        canExecuteCommands: false,
-        canManageIdentity: false,
-        memberships: [{ tenantId: 101, role: "operator" }],
-      }),
-      handleCallback: vi.fn(),
-      login: vi.fn(),
-      logout: vi.fn(),
-      getAuthorizeUrl: vi.fn(),
-    };
-    const provider = createReactAdminAuthProvider(session);
-    await expect(
-      provider.canAccess?.({ resource: "savia-flows", action: "list" }),
-    ).resolves.toBe(true);
-  });
+  it.each([
+    { development: true, disabled: false },
+    { development: true, disabled: true },
+    { development: false, disabled: true },
+  ])(
+    "uses Flows availability for active tenant members (development = $development, disabled = $disabled)",
+    async ({ development, disabled }) => {
+      const session = {
+        checkSession: vi.fn(),
+        clearSession: vi.fn(),
+        getAccessToken: vi.fn(),
+        getIdentity: vi.fn(),
+        getPermissions: vi.fn().mockResolvedValue({
+          canReadDocuments: true,
+          canExecuteCommands: false,
+          canManageIdentity: false,
+          memberships: [{ tenantId: 101, role: "operator" }],
+        }),
+        handleCallback: vi.fn(),
+        login: vi.fn(),
+        logout: vi.fn(),
+        getAuthorizeUrl: vi.fn(),
+      };
+      const provider = createReactAdminAuthProvider(session);
+      vi.stubEnv("DEV", development);
+      vi.stubEnv("VITE_SAVIA_FLOWS_DISABLED", disabled ? "true" : undefined);
+      try {
+        await expect(
+          provider.canAccess?.({ resource: "savia-flows", action: "list" }),
+        ).resolves.toBe(!disabled);
+        if (disabled) expect(session.getPermissions).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 });
