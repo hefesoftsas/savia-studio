@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { shallowEqual } from "ra-core";
 import type {
   InstalledEditorExtension,
   ProjectEditorExtensionReference,
 } from "@savia/studio-shared/plugin-editor-extensions";
 import { transferEditorExtension } from "./plugin-editor-extension-transfer";
+import type { PluginEditorExtensionClient } from "./plugin-editor-extension-client";
 import { useMessages } from "@/i18n/core";
 import { pluginEditorExtensionsMessages } from "./plugin-editor-extensions-messages";
 import { editorEventSchema, type EditorState } from "./plugin-vscode-protocol";
@@ -44,7 +46,7 @@ export function PluginVscodeEditor({
   activeFile,
   extensions,
   installedExtensions = [],
-  loadInstalledExtension,
+  extensionSource,
   onExtensionStatus,
   onExtensionsApplied,
   readOnly,
@@ -62,9 +64,10 @@ export function PluginVscodeEditor({
   activeFile: string;
   extensions: string[];
   installedExtensions?: ProjectEditorExtensionReference[];
-  loadInstalledExtension?: (
-    reference: ProjectEditorExtensionReference,
-  ) => Promise<{ installation: InstalledEditorExtension; bytes: Uint8Array }>;
+  extensionSource?: Pick<
+    PluginEditorExtensionClient,
+    "list" | "downloadPackage"
+  >;
   onExtensionStatus?: (installationId: string, error: string | null) => void;
   onExtensionsApplied?: (
     references: ProjectEditorExtensionReference[],
@@ -83,15 +86,15 @@ export function PluginVscodeEditor({
     signal: AbortSignal,
   ) => Promise<string | null>;
 }) {
+  const runtime = resolvePluginEditorRuntimeUrl(runtimeUrl, location.origin);
   const session = useMemo(
     () => ({
       nonce: crypto.randomUUID(),
       projectId,
       parentOrigin: location.origin,
     }),
-    [projectId],
+    [projectId, runtime?.href],
   );
-  const runtime = resolvePluginEditorRuntimeUrl(runtimeUrl, location.origin);
   const frameOrigin = runtime?.origin ?? location.origin;
   const frameUrl = new URL(
     runtime?.href ?? "/plugin-editor.html",
@@ -101,12 +104,21 @@ export function PluginVscodeEditor({
   const t = useMessages(pluginEditorExtensionsMessages);
   const [error, setError] = useState("");
   const frame = useRef<HTMLIFrameElement>(null);
-  const [ready, setReady] = useState(false);
+  const [connection, setConnection] = useState<{
+    session: typeof session;
+  } | null>(null);
+  const ready = connection?.session === session ? connection : null;
+  const lastPosted = useRef<{
+    controls: string;
+    files: EditorState["files"];
+    acknowledgements: EditorState["acknowledgements"];
+  } | null>(null);
   const [theme, setTheme] = useState(() =>
     readPluginIdeTheme(document.documentElement),
   );
   const selectionId = useMemo(() => crypto.randomUUID(), [selection]);
-  const loadedExtensions = useRef(new Set<string>());
+  const loadedExtensions = useRef(new Map<string, InstalledEditorExtension>());
+  const extensionTransfer = useRef<AbortController | null>(null);
   const packageAcks = useRef(
     new Map<string, { resolve(): void; reject(error: Error): void }>(),
   );
@@ -124,7 +136,6 @@ export function PluginVscodeEditor({
     onSearch,
     onError,
     fetchCompletion,
-    loadInstalledExtension,
     onExtensionStatus,
     onExtensionsApplied,
   });
@@ -138,7 +149,6 @@ export function PluginVscodeEditor({
     onSearch,
     onError,
     fetchCompletion,
-    loadInstalledExtension,
     onExtensionStatus,
     onExtensionsApplied,
   };
@@ -149,10 +159,18 @@ export function PluginVscodeEditor({
   );
 
   useEffect(() => {
-    setReady(false);
-    pendingEdits.current.clear();
-    loadedExtensions.current.clear();
+    setError("");
     const completions = pendingCompletions.current;
+    const resetConnection = () => {
+      abortCompletions(completions);
+      extensionTransfer.current?.abort();
+      pendingEdits.current.clear();
+      loadedExtensions.current.clear();
+      lastPosted.current = null;
+      for (const pending of packageAcks.current.values())
+        pending.reject(new Error("Editor session ended."));
+      packageAcks.current.clear();
+    };
     let sessionActive = true;
     const listener = (event: MessageEvent) => {
       const data = acceptEditorEnvelope(
@@ -185,7 +203,6 @@ export function PluginVscodeEditor({
       ) {
         const pending = packageAcks.current.get(ack.ackId);
         if (pending) {
-          packageAcks.current.delete(ack.ackId);
           if (typeof ack.error === "string")
             pending.reject(new Error(ack.error.slice(0, 2000)));
           else pending.resolve();
@@ -248,8 +265,11 @@ export function PluginVscodeEditor({
       if (!parsed.success) return;
       const message = parsed.data;
       if (message.type === "savia-editor-ready") {
-        setReady(true);
+        resetConnection();
+        setError("");
+        setConnection({ session });
       } else if (message.type === "savia-editor-state-applied") {
+        if (message.error) lastPosted.current = null;
         latest.current.onExtensionsApplied?.(
           message.installedExtensions,
           message.error,
@@ -276,11 +296,8 @@ export function PluginVscodeEditor({
     window.addEventListener("message", listener);
     return () => {
       sessionActive = false;
-      abortCompletions(completions);
+      resetConnection();
       window.removeEventListener("message", listener);
-      for (const pending of packageAcks.current.values())
-        pending.reject(new Error("Editor session ended."));
-      packageAcks.current.clear();
     };
   }, [session, frameOrigin]);
 
@@ -289,19 +306,38 @@ export function PluginVscodeEditor({
       abortCompletions(pendingCompletions.current);
   }, [activeFile, readOnly]);
 
-  const acknowledgements: Record<string, number> = {};
-  for (const [path, pending] of pendingEdits.current) {
-    if (!Object.hasOwn(files, path)) {
-      pendingEdits.current.delete(path);
-      continue;
-    }
-    if (files[path] === pending.value)
-      acknowledgements[path] = pending.sequence;
-  }
-
+  const referenceKey = JSON.stringify(
+    installedExtensions.map(({ installationId, sha256 }) => ({
+      installationId,
+      sha256,
+    })),
+  );
+  // Acknowledgements may change between commits with identical file contents.
   useEffect(() => {
-    if (!ready) return;
-    frame.current?.contentWindow?.postMessage(
+    const target = frame.current?.contentWindow;
+    if (!ready || !target) return;
+    const acknowledgements: Record<string, number> = {};
+    for (const [path, pending] of pendingEdits.current) {
+      if (!Object.hasOwn(files, path)) pendingEdits.current.delete(path);
+      else if (files[path] === pending.value)
+        acknowledgements[path] = pending.sequence;
+    }
+    const controls = JSON.stringify([
+      activeFile,
+      extensions,
+      referenceKey,
+      readOnly,
+      selectionId,
+      theme,
+    ]);
+    const previous = lastPosted.current;
+    if (
+      previous?.controls === controls &&
+      shallowEqual(previous.files, files) &&
+      shallowEqual(previous.acknowledgements, acknowledgements)
+    )
+      return;
+    target.postMessage(
       {
         session,
         message: {
@@ -319,133 +355,142 @@ export function PluginVscodeEditor({
       },
       frameOrigin,
     );
-  }, [
-    ready,
-    session,
-    frameOrigin,
-    files,
-    activeFile,
-    acknowledgements,
-    extensions,
-    installedExtensions,
-    readOnly,
-    selection,
-    selectionId,
-    theme,
-  ]);
+    lastPosted.current = { controls, files, acknowledgements };
+  });
 
-  const referenceKey = JSON.stringify(installedExtensions);
   useEffect(() => {
-    if (!ready || !runtime || !latest.current.loadInstalledExtension) return;
-    let cancelled = false;
+    const source = extensionSource;
+    if (!ready || !runtime || !source) return;
     const references = JSON.parse(
       referenceKey,
     ) as ProjectEditorExtensionReference[];
-    for (const id of loadedExtensions.current)
-      if (!references.some((ref) => ref.installationId === id))
-        loadedExtensions.current.delete(id);
-    void (async () => {
-      const packages = new Map<
-        string,
-        Awaited<ReturnType<NonNullable<typeof loadInstalledExtension>>>
-      >();
-      for (const reference of references) {
-        try {
-          const pkg = await latest.current.loadInstalledExtension!(reference);
-          if (cancelled) return;
-          if (
-            pkg.installation.installationId !== reference.installationId ||
-            pkg.installation.sha256 !== reference.sha256
-          )
-            throw new Error("Installed extension identity mismatch.");
-          packages.set(reference.installationId, pkg);
-        } catch (error) {
-          if (!cancelled)
-            latest.current.onExtensionStatus?.(
-              reference.installationId,
-              String(error).slice(0, 2000),
-            );
-        }
-      }
-      const pending = references.filter(
-        (ref) =>
-          !loadedExtensions.current.has(ref.installationId) &&
-          packages.has(ref.installationId),
+    const active = loadedExtensions.current;
+    for (const [id, installation] of active)
+      if (
+        !references.some(
+          (ref) =>
+            ref.installationId === id && ref.sha256 === installation.sha256,
+        )
+      )
+        active.delete(id);
+    const missing = references.filter((ref) => !active.has(ref.installationId));
+    if (!missing.length) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    extensionTransfer.current = controller;
+    const reportFailure = (installationId: string, reason: unknown) =>
+      latest.current.onExtensionStatus?.(
+        installationId,
+        String(reason).slice(0, 2000),
       );
-      while (pending.length && !cancelled) {
-        const index = pending.findIndex((ref) =>
-          packages
-            .get(ref.installationId)!
-            .installation.dependencies.every((dependency) =>
-              [...packages.values()].some(
-                (pkg) =>
-                  pkg.installation.id === dependency &&
-                  loadedExtensions.current.has(pkg.installation.installationId),
-              ),
-            ),
+    void (async () => {
+      let byInstallation: Map<string, InstalledEditorExtension>;
+      try {
+        const installed = await source.list(signal);
+        byInstallation = new Map(
+          installed.map((installation) => [
+            installation.installationId,
+            installation,
+          ]),
+        );
+      } catch (error) {
+        if (!signal.aborted)
+          for (const ref of missing) reportFailure(ref.installationId, error);
+        return;
+      }
+      if (signal.aborted) return;
+      const pending: InstalledEditorExtension[] = [];
+      for (const reference of missing) {
+        const installation = byInstallation.get(reference.installationId);
+        if (!installation || installation.sha256 !== reference.sha256) {
+          reportFailure(
+            reference.installationId,
+            "Installed extension is unavailable.",
+          );
+          continue;
+        }
+        pending.push(installation);
+      }
+      while (pending.length && !signal.aborted) {
+        const activeIds = new Set([...active.values()].map(({ id }) => id));
+        const index = pending.findIndex(({ dependencies }) =>
+          dependencies.every((dependency) => activeIds.has(dependency)),
         );
         if (index < 0) {
-          for (const ref of pending)
-            latest.current.onExtensionStatus?.(
-              ref.installationId,
+          for (const installation of pending)
+            reportFailure(
+              installation.installationId,
               "Extension packages have missing or circular dependencies.",
             );
           return;
         }
-        const [reference] = pending.splice(index, 1);
+        const [installation] = pending.splice(index, 1);
+        const { installationId } = installation;
         try {
-          const { installation, bytes } = packages.get(
-            reference.installationId,
-          )!;
+          const bytes = await source.downloadPackage(installationId, signal);
+          if (signal.aborted) return;
           await transferEditorExtension(
             session,
             installation,
             bytes,
             async (envelope) => {
-              if (cancelled) throw new Error("Editor session changed.");
+              const target = frame.current?.contentWindow;
+              if (!target || signal.aborted)
+                throw new Error("Editor session changed.");
               const ackId = crypto.randomUUID();
               const payload = envelope as {
                 session: unknown;
                 message: Record<string, unknown>;
               };
               await new Promise<void>((resolve, reject) => {
-                const timer = setTimeout(() => {
+                const cleanup = () => {
+                  clearTimeout(timer);
+                  signal.removeEventListener("abort", abort);
                   packageAcks.current.delete(ackId);
-                  reject(new Error("Extension activation timed out."));
-                }, 15000);
+                };
+                const fail = (error: unknown) => {
+                  cleanup();
+                  reject(error);
+                };
+                const abort = () => fail(new Error("Editor session changed."));
+                const timer = setTimeout(
+                  () => fail(new Error("Extension activation timed out.")),
+                  15000,
+                );
                 packageAcks.current.set(ackId, {
                   resolve: () => {
-                    clearTimeout(timer);
+                    cleanup();
                     resolve();
                   },
-                  reject: (error) => {
-                    clearTimeout(timer);
-                    reject(error);
-                  },
+                  reject: fail,
                 });
-                frame.current?.contentWindow?.postMessage(
-                  { ...payload, message: { ...payload.message, ackId } },
-                  frameOrigin,
-                );
+                signal.addEventListener("abort", abort, { once: true });
+                try {
+                  target.postMessage(
+                    { ...payload, message: { ...payload.message, ackId } },
+                    frameOrigin,
+                  );
+                } catch (error) {
+                  fail(error);
+                }
               });
             },
           );
-          if (cancelled) return;
-          loadedExtensions.current.add(reference.installationId);
-          latest.current.onExtensionStatus?.(reference.installationId, null);
+          if (signal.aborted) return;
+          active.set(installationId, installation);
+          latest.current.onExtensionStatus?.(installationId, null);
         } catch (error) {
-          if (!cancelled)
-            latest.current.onExtensionStatus?.(
-              reference.installationId,
-              String(error).slice(0, 2000),
-            );
+          if (signal.aborted) return;
+          reportFailure(installationId, error);
         }
       }
     })();
     return () => {
-      cancelled = true;
+      controller.abort();
+      if (extensionTransfer.current === controller)
+        extensionTransfer.current = null;
     };
-  }, [ready, referenceKey, session, frameOrigin]);
+  }, [ready, referenceKey, session, frameOrigin, extensionSource]);
 
   const observedFormatRequest = useRef(formatRequest);
   const pendingFormatRequests = useRef(0);

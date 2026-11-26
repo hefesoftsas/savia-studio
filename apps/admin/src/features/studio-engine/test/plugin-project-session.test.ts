@@ -1,5 +1,9 @@
+// @vitest-environment node
 import { expect, it, vi } from "vitest";
-import { PluginProjectSession } from "../plugin-project-session";
+import {
+  PluginProjectSession,
+  type RecoveryDraft,
+} from "../plugin-project-session";
 const draft = (code: string) => ({
   files: {
     "entry.tsx": code,
@@ -132,4 +136,87 @@ it("retries the current draft if its earlier save was interrupted after an undo"
   expect(save).toHaveBeenLastCalledWith({ ...draft("original"), version: 1 });
   expect(session.isSaved).toBe(true);
   session.dispose();
+});
+
+it.each([false, true])(
+  "confirms a committed save after a lost response with newer edits=%s",
+  async (newerEdits) => {
+    const initial = draft("initial");
+    let server: RecoveryDraft = { ...initial, version: 1 };
+    const save = vi.fn(async (input: RecoveryDraft) => {
+      if (input.version !== server.version) throw new Error("Conflict");
+      server = { ...input, version: input.version + 1 };
+      if (input.version === 1) throw new Error("Lost response");
+      return { version: server.version };
+    });
+    const readSaved = vi.fn(async () => ({
+      ...server,
+      files: { "preview.json": server.files["preview.json"], ...server.files },
+      editorExtensions: [],
+      installedEditorExtensions: [],
+    }));
+    const recover = vi.fn();
+    const session = new PluginProjectSession(
+      1,
+      initial,
+      save,
+      recover,
+      vi.fn(),
+      readSaved,
+    );
+    try {
+      session.update(draft("sent"));
+      await expect(session.flush()).rejects.toThrow("Lost response");
+      if (newerEdits) session.update(draft("newer edit"));
+
+      await session.flush();
+      expect(readSaved).toHaveBeenCalledTimes(1);
+      expect(save.mock.calls.map(([input]) => input.version)).toEqual(
+        newerEdits ? [1, 2] : [1],
+      );
+      expect(server.files["entry.tsx"]).toBe(
+        newerEdits ? "newer edit" : "sent",
+      );
+      expect(session.isSaved).toBe(true);
+      expect(recover).toHaveBeenLastCalledWith(null);
+    } finally {
+      session.dispose();
+    }
+  },
+);
+
+it("keeps the conflict when newer server settings differ from the unconfirmed save", async () => {
+  const save = vi
+    .fn<(input: RecoveryDraft) => Promise<{ version: number }>>()
+    .mockRejectedValueOnce(new Error("Interrupted"))
+    .mockRejectedValueOnce(new Error("Conflict"));
+  const readSaved = vi.fn(async () => ({
+    ...draft("sent"),
+    version: 2,
+    editorExtensions: ["savia.formatter"],
+  }));
+  const recover = vi.fn();
+  const session = new PluginProjectSession(
+    1,
+    draft("initial"),
+    save,
+    recover,
+    vi.fn(),
+    readSaved,
+  );
+  try {
+    session.update(draft("sent"));
+    await expect(session.flush()).rejects.toThrow("Interrupted");
+    session.update(draft("new edit"));
+    await expect(session.flush()).rejects.toThrow("Conflict");
+    expect(readSaved).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenLastCalledWith({ ...draft("new edit"), version: 1 });
+    expect(session.isSaved).toBe(false);
+    expect(recover).toHaveBeenLastCalledWith({
+      ...draft("new edit"),
+      version: 1,
+    });
+  } finally {
+    session.dispose();
+  }
 });

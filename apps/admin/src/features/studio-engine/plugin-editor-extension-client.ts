@@ -153,10 +153,15 @@ export class PluginEditorExtensionClient {
     return result.installation;
   }
 
-  async list(): Promise<InstalledEditorExtension[]> {
+  async list(signal?: AbortSignal): Promise<InstalledEditorExtension[]> {
     const result = await readJson<{
       installations: InstalledEditorExtension[];
-    }>(await this.fetcher(`${apiPath}/installed`));
+    }>(
+      await this.fetcher(
+        `${apiPath}/installed`,
+        signal ? { signal } : undefined,
+      ),
+    );
     return result.installations;
   }
 

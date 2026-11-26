@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { shallowEqual } from "ra-core";
 import { RouteLoading } from "@/components/admin/route-loading";
 import { Button } from "@/components/ui/button";
 import { useAppServices } from "@/features/assistant/assistant-context";
@@ -10,6 +11,8 @@ import { createPluginProject } from "@savia/plugin-authoring/project";
 import { findMissingPluginSourceAssets } from "@savia/plugin-authoring/source-compiler";
 import {
   PluginProjectSession,
+  recoveryProjectId,
+  serializeDraft,
   type ProjectDraft,
   type RecoveryDraft,
   type SaveState,
@@ -104,18 +107,40 @@ export default function PluginProjectWorkspace({
     `savia:plugin-project:${encodeURIComponent(owner.current)}:${tenantId}:${id}`;
   async function activate(value: Project): Promise<void> {
     session.current?.dispose();
-    let recovery: RecoveryDraft | undefined;
+    const recoveryKey = key(value.id);
+    let recovery:
+      Pick<RecoveryDraft, "files" | "history" | "version"> | undefined;
     try {
-      const raw = localStorage.getItem(key(value.id));
-      if (raw) recovery = pluginProjectSaveSchema.parse(JSON.parse(raw));
+      const raw = localStorage.getItem(recoveryKey);
+      if (raw) {
+        const stored = JSON.parse(raw) as Partial<RecoveryDraft> | null;
+        const { files, history, version } = pluginProjectSaveSchema.parse({
+          files: stored?.files,
+          history: stored?.history,
+          version: stored?.version,
+        });
+        const historyMatches =
+          history.length === value.history.length &&
+          history.every(({ role, content }, index) => {
+            const saved = value.history[index];
+            return role === saved.role && content === saved.content;
+          });
+        if (historyMatches && shallowEqual(files, value.files))
+          localStorage.removeItem(recoveryKey);
+        else recovery = { files, history, version };
+      }
     } catch {
       /* Invalid recovery is never executed. */
     }
     if (recovery && recovery.version !== value.version) {
       setError("");
       setNotice("");
-      await create(recovery);
-      localStorage.removeItem(key(value.id));
+      await create(recovery, await recoveryProjectId(recoveryKey, recovery));
+      try {
+        localStorage.removeItem(recoveryKey);
+      } catch {
+        /* Retrying a completed recovery opens the same project again. */
+      }
       if (mounted.current) {
         setNotice(
           tr(
@@ -140,33 +165,31 @@ export default function PluginProjectWorkspace({
       editorExtensions: value.editorExtensions ?? [],
       installedEditorExtensions: value.installedEditorExtensions ?? [],
     };
+    const projectPath = `/plugin-projects/${value.id}`;
+    const requireOwner = async () => {
+      const identity = await services.authSession.getIdentity();
+      if (String(identity?.id) !== owner.current)
+        throw new Error(
+          "The signed-in account changed. Reopen this project with its owner account.",
+        );
+    };
     const current = new PluginProjectSession(
       value.version,
       initial,
       async (input) => {
-        const identity = await services.authSession.getIdentity();
-        if (String(identity?.id) !== owner.current)
-          throw new Error(
-            "The signed-in account changed. Reopen this project with its owner account.",
-          );
-        return (
-          await request<{ data: Project }>(
-            `/plugin-projects/${value.id}`,
-            "PUT",
-            input,
-          )
-        ).data;
+        await requireOwner();
+        return (await request<{ data: Project }>(projectPath, "PUT", input))
+          .data;
       },
       (input) => {
         try {
           if (input) {
-            const {
-              editorExtensions: _editorExtensions,
-              installedEditorExtensions: _installed,
-              ...recovery
-            } = input;
-            localStorage.setItem(key(value.id), JSON.stringify(recovery));
-          } else localStorage.removeItem(key(value.id));
+            const { files, history, version } = input;
+            localStorage.setItem(
+              recoveryKey,
+              JSON.stringify({ files, history, version }),
+            );
+          } else localStorage.removeItem(recoveryKey);
         } catch {
           if (mounted.current)
             setError(
@@ -180,6 +203,10 @@ export default function PluginProjectWorkspace({
       },
       (state) => {
         if (mounted.current) setStatus(state);
+      },
+      async () => {
+        await requireOwner();
+        return (await request<{ data: Project }>(projectPath)).data;
       },
     );
     session.current = current;
@@ -262,13 +289,23 @@ export default function PluginProjectWorkspace({
   }
   async function create(
     draft: ProjectDraft = { files: createPluginProject(), history: [] },
+    recoveredId?: string,
   ) {
-    const id = crypto.randomUUID();
-    const result = await request<{ data: Project }>(
-      `/plugin-projects/${id}`,
-      "PUT",
-      { ...draft, version: 0 },
-    );
+    const id = recoveredId ?? crypto.randomUUID();
+    const path = `/plugin-projects/${id}`;
+    const result = await request<{ data: Project }>(path, "PUT", {
+      ...draft,
+      version: 0,
+    }).catch(async (error: unknown) => {
+      if (!recoveredId) throw error;
+      const existing = await request<{ data: Project }>(path).catch(() => null);
+      if (
+        existing?.data?.id === id &&
+        serializeDraft(existing.data) === serializeDraft(draft)
+      )
+        return existing;
+      throw error;
+    });
     if (mounted.current) await activate(result.data);
   }
   async function importFromStore(sourceId: string, sourceVersion: string) {
@@ -581,7 +618,7 @@ export default function PluginProjectWorkspace({
                   session.current?.update(draft);
                 }}
                 canPublishShared={canPublishShared}
-                onClose={() => void close()}
+                onClose={close}
                 onPublished={handlePublished}
               />
             </Suspense>

@@ -1,5 +1,6 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { InstalledEditorExtension } from "@savia/studio-shared/plugin-editor-extensions";
 import { PluginVscodeEditor } from "../plugin-vscode-editor";
 import { projectFileUri } from "../plugin-vscode-protocol";
 
@@ -8,7 +9,7 @@ function messageFrom(iframe: HTMLIFrameElement, data: unknown) {
     window,
     new MessageEvent("message", {
       source: iframe.contentWindow,
-      origin: location.origin,
+      origin: new URL(iframe.src).origin,
       data: {
         session: Object.fromEntries(
           new URLSearchParams(new URL(iframe.src).hash.slice(1)),
@@ -168,6 +169,264 @@ describe("extension editor bridge", () => {
       sequence: 5,
     });
     expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends project contents only when the editor state changes", () => {
+    const props = {
+      files: { "entry.tsx": "source", "src/unused.ts": "unused" },
+      activeFile: "entry.tsx",
+      extensions: ["savia.formatter"],
+      readOnly: false,
+      onChange: vi.fn(),
+      onSearch: vi.fn(),
+      onError: vi.fn(),
+    };
+    const view = render(<PluginVscodeEditor {...props} />);
+    const iframe = view.container.querySelector("iframe")!;
+    const postMessage = vi
+      .spyOn(iframe.contentWindow!, "postMessage")
+      .mockImplementation(() => {});
+    messageFrom(iframe, { type: "savia-editor-ready" });
+
+    view.rerender(
+      <PluginVscodeEditor
+        {...props}
+        hidden
+        files={{ "src/unused.ts": "unused", "entry.tsx": "source" }}
+        extensions={["savia.formatter"]}
+      />,
+    );
+    expect(postMessage).toHaveBeenCalledTimes(1);
+
+    messageFrom(iframe, {
+      type: "savia-editor-change",
+      path: "entry.tsx",
+      value: "source",
+      sequence: 2,
+    });
+    view.rerender(<PluginVscodeEditor {...props} />);
+    expect(postMessage).toHaveBeenCalledTimes(2);
+    expect(postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          acknowledgements: { "entry.tsx": 2 },
+        }),
+      }),
+      location.origin,
+    );
+
+    view.rerender(<PluginVscodeEditor {...props} readOnly />);
+    expect(postMessage).toHaveBeenCalledTimes(3);
+    expect(postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          type: "savia-editor-state",
+          readOnly: true,
+        }),
+      }),
+      location.origin,
+    );
+  });
+
+  it("resends the project and accepts a fresh edit sequence after the frame reloads", () => {
+    const props = {
+      files: { "entry.tsx": "source" },
+      activeFile: "entry.tsx",
+      extensions: [],
+      readOnly: false,
+      onChange: vi.fn(),
+      onSearch: vi.fn(),
+      onError: vi.fn(),
+    };
+    const view = render(<PluginVscodeEditor {...props} />);
+    const iframe = view.container.querySelector("iframe")!;
+    const postMessage = vi
+      .spyOn(iframe.contentWindow!, "postMessage")
+      .mockImplementation(() => {});
+
+    messageFrom(iframe, { type: "savia-editor-ready" });
+    messageFrom(iframe, {
+      type: "savia-editor-change",
+      path: "entry.tsx",
+      value: "before reload",
+      sequence: 4,
+    });
+    postMessage.mockClear();
+    messageFrom(iframe, { type: "savia-editor-ready" });
+    expect(postMessage).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          type: "savia-editor-state",
+          files: props.files,
+          acknowledgements: {},
+        }),
+      }),
+      location.origin,
+    );
+    messageFrom(iframe, {
+      type: "savia-editor-change",
+      path: "entry.tsx",
+      value: "after reload",
+      sequence: 1,
+    });
+    expect(props.onChange.mock.calls).toEqual([
+      ["entry.tsx", "before reload"],
+      ["entry.tsx", "after reload"],
+    ]);
+  });
+
+  it("downloads only eligible extensions in dependency order and reuses active ones", async () => {
+    const base: InstalledEditorExtension = {
+      id: "fixture.base",
+      publisher: "fixture",
+      name: "base",
+      version: "1.0.0",
+      installationId: "d4ccc664-5d54-4dd6-8678-a7365486684b",
+      sha256: "a".repeat(64),
+      source: "vsix",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      license: null,
+      compressedBytes: 1,
+      expandedBytes: 1,
+      dependencies: [],
+      compatibility: { supported: true, reason: null },
+    };
+    const dependent: InstalledEditorExtension = {
+      ...base,
+      id: "fixture.dependent",
+      name: "dependent",
+      installationId: "27289d36-56d3-4a4a-8623-df9b5462cd5a",
+      sha256: "b".repeat(64),
+      dependencies: [base.id],
+    };
+    const reference = ({
+      installationId,
+      sha256,
+    }: InstalledEditorExtension) => ({
+      installationId,
+      sha256,
+    });
+    const operations: string[] = [];
+    const list = vi.fn(async () => [base, dependent]);
+    const downloadPackage = vi.fn(async (id: string, _signal?: AbortSignal) => {
+      operations.push(`download ${id}`);
+      return new Uint8Array([1]);
+    });
+    const props = {
+      runtimeUrl: "https://editor.example.test/plugin-editor",
+      files: { "entry.tsx": "source" },
+      activeFile: "entry.tsx",
+      extensions: [],
+      readOnly: false,
+      onChange: vi.fn(),
+      onSearch: vi.fn(),
+      onError: vi.fn(),
+      onExtensionStatus: vi.fn((id: string, error: string | null) => {
+        if (!error) operations.push(`active ${id}`);
+      }),
+      extensionSource: { list, downloadPackage },
+    };
+    const view = render(
+      <PluginVscodeEditor {...props} installedExtensions={[reference(base)]} />,
+    );
+    const iframe = view.container.querySelector("iframe")!;
+    const transfers: string[] = [];
+    vi.spyOn(iframe.contentWindow!, "postMessage").mockImplementation(
+      ({ message }) => {
+        if (message.type !== "savia-editor-package") return;
+        if (message.payload.type === "begin")
+          transfers.push(message.payload.installationId);
+        queueMicrotask(() =>
+          messageFrom(iframe, {
+            type: "savia-editor-package-ack",
+            ackId: message.ackId,
+          }),
+        );
+      },
+    );
+    messageFrom(iframe, { type: "savia-editor-ready" });
+    await waitFor(() =>
+      expect(props.onExtensionStatus).toHaveBeenCalledWith(
+        base.installationId,
+        null,
+      ),
+    );
+    list.mockClear();
+    downloadPackage.mockClear();
+
+    view.rerender(
+      <PluginVscodeEditor
+        {...props}
+        installedExtensions={[reference(dependent), reference(base)]}
+      />,
+    );
+    await waitFor(() =>
+      expect(props.onExtensionStatus).toHaveBeenCalledWith(
+        dependent.installationId,
+        null,
+      ),
+    );
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(downloadPackage.mock.calls.map(([id]) => id)).toEqual([
+      dependent.installationId,
+    ]);
+    expect(transfers).toEqual([base.installationId, dependent.installationId]);
+
+    list.mockClear();
+    downloadPackage.mockClear();
+    operations.length = 0;
+    downloadPackage.mockImplementationOnce(
+      (_id, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    messageFrom(iframe, { type: "savia-editor-ready" });
+    await waitFor(() => expect(downloadPackage).toHaveBeenCalledTimes(1));
+    const interruptedSignal = downloadPackage.mock.calls[0][1];
+    messageFrom(iframe, { type: "savia-editor-ready" });
+    expect(interruptedSignal?.aborted).toBe(true);
+    await waitFor(() =>
+      expect(transfers).toEqual([
+        base.installationId,
+        dependent.installationId,
+        base.installationId,
+        dependent.installationId,
+      ]),
+    );
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(downloadPackage.mock.calls.map(([id]) => id)).toEqual([
+      base.installationId,
+      base.installationId,
+      dependent.installationId,
+    ]);
+    expect(operations).toEqual([
+      `download ${base.installationId}`,
+      `active ${base.installationId}`,
+      `download ${dependent.installationId}`,
+      `active ${dependent.installationId}`,
+    ]);
+    expect(
+      props.onExtensionStatus.mock.calls.every(([, error]) => !error),
+    ).toBe(true);
+
+    downloadPackage.mockClear();
+    view.rerender(
+      <PluginVscodeEditor
+        {...props}
+        installedExtensions={[reference(dependent)]}
+      />,
+    );
+    messageFrom(iframe, { type: "savia-editor-ready" });
+    await waitFor(() =>
+      expect(props.onExtensionStatus).toHaveBeenCalledWith(
+        dependent.installationId,
+        "Extension packages have missing or circular dependencies.",
+      ),
+    );
+    expect(downloadPackage).not.toHaveBeenCalled();
   });
 
   it("queues every format request until the iframe is ready and sends each once", () => {
