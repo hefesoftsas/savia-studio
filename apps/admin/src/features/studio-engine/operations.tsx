@@ -6,7 +6,7 @@ import {
 } from "./collection-capabilities";
 import { downloadCrm } from "./api";
 import MicrosoftExcel from "@thesvg/react/microsoft-excel";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -425,9 +425,14 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
     [pending, setPending] = useState(false),
     [error, setError] = useState(""),
     [page, setPage] = useState(1);
+  const [exportingCsv, setExportingCsv] = useState(false);
+  const exportInProgress = useRef(false);
   const object = objects.find((o) => o.name === objectName);
   const managedCustomer =
     object?.config.studio?.business === "managed-customer";
+  const exportLabel = managedCustomer
+    ? t("Exportar CSV (máximo 10.000)")
+    : t("Exportar CSV completo");
   const managedObject = ["managed-customer", "managed-agency"].includes(
     object?.config.studio?.business ?? "",
   );
@@ -440,6 +445,25 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
   useEffect(() => {
     if (!objectName && objects.length) setObjectName(objects[0].name);
   }, [objects, objectName]);
+  async function exportCsv(name: string) {
+    if (exportInProgress.current) return;
+    exportInProgress.current = true;
+    setExportingCsv(true);
+    try {
+      await downloadCrm(
+        `/api/export/${encodeURIComponent(name)}`,
+        `${name}.csv`,
+        "text/csv",
+        // The full export can stream more records than a table export.
+        { useBodyDeadline: false },
+      );
+    } catch (error) {
+      toast.error(message(error));
+    } finally {
+      exportInProgress.current = false;
+      setExportingCsv(false);
+    }
+  }
   async function read(file?: File) {
     if (!file) return;
     setError("");
@@ -540,31 +564,18 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
             </option>
           ))}
         </select>
-        {objectName && !object?.config.studio?.collection && (
-          <Button variant="outline" size="icon" asChild>
-            <a
-              href={`/api/export/${objectName}`}
-              download
-              aria-label={
-                managedCustomer
-                  ? t("Exportar CSV (máximo 10.000)")
-                  : t("Exportar CSV completo")
-              }
-              title={
-                managedCustomer
-                  ? t("Exportar CSV (máximo 10.000)")
-                  : t("Exportar CSV completo")
-              }
-              onClick={(e) => {
-                e.preventDefault();
-                void downloadCrm(
-                  `/api/export/${objectName}`,
-                  `${objectName}.csv`,
-                ).catch((e) => toast.error(e.message));
-              }}
-            >
-              <MicrosoftExcel aria-hidden className="size-4" />
-            </a>
+        {object && !object.config.studio?.collection && (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label={exportLabel}
+            title={exportLabel}
+            aria-busy={exportingCsv}
+            disabled={exportingCsv}
+            onClick={() => void exportCsv(object.name)}
+          >
+            <MicrosoftExcel aria-hidden className="size-4" />
           </Button>
         )}
       </div>

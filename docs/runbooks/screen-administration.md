@@ -68,6 +68,10 @@ rechecks both the source and destination columns.
 
 Tab changes preserve existing query parameters and create browser history entries. Back/forward navigation restores the selected tab. Domain screen visibility does not override permissions or a member’s personal menu settings.
 
+In **Operaciones → Importar y exportar**, Studio validates the CSV response
+before saving it. The export button remains disabled while the file downloads
+and becomes available again when the download finishes or reports an error.
+
 ## Tenant API tools
 
 Open **Pantallas → Más herramientas → Integraciones y API** to access **Consultar API** and **Descargar OpenAPI** in the integrations tab. These tools use the selected tenant and no longer appear above every Studio screen.
