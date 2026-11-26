@@ -182,6 +182,17 @@ API reference lives at `http://127.0.0.1:8787/docs` (Scalar).
 You can also use the Admin port for `/docs`, `/openapi.json`, and `/health`.
 Vite forwards those requests to the API.
 
+To verify the API and the Admin proxy together, run the verifier with the
+Admin URL printed by `pnpm dev`.
+
+```sh
+ADMIN_URL=http://127.0.0.1:5173 sh scripts/verify-local-stack.sh
+```
+
+Set `API_URL` if the API is using a different port. The verifier uses Node.js
+to check both JSON responses and reports any endpoint that serves unexpected
+content.
+
 ## Typical issues
 
 - **Port taken**: admin bumps its own port; pin it with `SAVIA_ADMIN_PORT`.

@@ -29,6 +29,7 @@ const RUNTIME_IGNORED_PATHS = new Set([
   "scripts/preview-code-release.mjs",
   "scripts/preview-change-plan.mjs",
   "scripts/warm-preview-frontend.mjs",
+  "scripts/verify-local-stack.sh",
   "scripts/preview-ci-reuse.mjs",
   "scripts/inspect-preview-backup-gate.mjs",
   "scripts/inspect-production-backup-gate.mjs",
