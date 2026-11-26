@@ -78,6 +78,9 @@ These updates run directly from the current checkout, including uncommitted
 changes. They do not run CI, deploy Flows, provision infrastructure, or touch
 shared Preview and Production. Use a complete managed branch deployment for
 changes to other Workers or infrastructure, and use the CI-gated path for releases.
+Changes to the manual update command still run through CI. Once there is a
+verified deployment baseline, updating only the manual command leaves shared
+Preview running its current release.
 
 The manual web build ignores checkout-specific Vite environment files so the
 deployed page uses its own Preview API. It also skips building and packaging
