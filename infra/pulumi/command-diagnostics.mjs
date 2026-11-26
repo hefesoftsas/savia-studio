@@ -17,6 +17,11 @@ function safeOperation(value) {
 
 const ERROR_CATEGORIES = [
   {
+    code: "D1_OVERLOADED",
+    remediation: "RETRY_WITH_BACKOFF",
+    pattern: /d1queueoverloaded(?: \[error\])?: d1 query failed \(429\)/,
+  },
+  {
     code: "D1_RESPONSE_TOO_LARGE",
     remediation: "REDUCE_PAGE_SIZE",
     pattern:

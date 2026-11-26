@@ -112,6 +112,10 @@ authenticated command archive and reports a fixed D1 category, with the HTTP
 status and numeric provider codes when present. The decrypted files are removed
 without uploading them. A successful retry still permits inspecting the original
 failure while its artifact is retained.
+
+The D1 migration runner retries Cloudflare queue overload (HTTP 429 and code 7429) up to twice with short backoff. It rereads the migration ledger before
+replaying a batch. A batch already recorded in the ledger is counted as complete.
+
 `DNS_RESOLUTION_FAILED` identifies an explicit DNS lookup failure; verify the
 public hostname resolves before retrying a release that failed its health check.
 

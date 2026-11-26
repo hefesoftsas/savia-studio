@@ -7,6 +7,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
 const databaseId = process.env.CLOUDFLARE_DATABASE_ID;
@@ -40,6 +41,32 @@ const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/
 
 class D1StatementRejected extends Error {}
 
+class D1QueueOverloaded extends Error {
+  constructor(message, retryAfter) {
+    super(message);
+    this.retryAfter = retryAfter;
+  }
+}
+
+async function retryD1Overload(operation, alreadyApplied) {
+  for (let retry = 0; ; retry++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!(error instanceof D1QueueOverloaded) || retry === 2) throw error;
+      const header = error.retryAfter;
+      const seconds = Number(header);
+      const requestedDelay = Number.isFinite(seconds)
+        ? seconds * 1000
+        : Date.parse(header) - Date.now();
+      if (requestedDelay > 5000) throw error;
+      const backoff = 500 * 2 ** retry + Math.floor(Math.random() * 250);
+      await delay(Math.max(backoff, requestedDelay || 0));
+      if (await alreadyApplied?.()) return null;
+    }
+  }
+}
+
 async function query(sql, operation) {
   const signal = AbortSignal.timeout(requestTimeoutMs);
   let response;
@@ -70,6 +97,15 @@ async function query(sql, operation) {
   }
   if (response.ok === false || payload?.success === false) {
     const message = `D1 query failed (${response.status}): ${JSON.stringify(payload?.errors ?? payload)}`;
+    if (
+      response.status === 429 &&
+      Array.isArray(payload?.errors) &&
+      payload.errors.some((error) => error?.code === 7429)
+    )
+      throw new D1QueueOverloaded(
+        message,
+        response.headers?.get("retry-after"),
+      );
     if (response.status === 400 || response.status === 409)
       throw new D1StatementRejected(message);
     throw new Error(message);
@@ -110,14 +146,15 @@ if (dryRun) {
   process.exit(0);
 }
 
-await query(
-  "CREATE TABLE IF NOT EXISTS _savia_migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
-  "initialize migration history",
+await retryD1Overload(() =>
+  query(
+    "CREATE TABLE IF NOT EXISTS _savia_migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+    "initialize migration history",
+  ),
 );
 async function readMigrationHistory() {
-  const [appliedRows] = await query(
-    "SELECT filename FROM _savia_migrations",
-    "read migration history",
+  const [appliedRows] = await retryD1Overload(() =>
+    query("SELECT filename FROM _savia_migrations", "read migration history"),
   );
   if (!Array.isArray(appliedRows?.results))
     throw new Error("D1 did not return the migration history.");
@@ -137,21 +174,28 @@ for (const file of files) {
     await readFile(join(migrationsDir, file), "utf8"),
   );
   const escaped = file.replaceAll("'", "''");
+  const alreadyApplied = async () => {
+    applied = await readMigrationHistory();
+    return applied.has(file);
+  };
   // One transactional D1 batch preserves complete trigger bodies and prevents
   // partially applied initial schemas or bootstrap rows on retry.
+  const batch = [
+    ...statements,
+    `INSERT INTO _savia_migrations(filename,applied_at) VALUES ('${escaped}',datetime('now'))`,
+  ];
+  let completedElsewhere;
   try {
-    await query(
-      [
-        ...statements,
-        `INSERT INTO _savia_migrations(filename,applied_at) VALUES ('${escaped}',datetime('now'))`,
-      ],
-      file,
-    );
+    completedElsewhere =
+      (await retryD1Overload(() => query(batch, file), alreadyApplied)) ===
+      null;
   } catch (error) {
-    if (!(error instanceof D1StatementRejected)) throw error;
     // Another publisher may have committed this file after our history read.
-    applied = await readMigrationHistory();
-    if (!applied.has(file)) throw error;
+    if (!(error instanceof D1StatementRejected) || !(await alreadyApplied()))
+      throw error;
+    completedElsewhere = true;
+  }
+  if (completedElsewhere) {
     console.log(`Already applied ${file} (confirmed in D1 migration history).`);
     continue;
   }
