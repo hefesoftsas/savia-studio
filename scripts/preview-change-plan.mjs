@@ -18,13 +18,20 @@ const CI_CONFIG_PATHS = new Set([
   ".github/workflows/codeql.yml",
   ".github/workflows/coverage.yml",
   ".github/workflows/deploy-preview.yml",
+  ".github/workflows/inspect-preview-migration-failure.yml",
+  ".github/workflows/preview-frontend-warmup.yml",
+  "infra/pulumi/environment-workflow.test.mjs",
+  "infra/pulumi/preview-command-diagnostics.mjs",
+  "infra/pulumi/preview-command-diagnostics.test.mjs",
   "scripts/codeql-plan.mjs",
   "scripts/codeql-plan.test.mjs",
   "scripts/github-workflows.test.mjs",
+  "scripts/preview-code-release.test.mjs",
   "scripts/preview-release-plan.mjs",
   "scripts/preview-release-plan.test.mjs",
   "scripts/preview-component-evidence.mjs",
   "scripts/preview-component-evidence.test.mjs",
+  "scripts/warm-preview-frontend.mjs",
 ]);
 
 // These helpers execute only in release tooling and are covered by contracts.
