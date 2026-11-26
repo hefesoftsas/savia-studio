@@ -192,7 +192,7 @@ test("verified Preview code scope is selected before builds and freezes only its
           if (args[0] === "diff")
             return {
               stdout:
-                "apps/api/src/assistant/service.ts\napps/mcp/src/server.ts\npackages/release-catalog/src/assistant-api-client.ts",
+                "apps/api/src/assistant/service.ts\0apps/mcp/src/server.ts\0packages/release-catalog/src/assistant-api-client.ts\0",
             };
           if (args[0] === "show") return { stdout: "export const x = 1" };
         }

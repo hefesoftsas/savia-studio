@@ -13,6 +13,7 @@ const COMPONENTS = {
 
 const RUNTIME_IGNORED_PATHS = new Set([
   ".github/workflows/deploy-preview.yml",
+  ".github/workflows/preview-frontend-warmup.yml",
   ".github/workflows/inspect-preview-backup-gate.yml",
   ".github/workflows/clean-preview-writer-permits.yml",
   ".github/workflows/ci.yml",
@@ -26,6 +27,7 @@ const RUNTIME_IGNORED_PATHS = new Set([
   "scripts/preview-release-plan.mjs",
   "scripts/preview-code-release.mjs",
   "scripts/preview-change-plan.mjs",
+  "scripts/warm-preview-frontend.mjs",
   "scripts/preview-ci-reuse.mjs",
   "scripts/inspect-preview-backup-gate.mjs",
   "scripts/inspect-production-backup-gate.mjs",

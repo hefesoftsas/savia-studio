@@ -92,6 +92,15 @@ test("Preview frontend warmup runs from main without deployment credentials", as
     /SAVIA_CI_FLOWS_ENABLED: \$\{\{ vars\.SAVIA_CI_FLOWS_ENABLED \}\}/,
   );
   assert.doesNotMatch(warmup, /secrets\.|deployments: write|^\s+environment:/m);
+  assert.match(warmup, /run: node scripts\/warm-preview-frontend\.mjs --plan/);
+  assert.match(
+    warmup,
+    /name: Install dependencies\s+if: \$\{\{ steps\.plan\.outputs\.needed == 'true' \}\}\s+run: pnpm install --frozen-lockfile/,
+  );
+  assert.match(
+    warmup,
+    /name: Prepare frontend assets from the exact main revision\s+if: \$\{\{ steps\.plan\.outputs\.needed == 'true' \}\}/,
+  );
   const runtime = deploy.slice(deploy.indexOf("  deploy:\n"));
   assert.match(runtime, /github\.event\.workflow_run\.conclusion == 'success'/);
   assert.match(

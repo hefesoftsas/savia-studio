@@ -3,7 +3,7 @@ import { appendFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { stagePreviewFrontendArtifact } from "../infra/pulumi/preview-frontend-artifacts.mjs";
 import { validateDeploymentUrl } from "./configure-plugin-editor-preview.mjs";
-import { derivePreviewCodeScope } from "./preview-code-release.mjs";
+import { needsPreviewFrontendBuild } from "./preview-code-release.mjs";
 
 const run = promisify(execFile);
 const env = process.env;
@@ -23,13 +23,15 @@ try {
   )
     throw new Error("Exact main push required");
 
-  const scope = await derivePreviewCodeScope({
+  const needed = await needsPreviewFrontendBuild({
     base: env.PREVIEW_PUSH_BASE,
     head: revision,
     cwd: root,
     run,
   });
-  if (scope && !scope.targets.includes("gateway")) {
+  if (directory === "--plan") {
+    await appendFile(env.GITHUB_OUTPUT, `needed=${needed}\n`);
+  } else if (!needed) {
     await appendFile(env.GITHUB_OUTPUT, "ready=false\n");
   } else {
     const origin = validateDeploymentUrl(

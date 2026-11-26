@@ -56,12 +56,7 @@ export function classifyPreviewCodeChanges(files) {
   }
   return selected.length ? selected : null;
 }
-export async function derivePreviewCodeScope({
-  base,
-  head,
-  cwd,
-  run = execute,
-}) {
+async function inspectPreviewCodeScope({ base, head, cwd, run = execute }) {
   if (
     ![base, head].every((value) => /^[a-f\d]{40}$/.test(value ?? "")) ||
     base === head
@@ -71,11 +66,13 @@ export async function derivePreviewCodeScope({
     await run("git", ["merge-base", "--is-ancestor", base, head], { cwd });
     const { stdout } = await run(
       "git",
-      ["diff", "--no-renames", "--name-only", base, head],
+      ["diff", "--no-renames", "--name-only", "-z", base, head, "--"],
       { cwd },
     );
+    const paths = stdout.split("\0").filter(Boolean);
+    if (paths.some((path) => path.includes("\ufffd"))) return null;
     const files = [];
-    for (const path of stdout.trim().split("\n").filter(Boolean)) {
+    for (const path of paths) {
       if (path.includes(":") || path.startsWith("/")) return null;
       if (!releaseRuntimeChanged([path])) continue;
       const before = (await run("git", ["show", `${base}:${path}`], { cwd }))
@@ -84,9 +81,20 @@ export async function derivePreviewCodeScope({
         .stdout;
       files.push({ path, before, after });
     }
+    if (!files.length) return { base, head, targets: [] };
     const targets = classifyPreviewCodeChanges(files);
     return targets ? { base, head, targets } : null;
   } catch {
     return null;
   }
+}
+
+export async function derivePreviewCodeScope(options) {
+  const scope = await inspectPreviewCodeScope(options);
+  return scope?.targets.length ? scope : null;
+}
+
+export async function needsPreviewFrontendBuild(options) {
+  const scope = await inspectPreviewCodeScope(options);
+  return !scope || scope.targets.includes("gateway");
 }
