@@ -18,6 +18,8 @@ type BundleItem = {
   facadeModuleId?: string | null;
   imports?: string[];
   code?: string;
+  source?: string | Uint8Array;
+  viteMetadata?: { importedCss: ReadonlySet<string> };
 };
 
 export function collectOfflineShellAssets(bundle: Record<string, BundleItem>) {
@@ -27,6 +29,11 @@ export function collectOfflineShellAssets(bundle: Record<string, BundleItem>) {
     const item = bundle[name];
     if (!item || item.type !== "chunk") return;
     assets.set(name, Buffer.byteLength(item.code ?? ""));
+    for (const css of item.viteMetadata?.importedCss ?? []) {
+      const style = bundle[css];
+      if (style?.type === "asset" && style.source !== undefined)
+        assets.set(css, Buffer.byteLength(style.source));
+    }
     item.imports?.forEach(visit);
   };
   for (const item of Object.values(bundle)) {

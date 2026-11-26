@@ -92,8 +92,9 @@ Deploy the server protocol before the new admin. Historical offline policy table
 are retained for migration compatibility, but their API, management screen and
 query-cache implementation are retired.
 
-The service worker precaches the boot/CRM route dependency closure. Optional
-editors and other routes cache on use. API responses are never stored in the
+The service worker precaches the scripts and styles required to open Admin and
+the offline CRM record routes. Optional editors and other routes cache their
+assets on use. API responses are never stored in the
 service-worker cache. Existing open tabs need the new application version before
 they use this protocol.
 
