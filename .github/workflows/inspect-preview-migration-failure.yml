@@ -1,0 +1,72 @@
+name: Inspect Preview migration failure
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Completed Preview deployment run holding the encrypted diagnostic
+        required: true
+        type: string
+      source_sha:
+        description: Exact source revision of that Preview deployment
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment:
+      name: preview
+      deployment: false
+    steps:
+      - uses: actions/checkout@v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6.5.0
+        with:
+          node-version: 22
+      - name: Verify trusted Preview deployment and exact diagnostic artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ && "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          source_info="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN")"
+          repository_id="$(jq -er --arg repo "$GITHUB_REPOSITORY" --arg id "$SOURCE_RUN" --arg sha "$SOURCE_SHA" '
+            select((.id | tostring) == $id and .repository.full_name == $repo and .head_repository.full_name == $repo and
+              .head_branch == "main" and .head_sha == $sha and .path == ".github/workflows/deploy-preview.yml" and
+              .event == "workflow_run" and .status == "completed") | .repository.id
+          ' <<< "$source_info")"
+          artifact_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/artifacts?per_page=100" |
+            jq -ers --arg id "$SOURCE_RUN" --arg sha "$SOURCE_SHA" --arg repository_id "$repository_id" '
+              [.[] | .artifacts[] | select(.name == "preview-command-diagnostics" and .expired == false)]
+              | select(length == 1) | .[0]
+              | select((.workflow_run.id | tostring) == $id and .workflow_run.head_sha == $sha and
+                  .workflow_run.head_branch == "main" and (.workflow_run.repository_id | tostring) == $repository_id and
+                  (.workflow_run.head_repository_id | tostring) == $repository_id) | .id
+            ')"
+          [[ "$artifact_id" =~ ^[0-9]+$ ]]
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+      - name: Download encrypted diagnostics from the verified run
+        uses: actions/download-artifact@v7.0.0
+        with:
+          artifact-ids: ${{ steps.source.outputs.artifact_id }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/preview-command-diagnostics
+          merge-multiple: true
+      - name: Report allowlisted migration diagnostics
+        env:
+          SAVIA_FLOWS_BACKUP_KEY: ${{ secrets.SAVIA_FLOWS_BACKUP_KEY }}
+        run: node infra/pulumi/preview-command-diagnostics.mjs "$RUNNER_TEMP/preview-command-diagnostics/preview-command-diagnostics.enc"

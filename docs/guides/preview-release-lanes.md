@@ -106,6 +106,12 @@ Public command errors report only a safe diagnostic category, remediation code,
 operation and exit code. Raw command diagnostics remain encrypted for seven days
 and are not printed to the workflow log.
 The command journal preserves these codes through the lifecycle wrapper.
+After a migration failure, run **Inspect Preview migration failure** from
+`main` with the deployment run ID and full commit SHA. The workflow reads the
+authenticated command archive and reports a fixed D1 category, with the HTTP
+status and numeric provider codes when present. The decrypted files are removed
+without uploading them. A successful retry still permits inspecting the original
+failure while its artifact is retained.
 `DNS_RESOLUTION_FAILED` identifies an explicit DNS lookup failure; verify the
 public hostname resolves before retrying a release that failed its health check.
 
