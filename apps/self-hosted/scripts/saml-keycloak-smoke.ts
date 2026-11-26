@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { createApplication } from "../src/application";
 import { loadConfiguration } from "../src/config";
 import { startHttpServer } from "../src/http-server";
+import { firstForm } from "./saml-smoke-form";
 
 const IMAGE =
   process.env.SAVIA_KEYCLOAK_IMAGE ?? "quay.io/keycloak/keycloak:26.7.4";
@@ -52,7 +53,6 @@ let appContainer: ReturnType<typeof spawn> | undefined;
 let containerStarted = false;
 
 type CookieJar = Map<string, string>;
-type Form = { action: string; fields: Record<string, string> };
 let syntheticClientIndex = 0;
 const syntheticClientIps = new WeakMap<CookieJar, string>();
 
@@ -108,31 +108,6 @@ async function waitFor<T>(
   throw new Error(`${label} did not become ready within 180 seconds`, {
     cause: lastError,
   });
-}
-
-function htmlDecode(value: string): string {
-  return value
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
-}
-
-function firstForm(html: string, base: string): Form {
-  const form = html.match(/<form\b([^>]*)>([\s\S]*?)<\/form>/i);
-  assert.ok(form, `Expected an HTML form in response: ${html.slice(0, 300)}`);
-  const attr = (source: string, name: string) => {
-    const found = source.match(new RegExp(`\\b${name}=["']([^"']*)["']`, "i"));
-    return found ? htmlDecode(found[1]) : "";
-  };
-  const action = new URL(attr(form[1], "action") || base, base).toString();
-  const fields: Record<string, string> = {};
-  for (const input of form[2].matchAll(/<input\b([^>]*)>/gi)) {
-    const name = attr(input[1], "name");
-    if (name) fields[name] = attr(input[1], "value");
-  }
-  return { action, fields };
 }
 
 function cookieHeader(jar: CookieJar): string | undefined {
