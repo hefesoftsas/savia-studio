@@ -768,6 +768,7 @@ test("a persisted Flows pause is observed without changing data or exposing cont
     { type: "plain_text", name: "SAVIA_FLOWS_MAINTENANCE", text: "false" },
     { type: "d1", name: "DB", database_id: databaseId },
   ];
+  let policyAvailable = true;
   const client = createRuntimeCloudClient(
     { accountId, workers: [{ name, cloudId }] },
     {
@@ -787,6 +788,7 @@ test("a persisted Flows pause is observed without changing data or exposing cont
           result = { resources: { bindings: flags } };
         else if (path.endsWith("/schedules")) result = { schedules: [] };
         else if (path === `/d1/database/${databaseId}/query`) {
+          if (!policyAvailable) throw new Error("Flows database unavailable");
           const { sql } = JSON.parse(options.body);
           assert.match(sql, /^SELECT /);
           result = [
@@ -808,6 +810,12 @@ test("a persisted Flows pause is observed without changing data or exposing cont
     JSON.stringify(snapshot).includes("savia_flows_execution_control"),
     false,
   );
+  policyAvailable = false;
+  await assert.rejects(client.readSnapshot(), /Flows database unavailable/);
+  const metadata = await client.readSnapshot({ observeFlowsPolicy: false });
+  assert.deepEqual(metadata.workerVersions, snapshot.workerVersions);
+  assert.deepEqual(metadata.maintenanceWorkerNames, []);
+  policyAvailable = true;
   flags.push({
     type: "plain_text",
     name: "SAVIA_FLOWS_POLICY_GENERATION",

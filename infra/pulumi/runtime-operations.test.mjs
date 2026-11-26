@@ -86,10 +86,13 @@ test("Preview without Flows preserves its Worker during recovery", async () => {
     {
       env: { SAVIA_CI_FLOWS_ENABLED: "false" },
       client: {
-        readSnapshot: async () => ({
-          workerVersions,
-          maintenanceWorkerNames: [flows.name],
-        }),
+        readSnapshot: async (options) => {
+          assert.deepEqual(options, {
+            allowUndeployed: true,
+            observeFlowsPolicy: false,
+          });
+          return { workerVersions, maintenanceWorkerNames: [flows.name] };
+        },
         api: async (path) => calls.push(path),
       },
     },

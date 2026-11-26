@@ -149,6 +149,7 @@ export function createRuntimeCloudClient(
   async function readSnapshot({
     allowUndeployed = false,
     includeDependencies = false,
+    observeFlowsPolicy = true,
   } = {}) {
     const names = new Set(workers.map((w) => w.name));
     const namespaceIds = (await list("/workers/durable_objects/namespaces"))
@@ -247,6 +248,7 @@ export function createRuntimeCloudClient(
         "SAVIA_FLOWS_MAINTENANCE",
       ].some((key) => flags[key] === "true");
       if (
+        observeFlowsPolicy &&
         /^savia-flows(?:-preview)?$/.test(worker.name) &&
         flags.SAVIA_FLOWS_EXECUTION_ENABLED === "true" &&
         !maintenance

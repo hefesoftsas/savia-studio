@@ -32,7 +32,9 @@ export async function listEnvironmentCloudResources({
   const [snapshot, routes] = await Promise.all([
     client.readSnapshot({
       allowUndeployed: true,
-      ...(preview ? { includeDependencies: true } : {}),
+      ...(preview
+        ? { includeDependencies: true, observeFlowsPolicy: false }
+        : {}),
     }),
     client.readRoutes(),
   ]);

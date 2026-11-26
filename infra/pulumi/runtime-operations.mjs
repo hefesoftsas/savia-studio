@@ -138,7 +138,9 @@ export function createRuntimeOperations(
   const managesWorker = ({ name }) =>
     !skipPreviewFlows || name !== "savia-flows-preview";
   const readSnapshot = async (options) => {
-    const snapshot = await client.readSnapshot(options);
+    const snapshot = await client.readSnapshot(
+      skipPreviewFlows ? { ...options, observeFlowsPolicy: false } : options,
+    );
     if (!skipPreviewFlows || !Array.isArray(snapshot.maintenanceWorkerNames))
       return snapshot;
     return {
@@ -148,6 +150,9 @@ export function createRuntimeOperations(
       ),
     };
   };
+  const standardClient = skipPreviewFlows
+    ? { ...client, readSnapshot }
+    : client;
   const run = (executable, args, options) =>
       timedCommand(
         env.SAVIA_RUNTIME_OPERATION_DIRECTORY,
@@ -231,7 +236,7 @@ export function createRuntimeOperations(
         publisher = await createStandardPublisher(inputs, {
           env,
           root,
-          client,
+          client: standardClient,
           recoveryDirectory: join(await work(), "recovery"),
           run,
           runWrangler,
@@ -260,7 +265,7 @@ export function createRuntimeOperations(
           );
         paused = !!observation.maintenanceWorkerNames?.length;
         for (const worker of observation.workerVersions.filter(
-          (row) => row.versionId !== null,
+          (row) => managesWorker(row) && row.versionId !== null,
         )) {
           const settings = await client.api(
             `/workers/scripts/${worker.name}/settings`,
@@ -311,7 +316,7 @@ export function createRuntimeOperations(
               fresh || retained || paused ? "maintenance" : "active",
           },
           root,
-          client,
+          client: standardClient,
           recoveryDirectory: join(await work(), "recovery"),
           run,
           runWrangler,

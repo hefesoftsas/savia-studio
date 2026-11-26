@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   assertProvisionPlan,
   previewRefreshFlags,
+  resolveReleaseWorkerProfile,
   verifySavedEnvironmentPlan,
 } from "./environment-operations.mjs";
 import { productionBackupLifecycleRule, stateBackendUrl } from "./naming.mjs";
@@ -20,6 +21,8 @@ async function planReleaseFixture({
   environment = "preview",
   appliedConfiguration,
   failSetAll = false,
+  existingFlows = false,
+  flowsSetting,
 } = {}) {
   const { createEnvironmentDependencies } =
       await import("./environment-operations.mjs"),
@@ -47,7 +50,11 @@ async function planReleaseFixture({
           : "https://savia.hefesoft.com",
     }),
     worker = names.workers.api,
-    profile = { enabledWorkers: [worker], retentionWorkerNames: [] };
+    profile = {
+      enabledWorkers: [worker, ...(existingFlows ? [names.flows.worker] : [])],
+      retentionWorkerNames: existingFlows ? [names.flows.worker] : [],
+      ...(existingFlows ? { flowsEnabled: true } : {}),
+    };
   await mkdir(source);
   await writeFile(join(source, "worker.mjs"), "export default {};");
   const artifact = await prepareRuntimeArtifact({
@@ -68,9 +75,19 @@ async function planReleaseFixture({
     workerNames: names.workers,
     databaseNames: names.databases,
     deletionProtected: false,
-    flowsEnabled: false,
-    flowsResources: null,
-    flowsExecutionEnabled: false,
+    flowsEnabled: existingFlows,
+    flowsResources: existingFlows
+      ? {
+          databaseId: "flows-db-id",
+          kvNamespaceId: "flows-kv-id",
+          workerName: names.flows.worker,
+          workflowName: names.flows.workflow,
+          queueName: names.flows.queue,
+          deadLetterQueueName: names.flows.deadLetterQueue,
+          buckets: names.flows.buckets,
+        }
+      : null,
+    flowsExecutionEnabled: existingFlows,
     plannedFlowsResourceNames: names.flows,
     tenantSubdomains: [],
     vectorizeIndex: names.vectorizeIndex,
@@ -81,6 +98,9 @@ async function planReleaseFixture({
     env: {
       CLOUDFLARE_ACCOUNT_ID: accountId,
       SAVIA_RUNTIME_OPERATION_DIRECTORY: join(directory, "timings"),
+      ...(flowsSetting === undefined
+        ? {}
+        : { SAVIA_CI_FLOWS_ENABLED: flowsSetting }),
     },
     appliedConfiguration,
     run: async (_binary, args) => {
@@ -213,6 +233,71 @@ test("Preview release batches public config and keeps only each key's final valu
     await fixture.cleanup();
   }
 });
+test("full Preview planning retains the existing Flows Worker omitted from the artifact", async () => {
+  const fixture = await planReleaseFixture({
+    existingFlows: true,
+    flowsSetting: "false",
+  });
+  try {
+    await fixture.plan();
+    const batch = fixture.commands.find(
+      (args) => args[0] === "config" && args[1] === "set-all",
+    );
+    const payload = JSON.parse(batch[batch.indexOf("--json") + 1]);
+    const profile = JSON.parse(
+      payload["savia-cloudflare:runtimeProfile"].value,
+    );
+    assert.deepEqual(profile, {
+      enabledWorkers: ["savia-agencies-preview", "savia-flows-preview"],
+      retentionWorkerNames: ["savia-flows-preview"],
+      flowsEnabled: true,
+    });
+    assert.ok(fixture.previewStarted());
+  } finally {
+    await fixture.cleanup();
+  }
+});
+test("omitting a Worker from an artifact preserves only an existing, opted-out Preview Flows Worker", () => {
+  const core = "savia-agencies-preview";
+  const flows = "savia-flows-preview";
+  const existing = { enabledWorkers: [core, flows] };
+  const optOut = { skipPreviewFlows: true };
+  assert.deepEqual(
+    resolveReleaseWorkerProfile(
+      existing,
+      [core, flows],
+      undefined,
+      "preview",
+      optOut,
+    ).enabledWorkers,
+    [core, flows],
+  );
+  assert.deepEqual(
+    resolveReleaseWorkerProfile(existing, [core], undefined, "preview")
+      .enabledWorkers,
+    [core],
+  );
+  assert.deepEqual(
+    resolveReleaseWorkerProfile(
+      { enabledWorkers: [core] },
+      [core],
+      undefined,
+      "preview",
+      optOut,
+    ).enabledWorkers,
+    [core],
+  );
+  assert.deepEqual(
+    resolveReleaseWorkerProfile(
+      { enabledWorkers: ["savia-agencies", "savia-flows"] },
+      ["savia-agencies"],
+      undefined,
+      "production",
+      optOut,
+    ).enabledWorkers,
+    ["savia-agencies"],
+  );
+});
 test("Preview release stops before preview when batched config application fails", async () => {
   const fixture = await planReleaseFixture({ failSetAll: true });
   try {
@@ -245,9 +330,7 @@ test("Production release continues to write config keys individually", async () 
     await fixture.cleanup();
   }
 });
-test("code-only release preserves the complete managed Worker profile", async () => {
-  const { resolveReleaseWorkerProfile } =
-    await import("./environment-operations.mjs");
+test("code-only release preserves the complete managed Worker profile", () => {
   const profile = {
     enabledWorkers: [
       "savia-preview",

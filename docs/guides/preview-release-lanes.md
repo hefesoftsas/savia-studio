@@ -472,6 +472,10 @@ continue to run when required by the existing CI profile. With the same
 variable set to `false`, Preview publishes the core runtime and keeps the
 existing Flows Worker, bindings, and data in place. Preview skips bundling the
 Flows Worker, as well as Flows maintenance, migrations, and publication.
+The release plan keeps the existing Flows Worker in the verified ownership
+profile even though the release artifact omits that Worker. Preview continues
+to verify the deployed Worker identity and version without querying its
+execution policy database when Flows is disabled.
 New Preview frontend builds omit the embedded Flows editor. Preview only
 reuses prepared frontend assets built with the same setting. Production uses
 its own deployment settings.
