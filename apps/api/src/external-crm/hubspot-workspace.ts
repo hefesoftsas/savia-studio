@@ -193,6 +193,19 @@ function verifySummarizedTotal(total: number | undefined, scanned: number) {
     fail("El total de HubSpot no coincide con los registros del resumen.", 502);
 }
 
+function assertSupportedRecordQuery(params: Record<string, string>) {
+  if (params.sort) fail("Este origen no admite ordenación de registros.");
+  if (
+    hasRecordFilters(params.filters) ||
+    params.searchField ||
+    params.stage ||
+    params.emptyStage === "true" ||
+    params.trash === "true"
+  ) {
+    fail("Este origen no admite esos filtros.");
+  }
+}
+
 export function capabilities(scopes: string[], resource: string) {
   const scope = ["tasks", "notes", "meetings", "calls"].includes(resource)
     ? "contacts"
@@ -879,8 +892,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       fail("La colección no está vinculada a HubSpot.", 404);
     if (!binding.capabilities.list)
       fail("La conexión no anuncia esta operación.", 405);
-    if (hasRecordFilters(c.req.query("filters")))
-      fail("Este origen no admite esos filtros.");
+    assertSupportedRecordQuery(c.req.query());
     if (group && !Object.hasOwn(object.config.fields, group))
       fail("El campo de agrupación no es válido.");
     if (amount && !Object.hasOwn(object.config.fields, amount))
@@ -1267,13 +1279,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
     if (surface === "export") {
       const signal = c.req.raw.signal;
       const params = c.req.query();
-      if (
-        hasRecordFilters(params.filters) ||
-        params.searchField ||
-        params.stage ||
-        params.trash === "true"
-      )
-        fail("Este origen no admite esos filtros.");
+      assertSupportedRecordQuery(params);
       let custom: ReturnType<typeof parseCsvExportColumns>;
       try {
         custom = parseCsvExportColumns(params, object);
@@ -1348,12 +1354,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
         limit > 100
       )
         fail("Paginación inválida (máximo 100 páginas).");
-      if (
-        hasRecordFilters(c.req.query("filters")) ||
-        c.req.query("stage") ||
-        c.req.query("trash") === "true"
-      )
-        fail("Este origen no admite esos filtros.");
+      assertSupportedRecordQuery(c.req.query());
       const scope = JSON.stringify([
         tenant,
         actor.principal.id,

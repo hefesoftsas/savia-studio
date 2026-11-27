@@ -182,8 +182,11 @@ is treated as an empty page only when pagination explicitly reports no more
 items. First and last name metadata are read-only in Pipedrive screens; edit
 the full name there instead.
 
-HubSpot summaries honor the same text search as the record list. When a
-search is present, summary counts and groups include only matching records.
+HubSpot record lists, summaries, and CSV exports support free-text search across
+the collection. The API rejects sorting, field-specific search, and unsupported
+filters before querying HubSpot. Studio applies the supported options when
+opening a saved view. Summary counts and groups include only matching records
+when a text search is active.
 Count-only summaries use the provider's total when available. If an
 unfiltered list exceeds the 1,000-record scan limit, Savia requests a total
 from [HubSpot CRM Search](https://developers.hubspot.com/docs/api-reference/legacy/crm/search-the-crm).

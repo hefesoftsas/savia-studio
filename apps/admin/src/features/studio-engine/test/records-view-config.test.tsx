@@ -1317,7 +1317,7 @@ it("loads the HubSpot summary when a filtered view settles before any unfiltered
 });
 
 it.each([false, true])(
-  "exports only HubSpot-supported query settings (saved view selected: %s)",
+  "uses only HubSpot-supported list and export settings (saved view selected: %s)",
   async (useSavedView) => {
     const transport = vi.fn(async (path: string) => {
       if (path === "/api/objects")
@@ -1332,6 +1332,7 @@ it.each([false, true])(
                 q: "Ana",
                 searchField: "firstname",
                 stage: "lead",
+                group: "firstname",
                 sort: { field: "firstname", order: "ASC" },
                 filters: {
                   logic: "and",
@@ -1350,6 +1351,7 @@ it.each([false, true])(
     const exportButton = await screen.findByRole("button", {
       name: "Exportar a CSV",
     });
+    const unsupported = ["filters", "stage", "searchField", "sort", "order"];
     if (useSavedView) {
       fireEvent.click(
         await screen.findByRole("button", { name: "Vista anterior" }),
@@ -1363,9 +1365,28 @@ it.each([false, true])(
       const listRequests = transport.mock.calls
         .map(([path]) => new URL(path, "https://savia.test"))
         .filter((url) => url.pathname === "/api/records/hubspot_contacts");
-      expect(
-        listRequests.some((url) => url.searchParams.get("q") === "Ana"),
-      ).toBe(true);
+      const filteredList = listRequests.find(
+        (url) => url.searchParams.get("q") === "Ana",
+      );
+      expect(filteredList).toBeDefined();
+      for (const parameter of unsupported)
+        expect(filteredList?.searchParams.has(parameter), parameter).toBe(
+          false,
+        );
+
+      const summary = transport.mock.calls
+        .map(([path]) => new URL(path, "https://savia.test"))
+        .find(
+          (url) =>
+            url.pathname === "/api/records/hubspot_contacts/summary" &&
+            url.searchParams.get("q") === "Ana",
+        );
+      expect(summary?.searchParams.get("group")).toBe("firstname");
+      expect(summary?.searchParams.has("searchField")).toBe(false);
+      expect(summary?.searchParams.get("stage")).toBe("");
+      expect(summary?.searchParams.get("filters")).toBe(
+        '{"logic":"and","conditions":[]}',
+      );
     }
     fireEvent.click(exportButton);
 
@@ -1376,13 +1397,7 @@ it.each([false, true])(
     const query = new URL(exportPath!, "https://savia.test").searchParams;
     expect(query.get("q")).toBe(useSavedView ? "Ana" : "");
     expect(query.get("columns")).toBe('["firstname"]');
-    for (const parameter of [
-      "filters",
-      "stage",
-      "searchField",
-      "sort",
-      "order",
-    ])
+    for (const parameter of unsupported)
       expect(query.has(parameter), parameter).toBe(false);
   },
 );

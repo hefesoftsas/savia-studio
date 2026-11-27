@@ -593,6 +593,38 @@ describe("HubSpot record pagination", () => {
     expect(proxy).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    "/api/records/hubspot_contacts",
+    "/api/records/hubspot_contacts/summary",
+    "/api/export/hubspot_contacts",
+  ])(
+    "rejects unsupported query options for %s before reading HubSpot",
+    async (path) => {
+      const proxy = vi.fn(async () =>
+        Response.json({
+          results: [{ id: "1", properties: { firstname: "Ana" } }],
+        }),
+      );
+      const app = createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy } },
+      });
+
+      for (const query of [
+        "sort=firstname&order=ASC",
+        "q=Ana&searchField=firstname",
+        "emptyStage=true",
+      ]) {
+        expect((await app.request(`${path}?${query}`)).status, query).toBe(422);
+      }
+      expect(proxy).not.toHaveBeenCalled();
+
+      const supported = await app.request(`${path}?q=Ana&order=DESC`);
+      expect(supported.status).toBe(200);
+      expect(proxy).toHaveBeenCalledOnce();
+    },
+  );
+
   it("continues from the previous page and preserves the exact total without replaying it", async () => {
     const proxy = vi.fn(async ({ path }: { path: string }) => {
       const after = new URL(path, "https://hubspot.test").searchParams.get(
