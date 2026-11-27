@@ -46,6 +46,10 @@ const prepareCommandInputSchema = z.object({
 type PreparedCommandInput = z.infer<typeof prepareCommandInputSchema>;
 
 type AssistantMcpClient = Pick<MCPClient, "callTool" | "close" | "tools">;
+type AssistantMcpClientFactory = (
+  authorization: string,
+  studioTenantId?: number,
+) => Promise<AssistantMcpClient>;
 
 export type AssistantServiceConfiguration = {
   database: D1Database;
@@ -57,7 +61,7 @@ export type AssistantServiceConfiguration = {
 };
 
 export type AssistantServiceDependencies = {
-  mcpClientFactory?: (authorization: string) => Promise<AssistantMcpClient>;
+  mcpClientFactory?: AssistantMcpClientFactory;
   configurationResolver?: {
     effectiveConfigurationFor(
       principalId: string,
@@ -81,8 +85,8 @@ function unavailableResponse(): Response {
 
 function delegatedMcpClientFactory(
   configuration: AssistantServiceConfiguration,
-): (authorization: string) => Promise<AssistantMcpClient> {
-  return (authorization) =>
+): AssistantMcpClientFactory {
+  return (authorization, studioTenantId) =>
     createMCPClient({
       transport: {
         type: "http",
@@ -92,6 +96,9 @@ function delegatedMcpClientFactory(
         headers: {
           "x-savia-mcp-secret": configuration.mcpSharedSecret,
           "x-savia-user-authorization": authorization,
+          ...(studioTenantId === undefined
+            ? {}
+            : { "x-savia-mcp-tenant-id": String(studioTenantId) }),
         },
       },
     });
@@ -108,9 +115,7 @@ function isMcpToolError(result: unknown): boolean {
 
 export class SaviaAssistantService implements AssistantService {
   private readonly actions: PendingActionRepository;
-  private readonly mcpClientFactory: (
-    authorization: string,
-  ) => Promise<AssistantMcpClient>;
+  private readonly mcpClientFactory: AssistantMcpClientFactory;
   private readonly configurationResolver: NonNullable<
     AssistantServiceDependencies["configurationResolver"]
   >;
@@ -330,7 +335,7 @@ export class SaviaAssistantService implements AssistantService {
 
     const mcpClient = textOnly
       ? undefined
-      : await this.mcpClientFactory(request.authorization);
+      : await this.mcpClientFactory(request.authorization, tenantId ?? 0);
     try {
       const requiresVisualization =
         !textOnly && visualizationRequested(request.messages);

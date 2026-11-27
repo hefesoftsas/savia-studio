@@ -51,7 +51,7 @@ export default {
 
     let authInfo;
     try {
-      const { authorization } = readDelegatedRequestCredentials(
+      const { authorization, studioTenantId } = readDelegatedRequestCredentials(
         request.headers,
         mcpSharedSecret,
       );
@@ -59,7 +59,7 @@ export default {
         token: createHash("sha256").update(authorization).digest("hex"),
         clientId: "savia-client",
         scopes: [],
-        extra: { delegatedAuthorization: authorization },
+        extra: { delegatedAuthorization: authorization, studioTenantId },
       };
     } catch (error) {
       return new Response(

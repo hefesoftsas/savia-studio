@@ -136,4 +136,75 @@ describe("Savia MCP Cloudflare Worker", () => {
     expect(text).toContain("customers");
     expect(capturedAuth).toBe("Bearer my-secret-jwt-token");
   });
+
+  it("keeps a trusted tenant fixed across calls when the active tenant changes", async () => {
+    let activeTenantId = 12;
+    let originalTenantAccessible = true;
+    const paths: string[] = [];
+    const apiFetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        paths.push(url.pathname);
+        expect(new Headers(init?.headers).get("authorization")).toBe(
+          "Bearer scoped-user-token",
+        );
+        if (url.pathname === "/v1/assistant/active-tenant") {
+          return Response.json({ activeTenantId });
+        }
+        if (url.pathname === "/v1/studio/12/api/objects")
+          return originalTenantAccessible
+            ? Response.json({ data: [{ name: "original-tenant-objects" }] })
+            : Response.json({ error: "Tenant access denied" }, { status: 403 });
+        expect(url.pathname).toBe("/v1/studio/44/api/objects");
+        return Response.json({ data: [{ name: "new-tenant-objects" }] });
+      },
+    );
+    const env = {
+      SAVIA_API_URL: "https://savia.test",
+      SAVIA_MCP_SHARED_SECRET: "tenant-secret",
+      API: { fetch: apiFetch as typeof fetch },
+    };
+    const invoke = (studioTenantId: number) =>
+      worker.fetch(
+        new Request("https://savia-mcp.internal/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "x-savia-mcp-secret": "tenant-secret",
+            "x-savia-user-authorization": "Bearer scoped-user-token",
+            "x-savia-mcp-tenant-id": String(studioTenantId),
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: {
+              name: "savia_list_crm_collections",
+              arguments: { all: true },
+            },
+          }),
+        }),
+        env,
+      );
+
+    const first = await invoke(12);
+    expect(first.status).toBe(200);
+    expect(await first.text()).toContain("original-tenant-objects");
+
+    activeTenantId = 44;
+    originalTenantAccessible = false;
+    const second = await invoke(12);
+    expect(second.status).toBe(200);
+    expect(await second.text()).toContain("Tenant access denied");
+
+    const nextTurn = await invoke(44);
+    expect(nextTurn.status).toBe(200);
+    expect(await nextTurn.text()).toContain("new-tenant-objects");
+    expect(paths).toEqual([
+      "/v1/studio/12/api/objects",
+      "/v1/studio/12/api/objects",
+      "/v1/studio/44/api/objects",
+    ]);
+  });
 });

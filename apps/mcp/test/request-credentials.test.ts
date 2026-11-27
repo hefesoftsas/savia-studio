@@ -30,4 +30,40 @@ describe("delegated MCP request credentials", () => {
       readDelegatedRequestCredentials(headers, "internal-secret"),
     ).toThrow(McpRequestCredentialError);
   });
+
+  it.each([
+    ["0", 0],
+    ["15", 15],
+    ["9007199254740991", Number.MAX_SAFE_INTEGER],
+  ])("accepts trusted decimal tenant ID %s", (header, tenantId) => {
+    expect(
+      readDelegatedRequestCredentials(
+        new Headers({
+          "x-savia-mcp-secret": "internal-secret",
+          "x-savia-user-authorization": "Bearer user-session-token",
+          "x-savia-mcp-tenant-id": header,
+        }),
+        "internal-secret",
+      ),
+    ).toEqual({
+      authorization: "Bearer user-session-token",
+      studioTenantId: tenantId,
+    });
+  });
+
+  it.each(["", "-1", "+1", "1.5", "1e2", "9007199254740992"])(
+    "rejects malformed tenant ID %j",
+    (tenantId) => {
+      expect(() =>
+        readDelegatedRequestCredentials(
+          new Headers({
+            "x-savia-mcp-secret": "internal-secret",
+            "x-savia-user-authorization": "Bearer user-session-token",
+            "x-savia-mcp-tenant-id": tenantId,
+          }),
+          "internal-secret",
+        ),
+      ).toThrow(McpRequestCredentialError);
+    },
+  );
 });

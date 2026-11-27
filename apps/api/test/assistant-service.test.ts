@@ -888,7 +888,7 @@ describe("SaviaAssistantService MCP transport", () => {
     expect(mcpClientFactory).not.toHaveBeenCalled();
   });
 
-  it("preserves the Cloudflare fetch receiver while discovering MCP tools", async () => {
+  it("preserves the fetch receiver and Studio tenant while discovering MCP tools", async () => {
     const platformFetch = vi.fn(function (
       this: typeof globalThis,
       _input: RequestInfo | URL,
@@ -900,6 +900,11 @@ describe("SaviaAssistantService MCP transport", () => {
       if (init?.redirect !== "follow") {
         throw new TypeError("Unsupported edge redirect mode");
       }
+      const headers = new Headers(init?.headers);
+      expect(headers.get("x-savia-mcp-tenant-id")).toBe("14");
+      expect(headers.get("x-savia-user-authorization")).toBe(
+        "Bearer current-user-token",
+      );
       const request = JSON.parse(String(init?.body)) as {
         id: number;
         method: string;
@@ -945,12 +950,24 @@ describe("SaviaAssistantService MCP transport", () => {
     });
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", platformFetch);
-    const service = new SaviaAssistantService({
-      database: env.DB,
-      mcpUrl: "http://mcp:8789/mcp",
-      mcpSharedSecret: "internal-secret",
-      openRouterApiKey: "server-only-key",
-    });
+    const service = new SaviaAssistantService(
+      {
+        database: env.DB,
+        mcpUrl: "http://mcp:8789/mcp",
+        mcpSharedSecret: "internal-secret",
+      },
+      {
+        configurationResolver: {
+          async effectiveConfigurationFor() {
+            return {
+              tenantId: 14,
+              apiKey: "server-only-key",
+              model: "test-model",
+            };
+          },
+        },
+      },
+    );
 
     try {
       await expect(

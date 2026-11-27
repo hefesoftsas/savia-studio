@@ -12,6 +12,10 @@ saved. A caller with multiple or no active memberships must select an authorized
 tenant. Platform administrators without a selected tenant operate on platform
 employees and platform collections.
 
+In a Savia chat turn, Studio queries use the organization resolved when the
+turn starts. An organization change applies to the next turn. Studio still
+checks the caller's current permissions on each request.
+
 The employee editor has two explicit modes. **Text only** processes the supplied
 text and employee instructions without workspace collections, documents, MCP
 tools, employee knowledge-file retrieval, or workspace business guidance. The

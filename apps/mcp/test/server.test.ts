@@ -302,12 +302,13 @@ describe("Savia FastMCP server", () => {
     }
   });
 
-  it("uses credentials from each private MCP HTTP request to call the Domain API", async () => {
+  it("uses delegated credentials and the trusted tenant from private MCP HTTP headers", async () => {
     let authorization: string | undefined;
+    const paths: string[] = [];
     const apiUrl = await startApi(async (request) => {
       authorization = request.headers.authorization;
-      if (request.url === "/v1/assistant/active-tenant") return { tenants: [] };
-      expect(request.url).toBe("/v1/studio/0/api/objects");
+      paths.push(request.url ?? "");
+      expect(request.url).toBe("/v1/studio/25/api/objects");
       return { data: [] };
     });
     const server = createSaviaMcpServer({
@@ -331,6 +332,7 @@ describe("Savia FastMCP server", () => {
             headers: {
               "x-savia-mcp-secret": "internal-secret",
               "x-savia-user-authorization": "Bearer delegated-user-token",
+              "x-savia-mcp-tenant-id": "25",
             },
           },
         },
@@ -339,6 +341,7 @@ describe("Savia FastMCP server", () => {
       try {
         await client.callTool("savia_list_crm_collections");
         expect(authorization).toBe("Bearer delegated-user-token");
+        expect(paths).toEqual(["/v1/studio/25/api/objects"]);
       } finally {
         await client.close();
       }
