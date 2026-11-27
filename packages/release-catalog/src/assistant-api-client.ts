@@ -518,6 +518,7 @@ export class SaviaApiClient {
       nextCursor?: string | null;
       hasNext?: boolean | null;
       pageInfo?: { hasNextPage?: boolean };
+      meta?: { recordOffset?: unknown; pageLimitReached?: boolean };
     } | null>(path);
     if (!Array.isArray(response?.data)) {
       throw new Error("Studio API did not return a record page");
@@ -525,11 +526,21 @@ export class SaviaApiClient {
     const hasMoreRecords =
       response.pageInfo?.hasNextPage === true ||
       response.hasNext === true ||
+      response.meta?.pageLimitReached === true ||
       Boolean(response.nextCursor);
-    const minimumTotal = response.data.length + (hasMoreRecords ? 1 : 0);
+    const recordOffset = response.meta?.recordOffset;
+    const priorRecords =
+      recordOffset === undefined ? 0 : collectionTotal(recordOffset);
+    const total =
+      priorRecords === null
+        ? null
+        : collectionTotal(
+            response.total,
+            priorRecords + response.data.length + Number(hasMoreRecords),
+          );
     return {
       ...response,
-      total: collectionTotal(response.total, minimumTotal),
+      total,
     };
   }
 
