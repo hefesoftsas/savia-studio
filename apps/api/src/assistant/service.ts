@@ -38,6 +38,11 @@ import { retrieveRelevantChunks, type RagEnvironment } from "./rag";
 
 const defaultOpenRouterModel = "deepseek/deepseek-v4-flash";
 const defaultAssistantMaxOutputTokens = 1024;
+const studioRecordWriteTools = new Set([
+  "savia_create_studio_record",
+  "savia_update_studio_record",
+  "savia_delete_studio_record",
+]);
 const prepareCommandInputSchema = z.object({
   domain: z.string().trim().min(1),
   command: z.string().trim().min(1),
@@ -426,6 +431,7 @@ export class SaviaAssistantService implements AssistantService {
             const action = await this.actions.issue({
               id,
               principalId: request.principalId,
+              studioTenantId: tenantId ?? 0,
               domain,
               command,
               input:
@@ -734,10 +740,24 @@ export class SaviaAssistantService implements AssistantService {
 
     let mcpClient: AssistantMcpClient | undefined;
     try {
-      mcpClient = await this.mcpClientFactory(request.authorization);
       const toolCall = this.buildMcpToolCallForAction(action);
+      const isServiceQuote =
+        action.domain === "service" && action.command === "quote-auto";
+      if (
+        action.studioTenantId === undefined &&
+        (isServiceQuote || studioRecordWriteTools.has(toolCall.name))
+      ) {
+        const failed = await this.actions.fail(action.id, {
+          message: "Prepare this action again to confirm its organization.",
+        });
+        return failed ? { state: "failed" } : { state: "unavailable" };
+      }
+      mcpClient = await this.mcpClientFactory(
+        request.authorization,
+        action.studioTenantId,
+      );
       const result = await mcpClient.callTool(
-        action.domain === "service" && action.command === "quote-auto"
+        isServiceQuote
           ? {
               ...toolCall,
               options: { timeout: 300_000, maxTotalTimeout: 300_000 },

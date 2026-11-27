@@ -664,6 +664,105 @@ describe("SaviaAssistantService action approvals", () => {
     });
   });
 
+  it("confirms a Studio action in its preparation tenant after a workspace change", async () => {
+    let activeTenantId = 14;
+    const executions: number[] = [];
+    const mcpClientFactory = vi.fn(
+      async (_authorization: string, studioTenantId?: number) => ({
+        async callTool() {
+          executions.push(studioTenantId ?? activeTenantId);
+          return { structuredContent: { success: true } };
+        },
+        close: async () => undefined,
+        tools: async () => ({}),
+      }),
+    );
+    const service = new SaviaAssistantService(
+      {
+        database: env.DB,
+        mcpUrl: "http://mcp:8789/mcp",
+        mcpSharedSecret: "internal-secret",
+      },
+      {
+        mcpClientFactory,
+        configurationResolver: {
+          async effectiveConfigurationFor() {
+            return {
+              tenantId: activeTenantId,
+              apiKey: "server-only-key",
+              model: "test-model",
+            };
+          },
+        },
+      },
+    );
+    const actor = {
+      principalId: "test-platform-admin",
+      authorization: "Bearer current-user-token",
+    };
+    await service.chat({ ...actor, messages: [] });
+    const prepare = streamTextMock.mock.calls[0][0].tools.savia_prepare_command;
+    const proposal = await prepare.execute({
+      domain: "studio",
+      command: "update-record",
+      input: { collection: "contacts", id: "123", data: { status: "active" } },
+    });
+    expect(proposal).toMatchObject({ requiresConfirmation: true });
+    expect(executions).toEqual([]);
+
+    activeTenantId = 21;
+    const confirmation = { ...actor, actionId: proposal.actionId };
+    await expect(service.confirmAction(confirmation)).resolves.toMatchObject({
+      state: "completed",
+    });
+    await expect(service.confirmAction(confirmation)).resolves.toEqual({
+      state: "unavailable",
+    });
+    expect(executions).toEqual([14]);
+  });
+
+  it.each([
+    { domain: "studio", command: "create-record" },
+    { domain: "service", command: "quote-auto" },
+  ])(
+    "requires a new proposal for a legacy $domain action without a tenant",
+    async (legacy) => {
+      const callTool = vi.fn(async () => ({
+        structuredContent: { success: true },
+      }));
+      const mcpClientFactory = vi.fn(async () => ({
+        callTool,
+        close: async () => undefined,
+        tools: async () => ({}),
+      }));
+      const service = new SaviaAssistantService(
+        {
+          database: env.DB,
+          mcpUrl: "http://mcp:8789/mcp",
+          mcpSharedSecret: "internal-secret",
+        },
+        { mcpClientFactory },
+      );
+      const repository = new PendingActionRepository(env.DB);
+      const principalId = "test-platform-admin";
+      const id = `legacy-${legacy.domain}-confirmation`;
+      await repository.issue({ ...legacy, id, principalId, input: {} });
+
+      await expect(
+        service.confirmAction({
+          actionId: id,
+          principalId,
+          authorization: "Bearer current-user-token",
+        }),
+      ).resolves.toEqual({ state: "failed" });
+      expect(mcpClientFactory).not.toHaveBeenCalled();
+      expect(callTool).not.toHaveBeenCalled();
+      expect(await repository.status(id, principalId)).toMatchObject({
+        state: "failed",
+      });
+    },
+  );
+
   it("routes CRM create, update, and delete actions to dedicated CRM tools", async () => {
     const callTool = vi.fn(async (call: { name: string; arguments: any }) => ({
       content: [{ type: "text", text: "ok" }],
@@ -690,6 +789,7 @@ describe("SaviaAssistantService action approvals", () => {
     await repository.issue({
       id: "crm-create-1",
       principalId: "test-platform-admin",
+      studioTenantId: 0,
       domain: "cartera",
       command: "create-record",
       input: {
@@ -716,6 +816,7 @@ describe("SaviaAssistantService action approvals", () => {
     await repository.issue({
       id: "crm-update-1",
       principalId: "test-platform-admin",
+      studioTenantId: 14,
       domain: "crm",
       command: "update-record",
       input: {
@@ -744,6 +845,7 @@ describe("SaviaAssistantService action approvals", () => {
     await repository.issue({
       id: "crm-delete-1",
       principalId: "test-platform-admin",
+      studioTenantId: 14,
       domain: "crm",
       command: "delete-record",
       input: {

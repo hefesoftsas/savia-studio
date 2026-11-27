@@ -16,6 +16,11 @@ In a Savia chat turn, Studio queries use the organization resolved when the
 turn starts. An organization change applies to the next turn. Studio still
 checks the caller's current permissions on each request.
 
+Confirmations for Studio record changes and optional quote actions use the
+organization saved with the proposal. This scope stays fixed between preparation
+and confirmation, and the API checks access again when executing the action.
+Earlier proposals without a saved organization require a new proposal.
+
 The employee editor has two explicit modes. **Text only** processes the supplied
 text and employee instructions without workspace collections, documents, MCP
 tools, employee knowledge-file retrieval, or workspace business guidance. The

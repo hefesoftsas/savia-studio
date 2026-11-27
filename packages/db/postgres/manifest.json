@@ -321,6 +321,10 @@
     {
       "filename": "0076_identity_access_change_leases.sql",
       "sha256": "09a7b317bd096518b82918474604e1107ebfe3eed6fecab4c59841a610e8a87d"
+    },
+    {
+      "filename": "0077_assistant_action_studio_tenant.sql",
+      "sha256": "ca65bcdc093847999e367e011afb5b6edb0e3d00b7e7c1a238c1ffce6121c45b"
     }
   ],
   "sqliteOnlyDerivedTables": [
@@ -3009,6 +3013,14 @@
           "notnull": 0,
           "dflt_value": null,
           "pk": 0
+        },
+        {
+          "cid": 10,
+          "name": "studio_tenant_id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt_value": null,
+          "pk": 0
         }
       ],
       "foreignKeys": [],
@@ -3021,7 +3033,7 @@
           "origin": "pk"
         }
       ],
-      "checkCount": 1
+      "checkCount": 2
     },
     {
       "name": "assistant_threads",
