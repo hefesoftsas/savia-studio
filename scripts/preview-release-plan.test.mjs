@@ -574,16 +574,22 @@ test("self-hosted smoke scripts publish no Preview runtime unless hosted code al
   }
 });
 
-test("the Self-hosted hook worker does not publish the Cloudflare Preview runtime", () => {
+test("isolated Self-hosted TypeScript does not publish the Cloudflare Preview runtime", () => {
   const dockerChanges = [
+    "apps/self-hosted/src/http-server.ts",
     "apps/self-hosted/src/hook-worker.ts",
-    "apps/self-hosted/test/hooks.test.ts",
+    "apps/self-hosted/src/postgres/database.ts",
+    "apps/self-hosted/test/http-server.test.ts",
     "docs/guides/self-hosted-docker.md",
   ];
   assert.equal(releaseRuntimeChanged(dockerChanges), false);
   for (const runtimePath of [
     "apps/hook-executor/src/executor.ts",
     "apps/savia-request/src/server/hooks.ts",
+    "apps/self-hosted/Dockerfile",
+    "apps/self-hosted/package.json",
+    "apps/self-hosted/src/unknown-config.json",
+    "pnpm-lock.yaml",
   ]) {
     assert.equal(releaseRuntimeChanged([...dockerChanges, runtimePath]), true);
   }

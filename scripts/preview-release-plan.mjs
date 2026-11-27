@@ -1,7 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { classifyChanges } from "./preview-change-plan.mjs";
+import {
+  classifyChanges,
+  isSelfHostedTypeScriptPath,
+} from "./preview-change-plan.mjs";
 import { loadComponentEvidence } from "./preview-component-evidence.mjs";
 
 const shaPattern = /^[a-f0-9]{40}$/;
@@ -65,7 +68,6 @@ const RUNTIME_IGNORED_PATHS = new Set([
   "apps/self-hosted/scripts/account-email-smoke.ts",
   "apps/self-hosted/scripts/saml-keycloak-smoke.ts",
   "apps/self-hosted/scripts/saml-smoke-form.ts",
-  "apps/self-hosted/src/hook-worker.ts",
 ]);
 
 function documentationOrTestPath(path) {
@@ -106,6 +108,7 @@ export function releaseRuntimeChanged(paths) {
     (path) =>
       !documentationOrTestPath(path) &&
       !RUNTIME_IGNORED_PATHS.has(path) &&
+      !isSelfHostedTypeScriptPath(path) &&
       !path.startsWith("deployment/plugins/") &&
       !path.startsWith("store-ports/"),
   );

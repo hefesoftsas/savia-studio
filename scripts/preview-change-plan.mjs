@@ -66,7 +66,7 @@ function isFrontendCiPath(path) {
   return isFrontendSourcePath(path) || FRONTEND_TEST_PATH.test(path);
 }
 
-function isSelfHostedCiPath(path) {
+export function isSelfHostedTypeScriptPath(path) {
   return /^apps\/self-hosted\/(?:src|test)\/.+\.(?:ts|tsx|mts|cts)$/.test(path);
 }
 
@@ -412,7 +412,10 @@ export function classifyCiChanges({ base, head, repo = process.cwd() } = {}) {
   ) {
     return isolatedRuntimeProfile("api");
   }
-  if (runtimePaths.length > 0 && runtimePaths.every(isSelfHostedCiPath)) {
+  if (
+    runtimePaths.length > 0 &&
+    runtimePaths.every(isSelfHostedTypeScriptPath)
+  ) {
     return isolatedRuntimeProfile("self-hosted");
   }
   if (
