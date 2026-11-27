@@ -332,6 +332,80 @@ it("stores validated images by tenant and only serves assets referenced by saved
   ).toBe(200);
   expect((await instance.request("https://api.test" + url)).status).toBe(404);
 });
+
+it("publishes branding hints and sends images to login only after saving them", async () => {
+  const t = await tenant();
+  const publish = vi.fn();
+  const instance = createTestApp({
+    auth: member(t.id),
+    documents: env.DOCUMENTS,
+    realtime: {
+      publish,
+      issue: vi.fn(),
+      forward: vi.fn(),
+    },
+    authService: {
+      async fetch(request) {
+        const header = request.headers.get("x-savia-tenant-branding");
+        return Response.json(
+          header ? JSON.parse(decodeURIComponent(header)) : null,
+        );
+      },
+    },
+  });
+  const origin = `https://${t.slug}.savia.hefesoft.com`;
+  const logo = await upload(instance, t.id, "logo");
+  const cover = await upload(instance, t.id, "cover");
+  expect(logo.status, await logo.clone().text()).toBe(201);
+  expect(cover.status, await cover.clone().text()).toBe(201);
+  const {
+    data: { url: logoUrl },
+  } = (await logo.json()) as { data: { url: string } };
+  const {
+    data: { url: coverUrl },
+  } = (await cover.json()) as { data: { url: string } };
+  expect(publish).not.toHaveBeenCalled();
+
+  const { data } = await read(instance, t.id);
+  expect(data).toMatchObject({ logoUrl: null, coverUrl: null });
+  const response = await put(instance, t.id, { ...data, logoUrl, coverUrl });
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(publish).toHaveBeenCalledExactlyOnceWith(
+    `tenant:${t.id}`,
+    expect.objectContaining({
+      topic: "settings",
+      collection: "branding",
+      type: "updated",
+    }),
+  );
+
+  expect((await read(instance, t.id)).data).toMatchObject({
+    logoUrl,
+    coverUrl,
+  });
+  const publicBranding = await instance.request(
+    `${origin}/api/public/tenant-branding`,
+  );
+  expect(await publicBranding.json()).toMatchObject({
+    data: { logoUrl, coverUrl },
+  });
+  const login = await instance.request(`${origin}/api/auth/login`);
+  expect(await login.json()).toMatchObject({ logoUrl, coverUrl });
+  const canonicalLogin = await instance.request(
+    "https://savia.hefesoft.com/api/auth/login",
+    {
+      headers: { cookie: `savia.return_origin=${encodeURIComponent(origin)}` },
+    },
+  );
+  expect(await canonicalLogin.json()).toMatchObject({ logoUrl, coverUrl });
+  for (const url of [logoUrl, coverUrl]) {
+    const asset = await instance.request(origin + url);
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await asset.arrayBuffer())).toEqual(png());
+  }
+});
+
 it("stores validated Lottie animations and only serves them when referenced by saved branding", async () => {
   const t = await tenant(),
     instance = app(member(t.id), env.DOCUMENTS);
