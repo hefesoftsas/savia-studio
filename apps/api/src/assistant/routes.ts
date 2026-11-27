@@ -49,6 +49,13 @@ const activeScreenContextSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
+const employeeFileUploadSchema = z.object({
+  name: z.string(),
+  content: z.string(),
+  contentType: z.string().nullish(),
+  isBase64: z.boolean().nullish(),
+});
+
 const chatRequestSchema = z.object({
   messages: assistantThreadMessagesSchema,
   employeeId: z.string().optional(),
@@ -955,9 +962,9 @@ export function registerAssistantRoutes(
     let fileBuffer: ArrayBuffer;
 
     if (reqContentType.includes("multipart/form-data")) {
-      const form = await context.req.formData();
-      const file = form.get("file");
-      if (!file || !(file instanceof File)) {
+      const form = await context.req.formData().catch(() => undefined);
+      const file = form?.get("file");
+      if (!(file instanceof File)) {
         return context.json(
           {
             error: { code: "VALIDATION_ERROR", message: "Archivo no provisto" },
@@ -969,34 +976,46 @@ export function registerAssistantRoutes(
       fileType = file.type || "application/octet-stream";
       fileBuffer = await file.arrayBuffer();
     } else {
-      const json = await context.req.json().catch(() => undefined);
-      if (
-        !json ||
-        typeof json.name !== "string" ||
-        typeof json.content !== "string"
-      ) {
+      const upload = employeeFileUploadSchema.safeParse(
+        await context.req.json().catch(() => undefined),
+      );
+      if (!upload.success) {
         return context.json(
           {
             error: {
               code: "VALIDATION_ERROR",
               message:
-                "Se requiere un objeto con { name, contentType, content }",
+                "Revisa el nombre, contenido, tipo y codificación del archivo.",
             },
           },
           400,
         );
       }
-      filename = json.name;
-      fileType = json.contentType || "text/plain";
-      if (json.isBase64) {
-        const binaryString = atob(json.content);
+      const { name, contentType, content, isBase64 } = upload.data;
+      filename = name;
+      fileType = contentType || "text/plain";
+      if (isBase64) {
+        let binaryString: string;
+        try {
+          binaryString = atob(content);
+        } catch {
+          return context.json(
+            {
+              error: {
+                code: "VALIDATION_ERROR",
+                message: "El contenido Base64 no es válido.",
+              },
+            },
+            400,
+          );
+        }
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
           bytes[i] = binaryString.charCodeAt(i);
         }
         fileBuffer = bytes.buffer;
       } else {
-        fileBuffer = new TextEncoder().encode(json.content).buffer;
+        fileBuffer = new TextEncoder().encode(content).buffer;
       }
     }
 

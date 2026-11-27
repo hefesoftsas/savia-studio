@@ -33,6 +33,9 @@ Knowledge files show as indexed once Savia has saved searchable text. Empty
 text or an indexing error puts the file in the failed state. Employee responses
 use only indexed files and look up relevant passages by keyword in Savia's
 database. Document lookup does not require an embedding provider.
+Savia rejects malformed multipart forms and invalid JSON upload fields or
+Base64 content before storing a file. For JSON uploads, use a string for
+`contentType` and a boolean for `isBase64` when supplying those fields.
 
 Existing employees with a nonempty collection allowlist remain in Workspace tools
 mode with their current scope when edited. A Spanish-to-English translator
