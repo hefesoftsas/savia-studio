@@ -93,3 +93,10 @@ condition = "AND"
 paths = ['''^scripts/verify-retired-vector-secrets\.mjs$''']
 regexTarget = "secret"
 regexes = ['''^(?:4dabf18193072939515e22adb298388d|1b47061264138c4ac30d75fd1eb44270)$''']
+
+[[allowlists]]
+description = "SQLite column references in the two lease upserts"
+condition = "AND"
+paths = ['''^apps/api/src/(?:auth/identity-access-change|routes/tenant-purge)\.ts$''']
+regexTarget = "line"
+regexes = ['''^\s*SET lease_token=excluded\.lease_token,lease_until=excluded\.lease_until\s*$''']
