@@ -91,7 +91,7 @@ jobs:
             if node "$trusted_script" --ci --base "$BASE_SHA" --head "$HEAD_SHA" --output "$ci_output" \
               && [[ "$(grep -c '^ci_kind=' "$ci_output")" == 1 ]] \
               && [[ "$(grep -c '^ci_flows=' "$ci_output")" == 1 ]] \
-              && { { grep -Fxq 'ci_kind=full' "$ci_output" && grep -Fxq 'ci_flows=true' "$ci_output"; } || { grep -Exq 'ci_kind=(infrastructure|plugin|none|auth|api|backup-gate|assistant-api|ci-config|frontend|frontend-assistant-api)' "$ci_output" && grep -Fxq 'ci_flows=false' "$ci_output"; }; }; then
+              && { { grep -Fxq 'ci_kind=full' "$ci_output" && grep -Fxq 'ci_flows=true' "$ci_output"; } || { grep -Exq 'ci_kind=(infrastructure|plugin|none|auth|api|backup-gate|assistant-api|ci-config|frontend|frontend-assistant-api|self-hosted)' "$ci_output" && grep -Fxq 'ci_flows=false' "$ci_output"; }; }; then
               cat "$ci_output" >> "$GITHUB_OUTPUT"
             else
               {
@@ -530,7 +530,7 @@ jobs:
     needs: changes
     if: >-
       ${{ !cancelled() && needs.changes.result == 'success' &&
-      contains(fromJSON('["auth","api","backup-gate","assistant-api","frontend","frontend-assistant-api"]'), needs.changes.outputs.ci_kind) }}
+      contains(fromJSON('["auth","api","backup-gate","assistant-api","frontend","frontend-assistant-api","self-hosted"]'), needs.changes.outputs.ci_kind) }}
     timeout-minutes: 15
     runs-on: ubuntu-24.04
     env:
@@ -561,6 +561,10 @@ jobs:
           case "$CI_KIND" in
             frontend)
               pnpm --filter @savia/admin typecheck
+              ;;
+            self-hosted)
+              pnpm --filter @savia/self-hosted test
+              pnpm --filter @savia/self-hosted typecheck
               ;;
             auth)
               pnpm --filter @savia/auth test

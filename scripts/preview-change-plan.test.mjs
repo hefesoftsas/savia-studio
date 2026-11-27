@@ -650,6 +650,49 @@ test("CI selects focused profiles for isolated Auth, API, and backup-gate change
   }
 });
 
+test("CI selects the focused Self-hosted profile only for isolated TypeScript", (t) => {
+  const f = fixture(t);
+  f.put("apps/self-hosted/src/hooks.ts", "export const hook = 1;\n");
+  f.put("apps/self-hosted/test/hooks.test.ts", "// test\n");
+  f.put("docs/guides/self-hosted.md", "Self-hosted guide\n");
+  const base = f.commit("base");
+
+  f.put("apps/self-hosted/src/hooks.ts", "export const hook = 2;\n");
+  f.put("apps/self-hosted/test/hooks.test.ts", "// changed test\n");
+  f.put("docs/guides/self-hosted.md", "Updated self-hosted guide\n");
+  const head = f.commit("self-hosted TypeScript change");
+  const plan = classifyCiChanges({ base, head, repo: f.repo });
+  assert.equal(plan.kind, "self-hosted");
+  assert.equal(plan.flows, false);
+  assert.equal(classifyChanges({ base, head, repo: f.repo }).kind, "platform");
+
+  let mixedBase = head;
+  let revision = 3;
+  for (const path of [
+    "apps/self-hosted/Dockerfile",
+    "apps/self-hosted/package.json",
+    "apps/self-hosted/src/runtime.js",
+    "apps/self-hosted/test/fixture.json",
+    "packages/studio-shared/src/index.ts",
+    ".github/workflows/ci.yml",
+  ]) {
+    f.put(
+      "apps/self-hosted/src/hooks.ts",
+      `export const hook = ${revision++};\n`,
+    );
+    f.put(path, "changed\n");
+    const mixed = f.commit(`mixed change with ${path}`);
+    const mixedPlan = classifyCiChanges({
+      base: mixedBase,
+      head: mixed,
+      repo: f.repo,
+    });
+    assert.equal(mixedPlan.kind, "full", path);
+    assert.equal(mixedPlan.flows, true, path);
+    mixedBase = mixed;
+  }
+});
+
 test("mixed runtime scopes and migration changes retain full CI and Flows checks", (t) => {
   const f = fixture(t);
   f.put("apps/auth/src/index.ts", "export const auth = 1;\n");
@@ -986,13 +1029,13 @@ test("CI routes infrastructure contracts through the required suite and gate", (
   assert.match(workflow, /ci_flows == 'true'/);
   assert.match(
     workflow,
-    /ci_kind=\(infrastructure\|plugin\|none\|auth\|api\|backup-gate\|assistant-api\|ci-config\|frontend\|frontend-assistant-api\)/,
+    /ci_kind=\(infrastructure\|plugin\|none\|auth\|api\|backup-gate\|assistant-api\|ci-config\|frontend\|frontend-assistant-api\|self-hosted\)/,
   );
   assert.match(workflow, /^  runtime-profile:/m);
   assert.match(workflow, /pnpm --filter @savia\/connector-gateway typecheck/);
   assert.match(
     workflow,
-    /\["auth","api","backup-gate","assistant-api","frontend","frontend-assistant-api"\]/,
+    /\["auth","api","backup-gate","assistant-api","frontend","frontend-assistant-api","self-hosted"\]/,
   );
   assert.match(workflow, /pnpm --filter @savia\/mcp test/);
   assert.match(workflow, /pnpm --filter @savia\/mcp exec tsc --noEmit/);

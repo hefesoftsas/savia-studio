@@ -13,6 +13,7 @@ const CI_KINDS = new Set([
   "ci-config",
   "frontend",
   "frontend-assistant-api",
+  "self-hosted",
 ]);
 const RELEASE_KINDS = new Set(["platform", "plugin", "none"]);
 const RUNTIME_PROFILE_KINDS = new Set([
@@ -22,6 +23,7 @@ const RUNTIME_PROFILE_KINDS = new Set([
   "assistant-api",
   "frontend",
   "frontend-assistant-api",
+  "self-hosted",
 ]);
 const FOCUSED_API_JOBS = ["api", "api-2", "api-3", "api-extra-shards"];
 const FRONTEND_ADMIN_JOBS = [

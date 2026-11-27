@@ -66,6 +66,10 @@ function isFrontendCiPath(path) {
   return isFrontendSourcePath(path) || FRONTEND_TEST_PATH.test(path);
 }
 
+function isSelfHostedCiPath(path) {
+  return /^apps\/self-hosted\/(?:src|test)\/.+\.(?:ts|tsx|mts|cts)$/.test(path);
+}
+
 function isAssistantApiCiPath(path) {
   return (
     path.startsWith("apps/api/src/assistant/") ||
@@ -407,6 +411,9 @@ export function classifyCiChanges({ base, head, repo = process.cwd() } = {}) {
     )
   ) {
     return isolatedRuntimeProfile("api");
+  }
+  if (runtimePaths.length > 0 && runtimePaths.every(isSelfHostedCiPath)) {
+    return isolatedRuntimeProfile("self-hosted");
   }
   if (
     runtimePaths.length > 0 &&

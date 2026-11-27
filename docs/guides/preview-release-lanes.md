@@ -551,6 +551,13 @@ workflow or script directories.
 Classifier and required-gate edits, dependency files, test-distribution helpers,
 unknown files and mixtures with application changes retain full CI.
 
+The `self-hosted` profile applies to changes limited to TypeScript source and
+tests in `apps/self-hosted/src/` and `apps/self-hosted/test/`, plus documentation.
+It requires the Self-hosted test suite, its type check, the contract suite, and
+public-source safety checks. Changes involving the Dockerfile, package metadata,
+or shared runtime source use full CI. The release planner still decides which
+Preview components to publish.
+
 Classification still executes the base revision's trusted script. Introducing
 a profile therefore runs the previous profile on that first push; subsequent
 eligible pushes use the new profile. A missing or unsupported result falls back
