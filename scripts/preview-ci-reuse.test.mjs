@@ -161,6 +161,7 @@ test("reuses exact PR validation for local development changes", async () => {
     "apps/admin/build/preview-build.test.ts",
     "apps/admin/vite.config.ts",
     "scripts/dev-local.sh",
+    "scripts/dev-local-lock.mjs",
     "scripts/dev-local.test.mjs",
   ].join("\0");
   const jobs = [classifier(`${proofName} (Flows skipped)`), ...adminBuildJobs];

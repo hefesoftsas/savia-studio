@@ -2376,7 +2376,11 @@ export function AssistantBar() {
     >
       <SheetTrigger asChild>
         <Button
-          className="size-11 shrink-0 gap-2.5 rounded-full border border-primary/20 bg-primary p-0 font-medium text-primary-foreground transition-all hover:bg-primary/90 sm:fixed sm:right-6 sm:bottom-6 sm:z-40 sm:h-12 sm:w-auto sm:px-4.5 sm:shadow-xl sm:hover:scale-[1.02] sm:active:scale-[0.98]"
+          className={cn(
+            "size-11 shrink-0 gap-2.5 rounded-full border border-primary/20 bg-primary p-0 font-medium text-primary-foreground transition-all hover:bg-primary/90",
+            "sm:fixed sm:right-6 sm:bottom-6 sm:z-40 sm:h-12 sm:w-auto sm:px-4.5 sm:shadow-xl sm:hover:scale-[1.02] sm:active:scale-[0.98]",
+            "sm:group-has-[[data-slot=workspace-notice]]/workspace:static sm:group-has-[[data-slot=workspace-notice]]/workspace:h-8 sm:group-has-[[data-slot=workspace-notice]]/workspace:px-3 sm:group-has-[[data-slot=workspace-notice]]/workspace:shadow-none",
+          )}
           aria-label={t("Abrir asistente")}
         >
           <Sparkles className="size-4" />

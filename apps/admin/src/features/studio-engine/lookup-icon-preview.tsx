@@ -1,10 +1,9 @@
 import { Suspense, lazy } from "react";
-import { parseLookupIconRef, type LookupIcon } from "@savia/studio-shared/request-page";
-
-const LucideLookupIcon = lazy(async () => {
-  const module = await import("./lucide-lookup-icon");
-  return { default: module.LucideLookupIcon };
-});
+import {
+  parseLookupIconRef,
+  type LookupIcon,
+} from "@savia/studio-shared/request-page";
+import { LucideLookupIcon } from "./lucide-lookup-icon";
 
 const ThesvgLookupIcon = lazy(async () => {
   const module = await import("./thesvg-lookup-icon");

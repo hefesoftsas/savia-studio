@@ -1,7 +1,7 @@
 /**
  * Apply reviewed D1 SQL as transactional statement batches. Statement
  * breakpoints preserve trigger bodies; migration ledger updates commit in the
- * same batch. Retired histories require an explicit verified reset.
+ * same batch. Incompatible histories require a matching checkout or reconciliation.
  * Requires CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_DATABASE_ID and CLOUDFLARE_API_TOKEN.
  */
 import { readdir, readFile } from "node:fs/promises";
@@ -13,7 +13,13 @@ const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
 const databaseId = process.env.CLOUDFLARE_DATABASE_ID;
 const token = process.env.CLOUDFLARE_API_TOKEN;
 const dryRun = process.argv.includes("--dry-run");
+const checkOnly = process.argv.includes("--check");
+const allowPending = process.argv.includes("--allow-pending");
 const requestTimeoutMs = 30_000;
+
+if (dryRun && checkOnly) throw new Error("Use either --dry-run or --check");
+if (allowPending && !checkOnly)
+  throw new Error("--allow-pending requires --check");
 
 if (
   accountId === undefined ||
@@ -146,12 +152,26 @@ if (dryRun) {
   process.exit(0);
 }
 
-await retryD1Overload(() =>
-  query(
-    "CREATE TABLE IF NOT EXISTS _savia_migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
-    "initialize migration history",
-  ),
-);
+if (!checkOnly)
+  await retryD1Overload(() =>
+    query(
+      "CREATE TABLE IF NOT EXISTS _savia_migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+      "initialize migration history",
+    ),
+  );
+
+async function migrationHistoryExists() {
+  const [schema] = await retryD1Overload(() =>
+    query(
+      "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = '_savia_migrations' COLLATE NOCASE",
+      "check migration history table",
+    ),
+  );
+  if (!Array.isArray(schema?.results))
+    throw new Error("D1 did not return the migration history table status.");
+  return schema.results.length > 0;
+}
+
 async function readMigrationHistory() {
   const [appliedRows] = await retryD1Overload(() =>
     query("SELECT filename FROM _savia_migrations", "read migration history"),
@@ -161,12 +181,28 @@ async function readMigrationHistory() {
   const applied = new Set(appliedRows.results.map((row) => row.filename));
   if ([...applied].some((filename) => !files.includes(filename)))
     throw new Error(
-      "Database uses the retired migration history. Reset or explicitly reconcile its verified schema before applying the initial baseline.",
+      "D1 migration history contains migrations missing from this checkout. Use a matching checkout or reconcile the verified database schema before continuing.",
     );
   return applied;
 }
 
-let applied = await readMigrationHistory();
+let applied =
+  allowPending && !(await migrationHistoryExists())
+    ? new Set()
+    : await readMigrationHistory();
+if (checkOnly) {
+  const pending = files.filter((file) => !applied.has(file)).length;
+  const message = pending
+    ? `D1 schema has pending Savia migrations (${pending}).`
+    : "D1 schema is up to date.";
+  if (pending && !allowPending) {
+    console.error(message);
+    process.exit(1);
+  }
+  console.log(message);
+  process.exit(0);
+}
+
 let pending = 0;
 for (const file of files) {
   if (applied.has(file)) continue;

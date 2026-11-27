@@ -1,6 +1,7 @@
 import type { StoreMcpAction } from "@savia/studio-shared/plugin-store";
 import { dialectFor } from "@savia/db/dialect";
 import { z } from "zod";
+import { pluginDigestSchema } from "@savia/studio-shared/plugin-development";
 import {
   canonicalJson,
   compareSolutionVersions,
@@ -280,7 +281,11 @@ export function registerExtensions(
   ): Promise<{
     manifest: ExtensionManifest;
     builtIn: boolean;
-    storeArtifact: { version: string; storedManifest: string } | null;
+    storeArtifact: {
+      version: string;
+      storedManifest: string;
+      sha256: string;
+    } | null;
   } | null> {
     // Lo subido por el tenant prevalece sobre lo compilado: permite
     // migrar un plugin fuera del release sin cambiar su id.
@@ -292,6 +297,7 @@ export function registerExtensions(
         storeArtifact: {
           version: stored.version,
           storedManifest: stored.storedManifest,
+          sha256: stored.sha256,
         },
       };
     if (version) return null;
@@ -392,10 +398,13 @@ export function registerExtensions(
           )
           .optional(),
         allowDowngrade: z.boolean().optional(),
+        sha256: pluginDigestSchema.optional(),
       })
       .strict()
       .safeParse(rawBody);
     if (!body.success) return fail("Datos de instalación no válidos.", 400);
+    if (body.data.sha256 && !body.data.version)
+      return fail("La huella del paquete requiere una versión explícita.", 400);
     if (body.data.allowDowngrade && !body.data.version)
       return fail("El rollback requiere una versión explícita.", 400);
     if (body.data.allowDowngrade && !options.canManageExtension)
@@ -417,6 +426,14 @@ export function registerExtensions(
         },
       });
     await assertStoreManager(c.env.DB, tenant, c.get("principalId"), id);
+    if (
+      body.data.sha256 &&
+      body.data.sha256 !== extension.storeArtifact?.sha256
+    )
+      return fail(
+        "La copia del espacio no coincide con el paquete del catálogo. Recarga la página y revisa la versión.",
+        409,
+      );
     await assertDependencies(c.env.DB, tenant, extension.manifest, registry);
     const current = await installation(c.env.DB, tenant, id);
     // Deployment updates must never install an optional plugin or re-enable it.
@@ -437,12 +454,13 @@ export function registerExtensions(
     const storeArtifactGuard = extension.storeArtifact
       ? guard(
           c.env.DB,
-          "SELECT count(*)=1 FROM plugin_store_artifacts WHERE tenant_id=? AND id=? AND version=? AND manifest=?",
+          "SELECT count(*)=1 FROM plugin_store_artifacts WHERE tenant_id=? AND id=? AND version=? AND manifest=? AND sha256=?",
           [
             tenant,
             id,
             extension.storeArtifact.version,
             extension.storeArtifact.storedManifest,
+            extension.storeArtifact.sha256,
           ],
         )
       : null;

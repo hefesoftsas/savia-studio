@@ -3,7 +3,13 @@ import React from "react";
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { render } from "./locale-test-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api } from "../api";
@@ -132,6 +138,33 @@ afterEach(async () => {
   await clearRelatedRecordDrafts("wrapper-drafts");
   vi.clearAllMocks();
 });
+
+it("uses the same creation key for a bundled record and its temporary attachment", async () => {
+  state.scope = "";
+  const save = vi.fn().mockResolvedValue({ id: "parent", _version: 1 });
+  const upload = vi.fn().mockResolvedValue({ id: "draft" });
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <CollectionRecordForm
+        object={object}
+        values={{ name: "New parent" }}
+        onSave={save}
+        onUploadTemporaryAttachment={upload}
+      />
+    </QueryClientProvider>,
+  );
+  await screen.findByDisplayValue("New parent");
+  const file = new File(["test"], "attachment.pdf");
+  await state.props.onUploadTemporaryAttachment("file", file);
+  await act(async () => {
+    await state.props.onSave({ name: "New parent" });
+  });
+  const key = upload.mock.calls[0][3];
+  expect(key).toEqual(expect.any(String));
+  expect(upload).toHaveBeenCalledExactlyOnceWith("file", file, undefined, key);
+  expect(save.mock.calls[0][3]).toEqual({ idempotencyKey: key });
+});
+
 it("restores the original parent, child and selection versions without rebasing and retains retry identity on failure", async () => {
   state.scope = scope();
   await seed();

@@ -34,19 +34,24 @@ function appFor(auth: Authenticator, service?: SaviaRequestService) {
 
 describe("DANE city lookups endpoint", () => {
   it("serves DANE lookups through the selected tenant", async () => {
-    const fetcher = vi.fn(async () =>
-      Response.json({
+    const fetcher = vi.fn(async (request: Request) => {
+      expect(request.url).toBe(
+        "https://savia-request.internal/api/lookups/dane?city=Bo",
+      );
+      return Response.json({
         status: "matched",
         matches: [{ code: "11001", city: "BOGOTÁ", department: "BOGOTÁ D.C." }],
-      }),
-    );
+      });
+    });
     const app = createTestApp({
       auth: platformAdministratorAuthenticator(),
       documents: env.DOCUMENTS,
       saviaRequestService: { fetch: fetcher },
     });
 
-    const response = await app.request("/v1/studio/0/api/lookups/dane?city=Bo");
+    const response = await app.request(
+      "/v1/studio/0/api/lookups/dane?city=Bo&tenant=tenant%3A101",
+    );
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
@@ -80,7 +85,7 @@ describe("DANE city lookups endpoint", () => {
   it("allows tenant staff to use only the official DANE reference GET", async () => {
     const fetcher = vi.fn(async (request: Request) => {
       expect(request.url).toBe(
-        "https://savia-request.internal/api/lookups/dane?city=Bogota&department=Cundinamarca",
+        "https://savia-request.internal/api/lookups/dane?city=Bogot%C3%A1&department=Cundinamarca",
       );
       expect(request.method).toBe("GET");
       return Response.json({
@@ -90,7 +95,7 @@ describe("DANE city lookups endpoint", () => {
     });
     const app = appFor(agencyOperatorAuthenticator(), { fetch: fetcher });
     const response = await app.request(
-      "/api/lookups/dane?city=Bogota&department=Cundinamarca",
+      "/api/lookups/dane?city=Bogot%C3%A1&department=Cundinamarca&tenant=tenant%3A101&trace=ignored",
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({

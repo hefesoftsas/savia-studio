@@ -10,6 +10,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useAppLocale, useMessages } from "@/i18n/core";
 import { TenantScopeBoundary } from "@/features/tenants/tenant-scope-boundary";
+import { isReadAuthenticationRequired as isAuthenticationRequired } from "@/queries/read-state";
 import {
   useCallback,
   useEffect,
@@ -26,6 +27,7 @@ import {
 } from "@savia/tenant-host/bookings-route";
 import { bookingMessages } from "./booking-messages";
 import { bookingOrganizationPickerHref } from "./booking-organization-link";
+import { BookingSignInRecovery } from "./booking-sign-in-recovery";
 import { bookingDayRange } from "./booking-date";
 import { bookingSetupMessages } from "./booking-setup-messages";
 import { validAvailabilityPeriods, validWeeklyHours } from "./booking-schedule";
@@ -190,6 +192,7 @@ type BookingPageProps = {
   tenantId: number;
   hostname?: string;
 };
+type BookingAccessProblem = "sign-in" | "organization";
 
 export function BookingPage(props: BookingPageProps) {
   return <BookingWorkspaceAccess key={props.tenantId} {...props} />;
@@ -200,34 +203,37 @@ function BookingWorkspaceAccess({
   ...props
 }: BookingPageProps) {
   const { search } = useLocation();
-  const [unavailable, setUnavailable] = useState(false);
-  const onUnavailable = useCallback(() => setUnavailable(true), []);
-  if (unavailable)
+  const [accessProblem, setAccessProblem] = useState<BookingAccessProblem>();
+  if (accessProblem === "sign-in")
+    return <BookingSignInRecovery className="p-6" />;
+  if (accessProblem === "organization")
     return (
       <TenantScopeBoundary
         status="error"
-        retry={() => setUnavailable(false)}
+        retry={() => setAccessProblem(undefined)}
         organizationPickerHref={bookingOrganizationPickerHref(hostname, search)}
       >
         {null}
       </TenantScopeBoundary>
     );
-  return <BookingWorkspace {...props} onUnavailable={onUnavailable} />;
+  return <BookingWorkspace {...props} onAccessProblem={setAccessProblem} />;
 }
 
-function workspaceUnavailable(error: unknown) {
-  return (
+function bookingReadProblem(error: unknown): BookingAccessProblem | undefined {
+  if (isAuthenticationRequired(error)) return "sign-in";
+  if (
     error instanceof ApiClientError &&
     (error.status === 403 || error.status === 404)
-  );
+  )
+    return "organization";
 }
 
 function BookingWorkspace({
   services,
   tenantId,
-  onUnavailable,
+  onAccessProblem,
 }: Pick<BookingPageProps, "services" | "tenantId"> & {
-  onUnavailable: () => void;
+  onAccessProblem: (problem: BookingAccessProblem) => void;
 }) {
   const t = useMessages(bookingMessages);
   const setupText = useMessages(bookingSetupMessages);
@@ -247,7 +253,9 @@ function BookingWorkspace({
     () => new Map<string, AvailabilityDraft>(),
   );
   const [reservations, setReservations] = useState<Reservation[]>([]);
-  const [reservationsLoading, setReservationsLoading] = useState(false);
+  const [reservationReadPending, setReservationsLoading] = useState(false);
+  const [requestedReservationRange, setRequestedReservationRange] =
+    useState<string>();
   const [reservationsLoadFailed, setReservationsLoadFailed] = useState(false);
   const [reservationActions, setReservationActions] = useState<
     Record<string, ReservationActionFeedback>
@@ -270,6 +278,13 @@ function BookingWorkspace({
   const ready = !!bootstrap;
   const tZone = bootstrap?.settings.timeZone ?? "UTC";
   const horizonDays = bootstrap?.settings.horizonDays ?? 30;
+  const reservationRange = JSON.stringify([
+    appointmentDate,
+    tZone,
+    horizonDays,
+  ]);
+  const reservationsLoading =
+    reservationReadPending || requestedReservationRange !== reservationRange;
   const currentProfessional = useMemo(
     () =>
       bootstrap?.settings.professionals.find(
@@ -316,14 +331,15 @@ function BookingWorkspace({
       })
       .catch((error: unknown) => {
         if (signal.aborted) return;
-        if (workspaceUnavailable(error)) onUnavailable();
+        const problem = bookingReadProblem(error);
+        if (problem) onAccessProblem(problem);
         else setBootstrapFailed(true);
       })
       .finally(() => {
         if (!signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [tenantId, services.apiClient, attempt, onUnavailable]);
+  }, [tenantId, services.apiClient, attempt, onAccessProblem]);
 
   const readReservationPage = useCallback(
     async (
@@ -349,20 +365,22 @@ function BookingWorkspace({
           }),
         });
       } catch (error) {
-        if (signal.aborted || !workspaceUnavailable(error)) throw error;
-        onUnavailable();
+        const problem = bookingReadProblem(error);
+        if (signal.aborted || !problem) throw error;
+        onAccessProblem(problem);
       } finally {
         if (updatesDuringReservationRead.current === updates)
           updatesDuringReservationRead.current = null;
       }
     },
-    [services.apiClient, onUnavailable],
+    [services.apiClient, onAccessProblem],
   );
 
   useEffect(() => {
     if (tab !== "reservations" || !ready) return;
     const controller = new AbortController();
     const { signal } = controller;
+    setRequestedReservationRange(reservationRange);
     setReservationsLoading(true);
     setReservationsLoadFailed(false);
     setReservationActions((current) =>
@@ -416,6 +434,7 @@ function BookingWorkspace({
     tenantId,
     readReservationPage,
     reservationsAttempt,
+    reservationRange,
     horizonDays,
     appointmentDate,
     tZone,
@@ -496,6 +515,15 @@ function BookingWorkspace({
     );
   }
 
+  const recoverExpiredSession = useCallback(
+    (error: unknown): boolean => {
+      if (!isAuthenticationRequired(error)) return false;
+      onAccessProblem("sign-in");
+      return true;
+    },
+    [onAccessProblem],
+  );
+
   async function saveSettings(settings: Settings) {
     if (
       settings.published &&
@@ -530,6 +558,7 @@ function BookingWorkspace({
       setSettings(next.settings);
       setNotice(t("Booking settings saved."));
     } catch (exception) {
+      if (recoverExpiredSession(exception)) return;
       setError(saveErrorMessage(exception, "settings"));
     } finally {
       setSaving(false);
@@ -627,6 +656,7 @@ function BookingWorkspace({
       });
       setNotice(t("Availability saved."));
     } catch (exception) {
+      if (recoverExpiredSession(exception)) return;
       setError(saveErrorMessage(exception, "availability"));
     } finally {
       setSaving(false);
@@ -751,7 +781,8 @@ function BookingWorkspace({
       );
       applyConnectionResult(bootstrap, result.data);
       setNotice(t("Availability saved."));
-    } catch {
+    } catch (exception) {
+      if (recoverExpiredSession(exception)) return;
       setError(t("Availability could not be saved. Reload and retry."));
     } finally {
       setSaving(false);
@@ -776,7 +807,8 @@ function BookingWorkspace({
             : "My Day availability access stopped.",
         ),
       );
-    } catch {
+    } catch (exception) {
+      if (recoverExpiredSession(exception)) return;
       setError(
         t(
           "My Day availability could not be updated. Check your connection and retry.",
@@ -909,7 +941,8 @@ function BookingWorkspace({
         delete next[id];
         return next;
       });
-    } catch {
+    } catch (exception) {
+      if (recoverExpiredSession(exception)) return;
       const error =
         action === "cancel"
           ? t("Reservation could not be cancelled. Refresh and retry.")
@@ -1056,6 +1089,7 @@ function BookingWorkspace({
           }
           canManageTeamLinks={bootstrap.canManage}
           apiClient={services.apiClient}
+          recoverExpiredSession={recoverExpiredSession}
           services={settings.services
             .filter((service) => service.enabled)
             .map(({ id, name }) => ({ id, name }))}

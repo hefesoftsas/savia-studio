@@ -1,6 +1,5 @@
-import { describe, expect, it } from "vitest";
-import runtimeBundle from "virtual:savia-plugin-ide-runtime";
-import vendorBundles from "virtual:savia-plugin-ide-vendors";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { buildPluginIdeBundles } from "../../../apps/admin/build/plugin-ide-runtime";
 import {
   compileAuthoringProject,
   packageAuthoringProject,
@@ -9,8 +8,47 @@ import {
   createPluginProject,
   packagePluginProject,
 } from "../../../apps/admin/src/features/studio-engine/plugin-ide-project";
-const bundles = { runtimeBundle, vendorBundles };
+let bundles: Awaited<ReturnType<typeof buildPluginIdeBundles>>;
+beforeAll(async () => {
+  bundles = await buildPluginIdeBundles();
+});
 describe("shared browser and native authoring compiler", () => {
+  it("loads only the compiler bundles referenced by the retained project", async () => {
+    const lazyBundles = {
+      runtimeBundle: vi.fn(async () => bundles.runtimeBundle),
+      vendorBundles: {
+        zod: vi.fn(async () => bundles.vendorBundles.zod),
+        "pdf-lib": vi.fn(async () => bundles.vendorBundles["pdf-lib"]),
+      },
+    };
+    const files = createPluginProject();
+    const starter = await compileAuthoringProject(files, lazyBundles);
+    expect(lazyBundles.runtimeBundle).toHaveBeenCalledOnce();
+    expect(starter.entryJs).toBe(
+      (await compileAuthoringProject(files, bundles)).entryJs,
+    );
+    expect(lazyBundles.vendorBundles.zod).not.toHaveBeenCalled();
+    expect(lazyBundles.vendorBundles["pdf-lib"]).not.toHaveBeenCalled();
+
+    const archive = {
+      ...files,
+      "original-source.json": JSON.stringify({
+        "entry.tsx":
+          'import { z } from "zod"; export function render(el) { el.textContent = z.string().parse("Hello"); }',
+        "unused.ts":
+          'import { PDFDocument } from "pdf-lib"; export { PDFDocument };',
+      }),
+    };
+    const compiled = await compileAuthoringProject(archive, lazyBundles);
+    expect(compiled.entryJs).toBe(
+      (await compileAuthoringProject(archive, bundles)).entryJs,
+    );
+    expect(lazyBundles.vendorBundles.zod).toHaveBeenCalledOnce();
+    expect(lazyBundles.vendorBundles["pdf-lib"]).not.toHaveBeenCalled();
+    const browser = await packagePluginProject(archive);
+    expect(browser.entryJs).toBe(compiled.entryJs);
+  });
+
   it("produces identical deterministic ZIP bytes and fixtures without running source", async () => {
     const files = createPluginProject();
     files["entry.tsx"] =

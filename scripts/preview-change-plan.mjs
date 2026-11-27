@@ -14,6 +14,7 @@ const AUTH_CI_HELPER_PATHS = new Set([
   ".github/workflows/check-preview-auth.yml",
 ]);
 const CI_CONFIG_PATHS = new Set([
+  ".github/workflows/build-vscode-extension.yml",
   ".github/workflows/ci.yml",
   ".github/workflows/codeql.yml",
   ".github/workflows/coverage.yml",

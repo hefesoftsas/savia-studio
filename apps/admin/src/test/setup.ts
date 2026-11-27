@@ -25,6 +25,16 @@ if (
   Element.prototype.scrollIntoView = () => undefined;
 }
 
+// Editors query text ranges. Match jsdom's empty element geometry when there
+// is no layout engine, while letting individual tests supply measured rects.
+if (typeof Range !== "undefined") {
+  if (typeof Range.prototype.getClientRects !== "function")
+    Range.prototype.getClientRects = () =>
+      Object.assign([], { item: () => null });
+  if (typeof Range.prototype.getBoundingClientRect !== "function")
+    Range.prototype.getBoundingClientRect = () => new DOMRect();
+}
+
 if (typeof window !== "undefined")
   Object.defineProperty(window, "matchMedia", {
     writable: true,

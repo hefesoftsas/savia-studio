@@ -1,19 +1,22 @@
 import { AuthenticationError } from "./types";
 import { dialectFor } from "@savia/db/dialect";
+import { databaseConflict } from "@savia/db/errors";
 import {
   tenants,
   identityTenantMemberships,
   identityGlobalRoles,
   identityPrincipals,
 } from "@savia/db/core-schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { isRegisteredAgencyRole } from "./access-policy";
 import {
   TenantMembershipInvariantError,
   assertPrincipalCanLoseActiveMembership,
+  assertPrincipalNotDeleting,
   assignOrTransferMembership,
-  syncPlatformAdministratorMembership,
+  grantPlatformAdministrator,
+  suspendPrincipal,
   type MembershipDestinationOptions,
 } from "./tenant-membership-invariants";
 import type {
@@ -83,16 +86,47 @@ export async function assertIdentityEmailAvailable(
   if (duplicate) throw emailConflict();
 }
 
+export async function readIdentityDirectoryRevision(
+  d1: D1Database,
+): Promise<number> {
+  const lookup = d1.prepare(
+    "SELECT revision FROM identity_directory_revision WHERE id=1",
+  );
+  const current = await lookup.first<number>("revision");
+  if (current !== null) return current;
+  await d1
+    .prepare(
+      "INSERT INTO identity_directory_revision(id,revision) VALUES(1,0) ON CONFLICT(id) DO NOTHING",
+    )
+    .run();
+  const initialized = await lookup.first<number>("revision");
+  if (initialized === null)
+    throw new Error("Missing identity directory revision");
+  return initialized;
+}
+
+export function upsertPrincipal(
+  d1: D1Database,
+  external: ExternalIdentity,
+): Promise<IdentityPrincipal>;
+export function upsertPrincipal(
+  d1: D1Database,
+  external: ExternalIdentity,
+  directoryRevision: number,
+): Promise<IdentityPrincipal | undefined>;
 export async function upsertPrincipal(
   d1: D1Database,
   external: ExternalIdentity,
-): Promise<IdentityPrincipal> {
+  directoryRevision?: number,
+): Promise<IdentityPrincipal | undefined> {
   external = { ...external, email: external.email.trim().toLowerCase() };
   const existing = await findPrincipalBySubject(
     d1,
     external.issuer,
     external.subject,
   );
+  if (directoryRevision !== undefined && existing?.deletionStartedAt)
+    return undefined;
   if (
     !existing ||
     (existing.isActive &&
@@ -108,7 +142,7 @@ export async function upsertPrincipal(
     return existing;
   }
   try {
-    return await persistPrincipal(d1, external);
+    return await persistPrincipal(d1, external, directoryRevision);
   } catch (error) {
     rethrowIdentityWriteError(error);
   }
@@ -128,15 +162,29 @@ function rethrowIdentityWriteError(error: unknown): never {
 async function persistPrincipal(
   d1: D1Database,
   external: ExternalIdentity,
-): Promise<IdentityPrincipal> {
+  directoryRevision?: number,
+): Promise<IdentityPrincipal | undefined> {
   const db = database(d1);
   const now = timestamp();
-  if (dialectFor(d1).name === "postgres") {
+  const postgres = dialectFor(d1).name === "postgres";
+  if (postgres || directoryRevision !== undefined) {
+    // A catalog write must serialize with principal deletion. PostgreSQL
+    // holds the shared revision lock until the statement commits.
+    const values =
+      directoryRevision === undefined
+        ? "VALUES(?,?,?,?,?,1,?,?)"
+        : `SELECT ?,?,?,?,?,1,?,? FROM (
+          SELECT revision FROM identity_directory_revision WHERE id=1
+          ${postgres ? "FOR SHARE" : ""}
+        ) directory WHERE directory.revision=?`;
     const saved = await d1
       .prepare(
         `INSERT INTO identity_principal(id,issuer,subject,email,display_name,is_active,created_at,updated_at)
-      VALUES(?,?,?,?,?,1,?,?) ON CONFLICT(issuer,subject) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,updated_at=excluded.updated_at
-      RETURNING id,issuer,subject,email,display_name AS "displayName",is_active AS "isActive",created_at AS "createdAt",updated_at AS "updatedAt"`,
+      ${values} ON CONFLICT(issuer,subject) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,updated_at=excluded.updated_at
+        ${directoryRevision === undefined ? "" : "WHERE identity_principal.deletion_started_at IS NULL"}
+      RETURNING id,issuer,subject,email,display_name AS "displayName",is_active AS "isActive",
+        deletion_started_at AS "deletionStartedAt",platform_admin_revoked AS "platformAdminRevoked",
+        created_at AS "createdAt",updated_at AS "updatedAt"`,
       )
       .bind(
         crypto.randomUUID(),
@@ -146,10 +194,18 @@ async function persistPrincipal(
         external.displayName,
         now,
         now,
+        ...(directoryRevision === undefined ? [] : [directoryRevision]),
       )
       .first<IdentityPrincipal>();
-    if (!saved) throw new Error("Unable to create identity principal");
-    return { ...saved, isActive: Boolean(saved.isActive) };
+    if (!saved) {
+      if (directoryRevision !== undefined) return undefined;
+      throw new Error("Unable to create identity principal");
+    }
+    return {
+      ...saved,
+      isActive: Boolean(saved.isActive),
+      platformAdminRevoked: Boolean(saved.platformAdminRevoked),
+    };
   }
   const [saved] = await db
     .insert(identityPrincipals)
@@ -210,9 +266,22 @@ export async function deletePrincipal(
   d1: D1Database,
   principalId: string,
 ): Promise<void> {
-  await database(d1)
-    .delete(identityPrincipals)
-    .where(eq(identityPrincipals.id, principalId));
+  const statements = [
+    d1
+      .prepare(
+        `INSERT INTO identity_directory_revision(id,revision)
+         SELECT 1,1 WHERE EXISTS (SELECT 1 FROM identity_principal WHERE id=?)
+         ON CONFLICT(id) DO UPDATE SET revision=identity_directory_revision.revision+1`,
+      )
+      .bind(principalId),
+    d1.prepare("DELETE FROM identity_principal WHERE id=?").bind(principalId),
+  ];
+  try {
+    await d1.batch(statements);
+  } catch (error) {
+    if (!databaseConflict(error)) throw error;
+    await d1.batch(statements);
+  }
 }
 
 export async function updatePrincipal(
@@ -229,24 +298,67 @@ export async function updatePrincipal(
   return principal(updated);
 }
 
+/** A session refresh may update this principal but cannot recreate it. */
+export async function refreshAuthenticatedPrincipal(
+  d1: D1Database,
+  existing: IdentityPrincipal,
+  external: Pick<ExternalIdentity, "email" | "displayName">,
+): Promise<IdentityPrincipal | undefined> {
+  const email = external.email.trim().toLowerCase();
+  const emailChanged = email !== existing.email.trim().toLowerCase();
+  if (
+    !existing.isActive ||
+    (!emailChanged && existing.displayName === external.displayName)
+  )
+    return existing;
+  if (emailChanged) await assertIdentityEmailAvailable(d1, email, existing.id);
+  try {
+    const saved = await d1
+      .prepare(
+        `UPDATE identity_principal SET email=?,display_name=?,updated_at=?
+         WHERE id=? AND is_active=1 AND deletion_started_at IS NULL
+         RETURNING id,issuer,subject,email,display_name AS "displayName",is_active AS "isActive",
+           deletion_started_at AS "deletionStartedAt",platform_admin_revoked AS "platformAdminRevoked",
+           created_at AS "createdAt",updated_at AS "updatedAt"`,
+      )
+      .bind(email, external.displayName, timestamp(), existing.id)
+      .first<IdentityPrincipal>();
+    if (!saved) return undefined;
+    return {
+      ...saved,
+      isActive: Boolean(saved.isActive),
+      platformAdminRevoked: Boolean(saved.platformAdminRevoked),
+    };
+  } catch (error) {
+    rethrowIdentityWriteError(error);
+  }
+}
+
 export async function setPrincipalActive(
   d1: D1Database,
   principalId: string,
   isActive: boolean,
 ): Promise<IdentityPrincipal> {
-  if (!isActive) await assertPrincipalCanLoseActiveMembership(d1, principalId);
-  if (isActive) {
-    const existing = await findPrincipal(d1, principalId);
-    if (existing && !existing.isActive)
-      await assertIdentityEmailAvailable(d1, existing.email, principalId);
-  }
+  if (!isActive) return suspendPrincipal(d1, principalId);
+  await assertPrincipalNotDeleting(d1, principalId);
+  const existing = await findPrincipal(d1, principalId);
+  if (existing && !existing.isActive)
+    await assertIdentityEmailAvailable(d1, existing.email, principalId);
   try {
     const [updated] = await database(d1)
       .update(identityPrincipals)
-      .set({ isActive, updatedAt: timestamp() })
-      .where(eq(identityPrincipals.id, principalId))
+      .set({ isActive: true, updatedAt: timestamp() })
+      .where(
+        and(
+          eq(identityPrincipals.id, principalId),
+          sql`deletion_started_at IS NULL`,
+        ),
+      )
       .returning();
-    if (!updated) throw new Error("Unable to update identity principal state");
+    if (!updated) {
+      await assertPrincipalNotDeleting(d1, principalId);
+      throw new Error("Unable to update identity principal state");
+    }
     return principal(updated);
   } catch (error) {
     rethrowIdentityWriteError(error);
@@ -279,43 +391,47 @@ export async function listMemberships(
   }));
 }
 
-export async function listGlobalRoles(
-  d1: D1Database,
-  principalId: string,
-): Promise<GlobalRole[]> {
-  const rows = await database(d1)
+async function listGlobalRoleRows(d1: D1Database, principalId: string) {
+  return database(d1)
     .select()
     .from(identityGlobalRoles)
     .where(eq(identityGlobalRoles.principalId, principalId))
     .all();
-  return rows.map(globalRole);
+}
+
+export async function listGlobalRoles(
+  d1: D1Database,
+  principalId: string,
+): Promise<GlobalRole[]> {
+  return (await listGlobalRoleRows(d1, principalId)).map(globalRole);
 }
 
 export async function loadActor(
   d1: D1Database,
   entry: IdentityPrincipal,
 ): Promise<AppActor> {
-  const [globalRoles, memberships] = await Promise.all([
-    listGlobalRoles(d1, entry.id),
+  const [roles, memberships] = await Promise.all([
+    listGlobalRoleRows(d1, entry.id),
     listMemberships(d1, entry.id),
   ]);
-  return { principal: entry, globalRoles, memberships };
+  const sessionAfter = roles.find(
+    (row) => row.role === "platform_admin",
+  )?.sessionAfter;
+  return {
+    principal: entry,
+    globalRoles: roles.map(globalRole),
+    ...(sessionAfter == null
+      ? {}
+      : { platformAdminSessionAfter: sessionAfter }),
+    memberships,
+  };
 }
 
 export async function ensureBootstrapAdministrator(
   d1: D1Database,
   principalId: string,
-): Promise<void> {
-  const db = database(d1);
-  await syncPlatformAdministratorMembership(d1, principalId, true);
-  await db
-    .insert(identityGlobalRoles)
-    .values({
-      principalId,
-      role: "platform_admin",
-      createdAt: timestamp(),
-    })
-    .onConflictDoNothing();
+): Promise<boolean> {
+  return grantPlatformAdministrator(d1, principalId, "bootstrap");
 }
 
 export async function setPlatformAdministrator(
@@ -325,34 +441,23 @@ export async function setPlatformAdministrator(
   commercialTenantId?: number,
   commercialRole: AgencyRole = "viewer",
 ): Promise<void> {
-  const db = database(d1);
   if (enabled) {
-    await syncPlatformAdministratorMembership(d1, principalId, true);
-    await db
-      .insert(identityGlobalRoles)
-      .values({
-        principalId,
-        role: "platform_admin",
-        createdAt: timestamp(),
-      })
-      .onConflictDoNothing();
+    await grantPlatformAdministrator(d1, principalId, "administrator");
     return;
   }
-  await syncPlatformAdministratorMembership(
+  if (commercialTenantId === undefined) {
+    throw new TenantMembershipInvariantError(
+      "COMMERCIAL_TENANT_REQUIRED",
+      "A commercial tenant is required when revoking platform administration",
+    );
+  }
+  await assignOrTransferMembership(
     d1,
     principalId,
-    false,
     commercialTenantId,
     commercialRole,
+    { revokePlatformRole: true },
   );
-  await db
-    .delete(identityGlobalRoles)
-    .where(
-      and(
-        eq(identityGlobalRoles.principalId, principalId),
-        eq(identityGlobalRoles.role, "platform_admin"),
-      ),
-    );
 }
 
 export async function activePlatformAdministratorCount(

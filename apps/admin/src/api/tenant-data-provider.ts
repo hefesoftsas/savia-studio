@@ -134,7 +134,22 @@ export function createTenantDataProvider(
               },
             },
       );
-      return { data: response.data as never };
+      const record = response?.data;
+      if (
+        !record ||
+        !Number.isSafeInteger(record.id) ||
+        record.id < 1 ||
+        record.kind !== "commercial" ||
+        typeof record.idSlug !== "string" ||
+        !record.idSlug.trim()
+      ) {
+        throw new ApiClientError(
+          0,
+          "TENANT_CREATION_UNCONFIRMED",
+          "The tenant creation response could not be verified.",
+        );
+      }
+      return { data: record as never };
     },
     async update(_resource, params) {
       const { name, idSlug, isActive } = params.data;

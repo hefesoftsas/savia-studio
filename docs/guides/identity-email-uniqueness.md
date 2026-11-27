@@ -27,6 +27,17 @@ The existing-user selector shows each account's name and email, including the
 selected account, so administrators can distinguish identical display names.
 Search accepts either name or email.
 
+Tenant creation with an existing administrator, tenant assignment, and changes
+to platform access share a per-user lease across the Auth update, the local
+membership write, and any rollback. Simultaneous access changes for the same
+user return `IDENTITY_ACCESS_CHANGE_IN_PROGRESS` and can be retried after the
+ongoing operation finishes. Apply `0076_identity_access_change_leases.sql` in
+the core database before publishing the API.
+Tenant cascade deletion checks these leases before deactivating the tenant or
+starting cleanup. Access changes verify that the source tenant is available
+after they acquire the per-user lease. A conflicting request returns
+`TENANT_PURGE_IN_PROGRESS` before changing Auth or deleting data.
+
 SQLite migration `0078_identity_principal_email_uniqueness.sql` and PostgreSQL migration `0020_identity_principal_email_uniqueness.sql` add database guards for inserts, changes to an active email and reactivation. Database enforcement covers concurrent requests as well as application checks. Deploy the migration with the API change.
 
 The migrations deliberately leave historical duplicate principals intact. Their existing same-subject logins and profile updates continue to work; no privileges, memberships or audit references are merged or deleted. Resolve those duplicates only after checking the authoritative authentication account and each principal's assignments. A display name or email is not enough evidence to delete an identity.

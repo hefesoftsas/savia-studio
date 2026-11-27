@@ -1,23 +1,22 @@
 # Cookie consent
 
-Mandatory consent banner for the admin/workspace SPA and public forms. The
-banner is shown once per user and is never dismissible without a decision: it
-stays visible until the user accepts all cookies, allows only essential
+The Admin workspace and public pages ask for a cookie decision. The banner
+stays visible until the visitor accepts all cookies, allows only essential
 cookies, or saves custom preferences.
 
 ## Behavior
 
-- Mount points: `apps/admin/src/components/admin/layout.tsx` (authenticated
-  app, next to the PWA install banner) and `PublicApplication` in
-  `apps/admin/src/bootstrap.tsx` (public forms under `/public/forms/...`).
+- In Admin, the cookie notice uses the workspace footer before the app
+  installation notice. On public pages, it sits above the page content.
 - The decision is stored in `localStorage` under `savia.consent.cookies`
   (per browser/device), versioned through `COOKIE_CONSENT_VERSION`. A stored
   decision with a stale or malformed version re-shows the banner, so consent
   can be re-required when cookie categories change.
 - Categories: essential (session/auth cookies, always on, not toggleable),
   analytics and marketing (off unless explicitly accepted).
-- Copy is translated through the existing i18n layer (ES/EN/PT) using
-  `savia.consent.*` keys with Spanish fallbacks.
+- The notice and preferences dialog follow the selected interface language.
+  Spanish, English and Brazilian Portuguese are available through
+  `savia.consent.*`.
 
 ## Code
 

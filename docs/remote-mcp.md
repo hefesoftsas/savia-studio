@@ -161,11 +161,14 @@ unknown record count. Use
 `savia_aggregate_studio_records` for live totals and breakdowns. HubSpot
 aggregates currently support unfiltered collections, including a numeric sum
 without grouping. For other collections, supply `groupBy` when requesting a sum.
+An empty filter set is equivalent to omitting filters. HubSpot reads and
+aggregates reject structured filter conditions.
 In record pages and total-only aggregates, `"total": null` means the total is
 unknown. The number of records on a page does not identify the collection
-total. If a reported total is smaller than the returned page, MCP keeps the
-records and reports the total as unknown. A live result with `"total": 0`
-reports an empty collection.
+total. When returned records or pagination contradict a reported total, MCP
+keeps the records and reports the total as unknown. A missing record page
+returns a read error. A live result with `"total": 0` reports an empty result
+for the requested filters.
 
 The `savia_store_execute` tool advertises its required arguments in MCP tool
 discovery. Discover eligible read-only actions first with
@@ -216,6 +219,9 @@ tools, preventing recursive agent calls or automatic self-approval.
 
 - Protected-resource discovery: `/.well-known/oauth-protected-resource/mcp`.
 - Authorization-server discovery: `/.well-known/oauth-authorization-server/api/auth`.
+- OpenID Connect discovery: `/api/auth/.well-known/openid-configuration`.
+  The public alias `/.well-known/openid-configuration` returns the same
+  metadata with the canonical issuer `<SAVIA_ORIGIN>/api/auth`.
 - Authorization and token endpoints are advertised by Better Auth.
 - MCP tokens have the exact audience `<SAVIA_API_RESOURCE>/mcp`.
 - The private Auth binding verifies signature, issuer, audience, expiry and required
@@ -271,6 +277,12 @@ challenge. A missing binding/secret returns 503; an internal transport failure
 returns 502. Check the normal deployment bindings if discovery works but tool
 calls do not. Employee invocation needs a configured model provider; failures or
 truncated streams are reported as errors, with a 90-second stream limit.
+Assistant API reads have a 15-second deadline. If an error response body stalls,
+the client still reports the HTTP status and any retry time it received.
+Studio record updates and deletions first read the record when the caller
+omits its version. A failed read stops the change and reports the API error.
+A successful read must identify the requested record and supply a valid
+revision if it includes one. Live sources can omit the revision.
 Do not automatically retry writes following a connection interruption: inspect
 the action status first.
 

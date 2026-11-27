@@ -153,6 +153,12 @@ test("public failures expose only allowlisted diagnostics and safe metadata", as
       "INSTALL_DEPENDENCIES",
     ],
     [
+      "dependency drift",
+      "[ERR_PNPM_VERIFY_DEPS_BEFORE_RUN] The value of the enableGlobalVirtualStore setting has changed",
+      "MISSING_MODULE",
+      "INSTALL_DEPENDENCIES",
+    ],
+    [
       "concurrent update",
       "Another update is currently in progress",
       "PULUMI_UPDATE_IN_PROGRESS",

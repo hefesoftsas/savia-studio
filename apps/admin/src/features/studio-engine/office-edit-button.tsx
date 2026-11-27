@@ -31,8 +31,8 @@ export function OfficeEditButton({
         href={url}
         target="_blank"
         rel="noopener noreferrer"
-        aria-label={t("Editar ") + file.name}
-        title={t("Editar documento")}
+        aria-label={t("Abrir %{p0} en Office", { p0: file.name })}
+        title={t("Abrir en Office")}
       >
         <FilePenLine size={16} aria-hidden="true" />
       </a>

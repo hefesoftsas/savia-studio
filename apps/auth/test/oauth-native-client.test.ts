@@ -3,7 +3,11 @@ import { decodeJwt } from "jose";
 import { oauthManagementResponse, oauthProviderOptions } from "../src/oauth";
 import { env } from "cloudflare:workers";
 import worker, { createAuthHandler } from "../src/index";
-import { oauthRuntime } from "../src/oauth";
+import {
+  oauthRuntime,
+  SAVIA_ACCESS_TOKEN_ROLE_CLAIM,
+  SAVIA_ACCESS_TOKEN_SESSION_CREATED_AT_CLAIM,
+} from "../src/oauth";
 
 const callback = "com.hefesoft.savia.companion.preview:/oauth/callback";
 let createdClientBody: Record<string, unknown> | undefined;
@@ -344,6 +348,7 @@ it("preserves the API audience through native code exchange, rotation, and revoc
     }),
   );
   expect(created.status).toBe(201);
+  const { user } = (await created.json()) as { user: { id: string } };
   const signIn = await handler.fetch(
     new Request(`${runtime.apiResource}/api/auth/sign-in/email`, {
       method: "POST",
@@ -433,17 +438,24 @@ it("preserves the API audience through native code exchange, rotation, and revoc
         body,
       }),
     );
-  const issued = await tokenRequest(
-    new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: clientId,
-      code,
-      redirect_uri: callbackUri,
-      code_verifier: verifier,
-      // AppAuth carries the authorized resource in the code; its combined
-      // exchange does not repeat custom authorization parameters.
-    }),
-  );
+  const exchange = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: clientId,
+    code,
+    redirect_uri: callbackUri,
+    code_verifier: verifier,
+    // AppAuth carries the authorized resource in the code; its combined
+    // exchange does not repeat custom authorization parameters.
+  });
+  const repeatedClient = new URLSearchParams(exchange);
+  repeatedClient.append("client_id", clientId);
+  const rejected = await tokenRequest(repeatedClient);
+  expect(rejected.status).toBe(400);
+  expect(await rejected.json()).toMatchObject({
+    error: "invalid_request",
+    error_description: "client_id must not be repeated",
+  });
+  const issued = await tokenRequest(exchange);
   expect(issued.status).toBe(200);
   const credentials = (await issued.json()) as {
     refresh_token: string;
@@ -527,9 +539,23 @@ it("preserves the API audience through native code exchange, rotation, and revoc
     }),
   );
   expect(session.status).toBe(200);
-  expect(await session.json()).toMatchObject({
+  const signedIn = (await session.json()) as { sessionCreatedAt: number };
+  expect(signedIn).toMatchObject({
     user: { email },
+    sessionCreatedAt: expect.any(Number),
   });
+  const promoted = await handler.fetch(
+    new Request(`${runtime.apiResource}/_internal/users/${user.id}`, {
+      method: "PATCH",
+      headers: {
+        "x-savia-bridge-key": "managed-native-flow-bridge",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ role: "admin" }),
+    }),
+  );
+  expect(promoted.status).toBe(200);
+
   const coldRefresh = await freshHandler.fetch(
     new Request(`${runtime.issuer}/oauth2/token`, {
       method: "POST",
@@ -545,7 +571,12 @@ it("preserves the API audience through native code exchange, rotation, and revoc
   expect(coldRefresh.status, await coldRefresh.clone().text()).toBe(200);
   const coldRotated = (await coldRefresh.json()) as {
     refresh_token: string;
+    access_token: string;
   };
+  expect(decodeJwt(coldRotated.access_token)).toMatchObject({
+    [SAVIA_ACCESS_TOKEN_ROLE_CLAIM]: ["admin"],
+    [SAVIA_ACCESS_TOKEN_SESSION_CREATED_AT_CLAIM]: signedIn.sessionCreatedAt,
+  });
   expect(coldRotated.refresh_token).not.toBe(rotated.refresh_token);
   const revoke = await handler.fetch(
     new Request(`${runtime.issuer}/oauth2/revoke`, {

@@ -11,6 +11,9 @@ Platform administrators can manage platform, independent-domain and commercial-t
 Creating a tenant accepts either a new first administrator or an existing user. Membership is unique per user, so selecting an existing user transfers them out of their current organization instead of sharing the account. The transfer is rejected for the last active member of their organization and for platform administrators; revoke the global role first through user management.
 
 Deleting a tenant removes its built-in and custom roles, cascading to grants and assignments. Audit events and the incremented policy revision remain. Recreating the same tenant ID seeds fresh built-in roles without restoring previous assignments or reusing an old policy revision. Migration `0057_access_tenant_lifecycle.sql` also removes policies orphaned by earlier tenant deletions.
+If another operation blocks permanent deletion, the tenant dialog shows a wait
+message and refreshes the tenant. You can reuse the confirmation while the name
+stays the same. If the server rejects the name, the dialog clears the confirmation.
 
 Role names use lowercase letters, numbers, underscores and hyphens, starting with a letter. Display names are free text. Saving or assigning roles requires connectivity. A concurrent policy change returns 409 rather than overwriting another administrator's changes; reopen the saved role before retrying. The editor retains an unsuccessful draft.
 
@@ -21,6 +24,11 @@ Roles are additive. A custom role starts with no grants and does not subtract a 
 Page reads control collection-page visibility and metadata access. Collection reads independently authorize data API access. To show a collection in the workspace, grant both its page and collection read permissions.
 
 Native collections support read, create, update, delete, restore, import and export. Import additionally requires the corresponding create access; export intersects read and export permissions. Bulk operations authorize each requested record through the same services. Unsupported routes are denied, including schema changes and extension configuration by custom business roles. Automatic follow-up rules are not executed under custom scoped CRM policies.
+
+Studio shows the trash for custom roles with both read and restore grants.
+Reading the trash uses the normal read predicates and field projection. The
+server verifies read and restore access before changing a row and returns the
+restored record with its permitted fields. Deletion access is independent.
 
 Conditions can match all rows, rows created by the authenticated user, or scalar field comparisons combined with AND/OR. Creator identity is assigned on the server and cannot be overwritten by input. Rows that predate the creator migration have no known creator and do not match an own-record rule. String ordering uses binary UTF-8 comparison. Unknown resources, fields, unsupported actions and oversized predicates are rejected.
 
@@ -37,6 +45,35 @@ The server records which IDs it offered each principal and revision. When a row 
 Online policy changes clear old replicas and cursors before further submissions. Pending work is quarantined rather than replayed automatically. Row removals and field redactions override optimistic local copies; quarantined snapshots cannot be restored through acknowledgements, conflict resolution or discard operations. Quarantined work is excluded from normal recovery previews and remains unavailable for automatic replay.
 
 Offline revocation is bounded by the existing twelve-hour authenticated lease; it is not instantaneous on a disconnected device. A server authorization rejection blocks local access instead of falling back to an offline session. Revocation cannot undo data already seen or copied outside the application.
+
+Completing managed user deletion advances the directory revision in the same
+database transaction that removes the principal. A user list that overlaps the
+deletion retries against the updated directory. If the directory changes again,
+the list returns a retryable error. The revision contains no user data.
+When the managed Auth directory is configured, a credential can create a local
+principal only after Auth confirms the account is still active. The creation
+checks the directory revision again at write time. A request for an existing
+principal can refresh its name or email only while that principal still exists
+and is active.
+
+Removing platform administration commits the commercial membership, role
+removal, and revocation marker together. A previous OAuth claim or directory
+response cannot grant platform access again. An explicit promotion in user
+administration can restore it. Platform role grants and their required internal
+membership also commit together.
+If the destination becomes unavailable during a demotion, Savia restores the
+Auth role and platform email scope before returning the membership conflict.
+Membership removal requests leave Auth sessions intact. Use a transfer to
+change a user's current commercial membership.
+
+After an explicit platform administrator grant, the user must sign in again
+with multi-factor authentication. An existing session retains its original
+sign-in time when its OAuth token refreshes or is exchanged through MCP. That
+session cannot use the new role. Existing bootstrap administrator grants keep
+their current sign-in behavior and require MFA.
+For rollout, apply migration `0075_platform_administrator_session.sql`, then
+update Auth before the API so freshly issued administrator credentials include
+the session time.
 
 ## Storage and rollout
 

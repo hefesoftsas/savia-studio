@@ -60,6 +60,7 @@ import {
   normalizeCanonicalHost,
   parseTenantSlugFromHostname,
 } from "@savia/tenant-host/tenant-host";
+import { bookingQueryFromOAuthState } from "@savia/tenant-host/bookings-route";
 import { toString as qrCodeSvg } from "qrcode";
 import {
   ensureAdminOAuthClient,
@@ -212,16 +213,27 @@ function adminLoginUrl(
     environment.SAVIA_ADMIN_REDIRECT_URI ??
       "http://127.0.0.1:5173/auth/callback",
   );
+  let bookingQuery: string | undefined;
   // Direct SSO/social login has no OAuth transaction to restore the tenant.
   // Keep its validated public host when starting a fresh Admin authorization.
   if (requestUrl) {
     const requested = new URL(requestUrl);
     if (isAllowedTenantOrigin(requested.origin, url.hostname))
       url = new URL(requested.origin);
+    if (
+      requested.searchParams.has("sig") &&
+      requested.searchParams.getAll("ba_param").includes("state")
+    )
+      bookingQuery = bookingQueryFromOAuthState(
+        requested.searchParams.get("state"),
+      );
   }
   url.pathname = "/";
   url.search = "";
-  url.hash = "/login";
+  url.hash =
+    bookingQuery === undefined
+      ? "/login"
+      : `/login?resume=bookings${bookingQuery ? `&${bookingQuery}` : ""}`;
   return url.toString();
 }
 
@@ -493,15 +505,24 @@ async function ensureSchema(
   }
 }
 
+async function checkAuthSchema(
+  auth: ReturnType<typeof createBetterAuth>,
+): Promise<void> {
+  const context = await auth.$context;
+  await context.explicitSchemaCheck?.();
+}
+
 /** Initialize native auth schema without creating users, sessions or OAuth clients. */
 export async function initializeAuthSchema(
   environment: AuthWorkerEnvironment,
   dependencies: AuthDependencies = {},
 ): Promise<void> {
-  await ensureSchema(
-    createBetterAuth(environment, dependencies),
-    environment.AUTH_DB,
-  );
+  const auth = createBetterAuth(environment, dependencies, {
+    validateSchema: false,
+  });
+  void auth.$context.catch(() => undefined);
+  await ensureSchema(auth, environment.AUTH_DB);
+  await checkAuthSchema(auth);
 }
 
 async function ensureLocalSeedUser(
@@ -755,7 +776,14 @@ async function internalSession(
   request: Request,
 ): Promise<Response> {
   const session = await auth.api.getSession({ headers: request.headers });
-  return Response.json({ user: session ? userDocument(session.user) : null });
+  return Response.json(
+    session
+      ? {
+          user: userDocument(session.user),
+          sessionCreatedAt: new Date(session.session.createdAt).getTime(),
+        }
+      : { user: null },
+  );
 }
 
 async function scalarOAuthClient(client: ScalarOAuthClient): Promise<Response> {
@@ -1115,8 +1143,7 @@ export function createAuthHandler(
     await initializePendingEmailVerificationSchema(environment);
     await initializeEmailRegistrationSchema(environment);
     await initializeFederatedEmailVerificationSchema(environment);
-    const context = await auth.$context;
-    await context.explicitSchemaCheck?.();
+    await checkAuthSchema(auth);
     const bootstrap = await ensureAuthBootstrap(auth, environment);
     const fingerprint = await authConfigurationFingerprint(environment);
     const readiness = {
@@ -1269,8 +1296,10 @@ export function createAuthHandler(
           seedOAuthResources: false,
         });
       } else {
-        // Native startup verifies the database under its deployment lock first.
-        auth = instance ??= createBetterAuth(environment, dependencies);
+        // Native startup migrates and verifies the schema under its deployment lock.
+        auth = instance ??= createBetterAuth(environment, dependencies, {
+          validateSchema: false,
+        });
         // Better Auth begins plugin initialization immediately, before this
         // request reaches the first $context await. Observe an early rejection
         // so it cannot become unhandled while schema/bootstrap work completes;
@@ -1278,6 +1307,7 @@ export function createAuthHandler(
         void auth.$context.catch(() => undefined);
         const schemaStarted = performance.now();
         await ensureSchema(auth, environment.AUTH_DB);
+        await checkAuthSchema(auth);
         timings.auth_schema = performance.now() - schemaStarted;
         const bootstrapStarted = performance.now();
         bootstrap = await ensureAuthBootstrap(auth, environment);
@@ -1381,10 +1411,12 @@ export function createAuthHandler(
         dependencies,
       );
       if (accountEmailSettings) return accountEmailSettings;
-      if (
-        pathname === "/.well-known/openid-configuration" ||
-        pathname === "/.well-known/oauth-authorization-server/api/auth"
-      ) {
+      if (pathname === "/.well-known/openid-configuration") {
+        const discovery = new URL(request.url);
+        discovery.pathname = "/api/auth/.well-known/openid-configuration";
+        return auth.handler(new Request(discovery, request));
+      }
+      if (pathname === "/.well-known/oauth-authorization-server/api/auth") {
         return auth.handler(request);
       }
       const oauthManagement = await oauthManagementResponse(

@@ -395,6 +395,7 @@ export function registerPluginRegistry(
         c.get("tenant"),
         c.get("principalId") || null,
         parsed,
+        { requireSameDigest: true },
       );
       return c.json({ data: result });
     } catch (error) {

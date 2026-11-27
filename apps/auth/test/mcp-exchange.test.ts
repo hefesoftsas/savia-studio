@@ -75,6 +75,23 @@ describe("MCP token exchange", () => {
     );
     expect(payload.exp).toBe(exp);
   });
+  it("preserves an administrator's original session time", async () => {
+    const sessionCreatedAt = Date.now() - 60_000;
+    const response = await exchange(
+      await token({
+        [`${claim}roles`]: ["admin"],
+        [`${claim}two-factor-enabled`]: true,
+        [`${claim}session-created-at`]: sessionCreatedAt,
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { access_token: string };
+    const { payload } = await jwtVerify(
+      body.access_token,
+      createLocalJWKSet(await createBetterAuth(env).api.getJwks()),
+    );
+    expect(payload[`${claim}session-created-at`]).toBe(sessionCreatedAt);
+  });
   it("rejects missing, expired, API-audience and forged tokens", async () => {
     for (const value of [
       undefined,

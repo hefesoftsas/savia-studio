@@ -8,6 +8,8 @@ export type IdentityPrincipal = {
   email: string;
   displayName: string;
   isActive: boolean;
+  deletionStartedAt?: string | null;
+  platformAdminRevoked?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -41,6 +43,7 @@ export type AppActor = {
     | { kind: "interactive" };
   principal: IdentityPrincipal;
   globalRoles: GlobalRole[];
+  platformAdminSessionAfter?: string;
   memberships: AgencyMembership[];
 };
 

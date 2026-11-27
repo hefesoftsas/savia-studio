@@ -69,7 +69,11 @@ function summarizeMigration(record) {
       ...(cause ? { cause } : {}),
     };
   }
-  if (message.startsWith("Database uses the retired migration history"))
+  if (
+    /^(?:D1 migration history contains migrations missing from this checkout|Database uses the retired migration history)/.test(
+      message,
+    )
+  )
     return { category: "D1_MIGRATION_HISTORY_MISMATCH" };
   if (message.startsWith("D1 query timed out"))
     return { category: "D1_TIMEOUT" };

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { OpenAPIHono } from "@hono/zod-openapi";
+import { cleanDeletedAttachmentObjects } from "@savia/studio-server/attachment-deletions";
 import type { AppActor, Authenticator } from "../src/auth/types";
 import { authenticationMiddleware } from "../src/auth/middleware";
 import { OfficeDocumentsService } from "../src/office-documents/service";
@@ -994,27 +995,16 @@ describe("private office document API", () => {
       expect(await env.DOCUMENTS.get(revision.storage_key)).toBeNull();
   });
 
-  it("keeps a deleted document inaccessible when revision storage cleanup fails", async () => {
+  it("retries cleanup of removed document revisions after a storage outage", async () => {
     const owner = appFor(actor("office-owner", 9461));
-    const form = new FormData();
-    const bytes = officeZip("docx");
-    form.set(
-      "file",
-      new File([bytes], "Plan.docx", {
-        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      }),
-    );
-    const created = await owner.request("/v1/office-documents", {
-      method: "POST",
-      body: form,
-    });
-    const id = ((await created.json()) as any).data.id as string;
-    const revision = await env.DB.prepare(
-      "SELECT storage_key FROM office_document_revisions WHERE document_id=?",
+    const { id } = await createDoc(owner);
+    expect((await saveDoc(owner, id, 1)).status).toBe(201);
+    const { results: revisions } = await env.DB.prepare(
+      "SELECT storage_key FROM office_document_revisions WHERE document_id=? ORDER BY storage_key",
     )
       .bind(id)
-      .first<{ storage_key: string }>();
-    expect(revision).not.toBeNull();
+      .all<{ storage_key: string }>();
+    expect(revisions).toHaveLength(2);
 
     const unavailableCleanup = new Proxy(env.DOCUMENTS, {
       get(target, property, receiver) {
@@ -1033,7 +1023,7 @@ describe("private office document API", () => {
     const deleted = await deletingOwner.request(`/v1/office-documents/${id}`, {
       method: "DELETE",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ version: 1 }),
+      body: JSON.stringify({ version: 2 }),
     });
     expect(deleted.status).toBe(204);
     expect(
@@ -1050,7 +1040,23 @@ describe("private office document API", () => {
         .bind(id)
         .first(),
     ).toBeNull();
-    expect(await env.DOCUMENTS.get(revision!.storage_key)).not.toBeNull();
+    const pending = env.DB.prepare(
+      "SELECT storage_key FROM studio_file_deletions WHERE tenant_id=? AND file_id=? ORDER BY storage_key",
+    ).bind("9461", id);
+    for (const { storage_key } of revisions)
+      expect(await env.DOCUMENTS.head(storage_key)).not.toBeNull();
+    expect((await pending.all()).results).toEqual(revisions);
+
+    await env.DB.prepare(
+      "UPDATE studio_file_deletions SET next_attempt_at=0 WHERE tenant_id=? AND file_id=?",
+    )
+      .bind("9461", id)
+      .run();
+    await cleanDeletedAttachmentObjects(env.DB, env.DOCUMENTS);
+
+    for (const { storage_key } of revisions)
+      expect(await env.DOCUMENTS.head(storage_key)).toBeNull();
+    expect((await pending.all()).results).toEqual([]);
   });
 
   it("blocks editing while disabled and preserves stored documents for re-enabling", async () => {

@@ -18,6 +18,9 @@ path bypasses the application shell, including when a service worker is active.
 Cloudflare static assets serve the full VSIX when a client requests a range.
 The common admin `build` and `build:assets` commands build the extension and
 verify its checksum before copying the package into the admin static assets.
+Each invocation of `build:downloads` bundles and packages in its own temporary
+directory. Manual branch Preview builds also stage the public files separately
+so concurrent builds can keep their own VSIX and checksum.
 The build stages the verified package and checksum together before replacing
 the download and removes older versions only after both files are published.
 This includes Cloudflare deployments, setup scripts and the self-hosted Docker

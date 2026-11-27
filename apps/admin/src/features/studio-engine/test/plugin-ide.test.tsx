@@ -596,6 +596,125 @@ it("keeps multi-module editing in the code editor instead of generating an ignor
   ).toBeInTheDocument();
 });
 
+it.each(["success", "failure"] as const)(
+  "discards a cancelled compilation's late %s while compiling edited code",
+  async (outcome) => {
+    let finishOld!: (value: unknown) => void;
+    let rejectOld!: (reason: Error) => void;
+    let finishNew!: (value: unknown) => void;
+    mocks.compile
+      .mockReturnValueOnce(
+        new Promise((resolve, reject) => {
+          finishOld = resolve;
+          rejectOld = reject;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishNew = resolve;
+        }),
+      );
+    render(<PluginIde tenantId={2} onClose={vi.fn()} onPublished={vi.fn()} />);
+    const run = () =>
+      screen.getByRole("button", { name: "Ejecutar vista previa" });
+    const stop = () =>
+      screen.getByRole("button", { name: "Detener vista previa" });
+    const editor = () =>
+      screen.getByLabelText("entry.tsx", { selector: "textarea" });
+    fireEvent.click(run());
+    expect(editor()).toHaveAttribute("readonly");
+    fireEvent.click(stop());
+    expect(editor()).not.toHaveAttribute("readonly");
+
+    const revised = "export function render(el) { el.textContent = 'Edited'; }";
+    fireEvent.change(editor(), { target: { value: revised } });
+    fireEvent.click(run());
+    await act(async () => {
+      if (outcome === "failure")
+        rejectOld(new Error("Obsolete compiler error"));
+      else finishOld({ entryJs: "stale", fixtures: {}, store: {} });
+    });
+    expect(stop()).toBeEnabled();
+    expect(
+      screen.queryByText("Obsolete compiler error"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTitle("Vista previa del plugin"),
+    ).not.toBeInTheDocument();
+    expect(mocks.compile).toHaveBeenLastCalledWith(
+      expect.objectContaining({ "entry.tsx": revised }),
+    );
+
+    await act(async () =>
+      finishNew({ entryJs: "current", fixtures: {}, store: {} }),
+    );
+    expect(
+      await screen.findByTitle("Vista previa del plugin"),
+    ).toBeInTheDocument();
+    expect(run()).toBeEnabled();
+  },
+);
+
+it("closes a timed-out frame and keeps its error until a new preview runs", async () => {
+  vi.useFakeTimers();
+  mocks.compile.mockResolvedValue({
+    entryJs: "compiled",
+    fixtures: {},
+    store: {},
+  });
+  try {
+    render(<PluginIde tenantId={2} onClose={vi.fn()} onPublished={vi.fn()} />);
+    const run = () =>
+      screen.getByRole("button", { name: "Ejecutar vista previa" });
+    await act(async () => fireEvent.click(run()));
+    const frame = screen.getByTitle<HTMLIFrameElement>(
+      "Vista previa del plugin",
+    );
+    const source = frame.contentWindow;
+    const session = frame.getAttribute("srcdoc");
+
+    await act(async () => vi.advanceTimersByTimeAsync(15000));
+    for (const kind of ["ready", "error"]) {
+      fireEvent(
+        window,
+        new MessageEvent("message", {
+          source,
+          data: {
+            type: "savia-plugin-ide",
+            session,
+            kind,
+            message: "Obsolete frame message",
+          },
+        }),
+      );
+    }
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "La vista previa no respondió",
+    );
+    expect(
+      screen.queryByTitle("Vista previa del plugin"),
+    ).not.toBeInTheDocument();
+
+    await act(async () => fireEvent.click(run()));
+    expect(
+      screen.getByTitle("Vista previa del plugin").getAttribute("srcdoc"),
+    ).not.toBe(session);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14999);
+      previewReady();
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Publicar y activar en este espacio",
+      }),
+    ).toBeEnabled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it("publishes and activates only a successfully previewed revision and invalidates it after edits", async () => {
   mocks.compile.mockResolvedValue({
     entryJs: "compiled",

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { adminGatewayWorkerFirstRoutes } from "./admin-gateway-routes.mjs";
 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -22,7 +23,7 @@ export function workerConfig(
   names,
   ids,
   origin,
-  { assetsDir, bootstrap, identityReady = true } = {},
+  { assetsDir, identityReady = true } = {},
 ) {
   const base = {
     compatibility_date: kind === "request" ? "2026-09-04" : "2026-08-31",
@@ -51,7 +52,6 @@ export function workerConfig(
       vars: {
         BETTER_AUTH_URL: origin,
         BETTER_AUTH_BOOTSTRAP_EMAIL: "savia.admin@example.test",
-        BETTER_AUTH_BOOTSTRAP_PASSWORD: bootstrap?.password ?? "preview-only",
         SAVIA_API_RESOURCE: origin,
         SAVIA_ADMIN_REDIRECT_URI: `${origin}/auth/callback`,
         SAVIA_SCALAR_REDIRECT_URI: `${origin}/docs`,
@@ -121,6 +121,7 @@ export function workerConfig(
     return {
       ...base,
       name: names.workers.api,
+      compatibility_flags: ["enable_request_signal"],
       main: resolve(workspaceRoot, "apps/api/src/index.ts"),
       services: [
         { binding: "AUTH", service: names.workers.auth },
@@ -171,6 +172,7 @@ export function workerConfig(
   return {
     ...base,
     name: names.workers.gateway,
+    compatibility_flags: ["enable_request_signal"],
     main: resolve(workspaceRoot, "apps/admin/src/edge-gateway.ts"),
     services: [{ binding: "API", service: names.workers.api }],
     r2_buckets: [{ binding: "OFFICE_RUNTIME", bucket_name: names.bucket }],
@@ -178,28 +180,7 @@ export function workerConfig(
       directory: assetsDir ?? resolve(workspaceRoot, "apps/admin/dist"),
       binding: "ASSETS",
       not_found_handling: "single-page-application",
-      run_worker_first: [
-        "/companion-downloads.json",
-        "/downloads/*",
-        "/register",
-        "/public/forms",
-        "/public/forms/*",
-        "/public/bookings",
-        "/public/bookings/*",
-        "/public/quotes",
-        "/public/quotes/*",
-        "/api/*",
-        "/v1/*",
-        "/webhooks/whatsapp",
-        "/office",
-        "/office/*",
-        "/s/*",
-        "/.well-known/*",
-        "/mcp",
-        "/health",
-        "/docs",
-        "/openapi.json",
-      ],
+      run_worker_first: [...adminGatewayWorkerFirstRoutes],
     },
   };
 }

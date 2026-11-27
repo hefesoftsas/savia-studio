@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "@/api/api-client";
+import { REQUEST_TIMEOUT_MS, RequestTimeoutError } from "@/api/request-timeout";
 import { CompanionRecordingsClient } from "./client";
 it("fetches private audio with the Savia token and explicit processing consent", async () => {
   const requests: Request[] = [];
@@ -23,6 +24,39 @@ it("fetches private audio with the Savia token and explicit processing consent",
     "https://api.savia.test/v1/companion/recordings/sample/notes",
   );
 });
+it.each([200, 403])(
+  "releases an audio download with HTTP %i when the body stalls",
+  async (status) => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn();
+      const stream = new ReadableStream({
+        start: (body) => body.enqueue(new Uint8Array([1])),
+        cancel,
+      });
+      const client = new CompanionRecordingsClient(
+        new ApiClient({
+          baseUrl: "https://api.savia.test",
+          tokenSource: { getAccessToken: async () => "token" },
+          fetcher: async () => new Response(stream, { status }),
+        }),
+      );
+      const rejected = vi.fn();
+      const completed = vi.fn();
+      void client.audio("sample").then(completed, rejected);
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
+      expect(completed).not.toHaveBeenCalled();
+      expect(rejected).toHaveBeenCalledWith(
+        status === 200
+          ? expect.any(RequestTimeoutError)
+          : expect.objectContaining({ status: 403 }),
+      );
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
 it("does not automatically retry billable processing", async () => {
   const fetcher = vi
     .fn()

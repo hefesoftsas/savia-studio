@@ -4,6 +4,7 @@ import { getPlatformProxy } from "wrangler";
 import { readFileSync, readdirSync } from "node:fs";
 import { createStudioApp } from "../src/index";
 import { OFFICE_FORMATS } from "@savia/studio-shared/office";
+import type { AccessGrant } from "@savia/studio-shared/access-control";
 import type { Env } from "../src/context";
 let platform: Awaited<ReturnType<typeof getPlatformProxy<Env["Bindings"]>>>;
 const app = createStudioApp("agency:1", { principalId: "editor-1" });
@@ -26,7 +27,7 @@ beforeAll(async () => {
     "CREATE TABLE IF NOT EXISTS office_settings(tenant_id TEXT PRIMARY KEY NOT NULL,platform_allowed INTEGER NOT NULL DEFAULT 1,tenant_enabled INTEGER NOT NULL DEFAULT 1,updated_by TEXT,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
   ).run();
   await platform.env.DB.prepare(
-    "INSERT INTO studio_objects(tenant_id,name,label,description,config) VALUES ('agency:1','contracts','Contracts','','{\"fields\":{}}')",
+    `INSERT INTO studio_objects(tenant_id,name,label,description,config) VALUES ('agency:1','contracts','Contracts','','{"fields":{"document":{"type":"R2Attachment","label":"Document"}}}')`,
   ).run();
   await platform.env.DB.prepare(
     "INSERT INTO studio_records(id,tenant_id,object_name,data) VALUES ('record-1','agency:1','contracts','{}')",
@@ -48,7 +49,7 @@ async function seed() {
 }
 const req = (path: string, init?: RequestInit) =>
   app.request("http://localhost/api" + path, init, platform.env);
-async function save(id: string, version: number, content: Uint8Array = bytes) {
+function revisionForm(version: number, content: Uint8Array = bytes) {
   const form = new FormData();
   form.set("version", String(version));
   form.set(
@@ -57,7 +58,13 @@ async function save(id: string, version: number, content: Uint8Array = bytes) {
       type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }),
   );
-  return req("/file/" + id + "/revisions", { method: "POST", body: form });
+  return form;
+}
+async function save(id: string, version: number, content: Uint8Array = bytes) {
+  return req("/file/" + id + "/revisions", {
+    method: "POST",
+    body: revisionForm(version, content),
+  });
 }
 describe("Office revisions on real D1 and R2", () => {
   it("returns editable metadata only within the owning tenant", async () => {
@@ -80,6 +87,117 @@ describe("Office revisions on real D1 and R2", () => {
       ).status,
     ).toBe(404);
   });
+  it("uses collection record and field grants to open and save Office attachments", async () => {
+    const scope = "tenant:101";
+    const id = "scoped-office";
+    const key = `${scope}/record/${id}`;
+    const db = platform.env.DB;
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS access_revisions(scope TEXT PRIMARY KEY,revision INTEGER)",
+    );
+    await db.batch([
+      db
+        .prepare("INSERT INTO access_revisions(scope,revision) VALUES (?,1)")
+        .bind(scope),
+      db
+        .prepare(
+          `INSERT INTO studio_objects(tenant_id,name,label,config) VALUES (?,'contracts','Contracts','{"fields":{"document":{"type":"R2Attachment","label":"Document"}}}')`,
+        )
+        .bind(scope),
+      db
+        .prepare(
+          `INSERT INTO studio_records(id,tenant_id,object_name,data) VALUES ('record',?,'contracts','{"region":"north"}')`,
+        )
+        .bind(scope),
+      db
+        .prepare(
+          `INSERT INTO studio_files(id,tenant_id,object_name,record_id,field_name,name,mime,size,storage_key)
+         VALUES (?,?,'contracts','record','document','policy.docx',?,?,?)`,
+        )
+        .bind(id, scope, OFFICE_FORMATS.docx.mime, bytes.length, key),
+    ]);
+    await platform.env.FILES.put(key, bytes);
+    const read: AccessGrant = {
+      id: "view-document",
+      roleId: "documents",
+      resource: "collection:contracts",
+      action: "read",
+      fields: ["document"],
+      predicate: { all: true },
+    };
+    const update: AccessGrant = {
+      ...read,
+      id: "edit-document",
+      action: "update",
+    };
+    function as(principalId: string, grants: AccessGrant[]) {
+      const app = createStudioApp(scope, {
+        principalId,
+        accessPolicy: { scope, principalId, revision: 1, grants },
+      });
+      return (path: string, init: RequestInit = {}) =>
+        app.request(`/api/file/${id}${path}`, init, platform.env);
+    }
+    const viewer = as("viewer", [read, { ...update, fields: ["name"] }]);
+    const editor = as("editor", [read, update]);
+    const open = await viewer("/office");
+    expect(open.status, await open.clone().text()).toBe(200);
+    expect(await open.json()).toMatchObject({ data: { readOnly: true } });
+    expect((await viewer("/revisions")).status).toBe(200);
+    expect((await viewer("/revisions/1/download")).status).toBe(200);
+    expect(
+      (await viewer("/revisions", { method: "POST", body: revisionForm(1) }))
+        .status,
+    ).toBe(403);
+
+    for (const denied of [
+      as("hidden-field", [{ ...read, fields: ["name"] }, update]),
+      as("hidden-row", [
+        {
+          ...read,
+          predicate: { field: "region", op: "eq", value: { literal: "south" } },
+        },
+        update,
+      ]),
+    ]) {
+      for (const path of ["/office", "/revisions", "/revisions/1/download"]) {
+        expect((await denied(path)).status).toBe(403);
+      }
+      expect(
+        (await denied("/revisions", { method: "POST", body: revisionForm(1) }))
+          .status,
+      ).toBe(403);
+    }
+
+    expect(await (await editor("/office")).json()).toMatchObject({
+      data: { readOnly: false },
+    });
+    const saved = await editor("/revisions", {
+      method: "POST",
+      body: revisionForm(1),
+    });
+    expect(saved.status, await saved.clone().text()).toBe(201);
+    expect(await (await viewer("/revisions")).json()).toMatchObject({
+      data: [{ version: 2, created_by: "editor" }, { version: 1 }],
+    });
+    await db
+      .prepare("UPDATE access_revisions SET revision=2 WHERE scope=?")
+      .bind(scope)
+      .run();
+    expect(
+      (await editor("/revisions", { method: "POST", body: revisionForm(2) }))
+        .status,
+    ).toBe(409);
+    const revisions = await platform.env.FILES.list({
+      prefix: `${key}/revisions/`,
+    });
+    expect(revisions.objects).toHaveLength(1);
+    const version = await db
+      .prepare("SELECT version FROM studio_files WHERE tenant_id=? AND id=?")
+      .bind(scope, id)
+      .first<number>("version");
+    expect(version).toBe(2);
+  });
   it("retains original and edited bytes with author and downloadable history", async () => {
     const { id, key } = await seed();
     const response = await save(id, 1);
@@ -99,6 +217,71 @@ describe("Office revisions on real D1 and R2", () => {
       );
     }
     expect(await platform.env.FILES.head(key)).not.toBeNull();
+  });
+  it("confirms the original association after the attachment has been edited", async () => {
+    const form = new FormData();
+    form.set("field", "document");
+    form.set(
+      "file",
+      new File([bytes], "policy.docx", { type: OFFICE_FORMATS.docx.mime }),
+    );
+    const upload = await req("/file-drafts/contracts", {
+      method: "POST",
+      body: form,
+    });
+    expect(upload.status, await upload.clone().text()).toBe(201);
+    const { data: draft } = (await upload.json()) as {
+      data: { id: string; version: number };
+    };
+    const path = `/file-drafts/${draft.id}/attach`;
+    const attempt = (
+      recordId = "record-1",
+      version = draft.version,
+    ): RequestInit => ({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recordId, version }),
+    });
+    expect((await req(path, attempt())).status).toBe(200);
+    const edited = await save(draft.id, draft.version + 1);
+    expect(edited.status, await edited.clone().text()).toBe(201);
+
+    const retry = await req(path, attempt());
+    expect(retry.status, await retry.clone().text()).toBe(200);
+    expect(await retry.json()).toMatchObject({
+      data: {
+        id: draft.id,
+        recordId: "record-1",
+        field: "document",
+        version: draft.version + 2,
+      },
+    });
+    const anotherEditor = createStudioApp("agency:1", {
+      principalId: "editor-2",
+    });
+    expect(
+      (
+        await anotherEditor.request(
+          "http://localhost/api" + path,
+          attempt(),
+          platform.env,
+        )
+      ).status,
+    ).toBe(403);
+    for (const invalid of [
+      attempt("other-record"),
+      attempt("record-1", draft.version + 1),
+    ]) {
+      const response = await req(path, invalid);
+      expect(response.status).toBe(404);
+      expect(await response.json()).not.toHaveProperty("code");
+    }
+    const count = await platform.env.DB.prepare(
+      "SELECT count(*) AS total FROM studio_audit WHERE action='file.attached' AND json_extract(detail,'$.temporaryId')=?",
+    )
+      .bind(draft.id)
+      .first<number>("total");
+    expect(count).toBe(1);
   });
   it("rejects stale saves and allows only one concurrent writer", async () => {
     const { id } = await seed();

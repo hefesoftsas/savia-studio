@@ -1,4 +1,4 @@
-import type { AuthoringBundles } from "./bundles";
+import { resolveAuthoringBundle, type AuthoringBundleSources } from "./bundles";
 import {
   pluginStoreManifestSchema,
   sanitizeStoreCollection,
@@ -137,7 +137,7 @@ function rejectSourceImports(source: string): void {
 
 export async function compileAuthoringProject(
   filesInput: IdeFiles,
-  bundles: AuthoringBundles,
+  bundles: AuthoringBundleSources,
 ): Promise<{
   entryJs: string;
   manifest: PluginStoreManifest;
@@ -163,14 +163,17 @@ export async function compileAuthoringProject(
   rejectSourceImports(files["entry.tsx"]);
   validatePluginEntrySource(files["entry.tsx"]);
 
-  const { transform } = await import("sucrase");
+  const [{ transform }, runtimeBundle] = await Promise.all([
+    import("sucrase"),
+    resolveAuthoringBundle(bundles.runtimeBundle),
+  ]);
   const transformed = transform(files["entry.tsx"], {
     transforms: ["typescript", "jsx"],
     jsxRuntime: "classic",
     production: true,
   });
   const entryJs = [
-    bundles.runtimeBundle,
+    runtimeBundle,
     "const React = SaviaPluginReact.React;",
     "const createRoot = SaviaPluginReact.createRoot;",
     transformed.code,
@@ -210,7 +213,7 @@ export function parsePluginProject(text: string): IdeFiles {
 
 export async function packageAuthoringProject(
   files: IdeFiles,
-  bundles: AuthoringBundles,
+  bundles: AuthoringBundleSources,
 ): Promise<{
   zipBytes: Uint8Array;
   manifest: PluginStoreManifest;

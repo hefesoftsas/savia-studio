@@ -1,5 +1,4 @@
-import runtimeBundle from "virtual:savia-plugin-ide-runtime";
-import vendorBundles from "virtual:savia-plugin-ide-vendors";
+import { browserPluginBundles } from "./plugin-ide-bundles";
 import {
   compileAuthoringProject,
   packageAuthoringProject,
@@ -14,12 +13,11 @@ export type {
   IdeFiles,
   PluginIdeFixtures,
 } from "@savia/plugin-authoring/project";
-const bundles = { runtimeBundle, vendorBundles };
 export function compilePluginProject(files: IdeFiles) {
-  return compileAuthoringProject(files, bundles);
+  return compileAuthoringProject(files, browserPluginBundles);
 }
 export async function packagePluginProject(files: IdeFiles) {
-  const packaged = await packageAuthoringProject(files, bundles);
+  const packaged = await packageAuthoringProject(files, browserPluginBundles);
   return {
     blob: new Blob([packaged.zipBytes.buffer as ArrayBuffer], {
       type: "application/zip",

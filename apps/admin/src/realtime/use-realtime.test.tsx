@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppServicesProvider } from "@/features/assistant/assistant-context";
 import { useRealtimeTopics } from "./use-realtime";
 import { rotateSessionScope } from "@/auth/session-scope";
+import { beginLogout } from "@/auth/logout-progress";
 
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
@@ -106,9 +107,11 @@ describe("useRealtimeTopics", () => {
     );
 
     await waitFor(() =>
-      expect(post).toHaveBeenCalledWith("/v1/realtime/ticket", {
-        topics: ["users"],
-      }),
+      expect(post).toHaveBeenCalledWith(
+        "/v1/realtime/ticket",
+        { topics: ["users"] },
+        { signal: expect.any(AbortSignal) },
+      ),
     );
     await waitFor(() => {
       expect(MockWebSocket.instances).toHaveLength(1);
@@ -337,15 +340,19 @@ it("shares one room socket across components and filters their topics", async ()
   );
   await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
   expect(post).toHaveBeenCalledTimes(1);
-  expect(post).toHaveBeenCalledWith("/v1/realtime/ticket", {
-    topics: [
-      "account",
-      "assistant-threads",
-      "notifications",
-      "personal-integrations",
-      "request-pages",
-    ],
-  });
+  expect(post).toHaveBeenCalledWith(
+    "/v1/realtime/ticket",
+    {
+      topics: [
+        "account",
+        "assistant-threads",
+        "notifications",
+        "personal-integrations",
+        "request-pages",
+      ],
+    },
+    { signal: expect.any(AbortSignal) },
+  );
   const first = MockWebSocket.instances[0];
   await act(async () =>
     first.onmessage?.({
@@ -481,6 +488,42 @@ it("disconnects pooled sockets when the authenticated session is cleared", async
     }),
   );
   expect(onEvent).not.toHaveBeenCalled();
+});
+
+it("cancels pending realtime tickets and does not reconnect during logout", async () => {
+  vi.stubGlobal("WebSocket", MockWebSocket);
+  const ticket = { data: { room: "platform", ticket: "old-ticket" } };
+  let finishTicket!: (result: typeof ticket) => void;
+  let signal: AbortSignal | undefined;
+  const post = vi.fn((_path, _body, init?: RequestInit) => {
+    signal ??= init?.signal ?? undefined;
+    return new Promise<typeof ticket>((resolve) => {
+      finishTicket = resolve;
+    });
+  });
+  render(
+    <AppServicesProvider services={servicesWith(post)}>
+      <Probe />
+    </AppServicesProvider>,
+  );
+  await waitFor(() => expect(post).toHaveBeenCalledOnce());
+  let finishLogout!: () => void;
+  try {
+    await act(async () => {
+      finishLogout = beginLogout();
+    });
+    expect(screen.getByTestId("status")).toHaveTextContent("unavailable");
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      finishTicket(ticket);
+      rotateSessionScope("logout");
+    });
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(post).toHaveBeenCalledOnce();
+  } finally {
+    cleanup();
+    finishLogout?.();
+  }
 });
 
 it("labels topic replacement separately from recovery for existing subscribers", async () => {

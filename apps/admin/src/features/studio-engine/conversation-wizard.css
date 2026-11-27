@@ -26,14 +26,22 @@
   padding: 0 32px 20px;
   margin: 0;
 }
+.conversation-wizard,
+.conversation-success {
+  --conversation-ink: var(--card-foreground);
+  --conversation-soft: var(--muted-foreground);
+  --conversation-accent: color-mix(
+    in oklab,
+    var(--primary) 40%,
+    var(--conversation-ink)
+  );
+  color: var(--conversation-ink);
+  background: var(--card);
+}
 .conversation-wizard {
-  --conversation-ink: var(--primary);
-  --conversation-soft: var(--muted);
   width: 100%;
   max-width: 940px;
   margin: 0 auto;
-  color: var(--conversation-ink);
-  background: var(--card);
   min-width: 0;
 }
 .conversation-header {
@@ -61,7 +69,7 @@
 .conversation-progress > span {
   display: block;
   height: 100%;
-  background: var(--primary);
+  background: var(--conversation-accent);
   width: 100%;
   transform-origin: left;
   transition: transform 0.28s ease-out;
@@ -94,6 +102,7 @@
   line-height: 1.25;
   letter-spacing: -0.025em;
   font-weight: 600;
+  color: var(--conversation-accent);
   text-wrap: balance;
   overflow-wrap: anywhere;
   outline: none;
@@ -127,8 +136,9 @@
   height: auto;
   padding: 12px 16px;
   border-radius: 8px;
-  background: white;
-  border-color: var(--border);
+  background: var(--background);
+  color: var(--conversation-ink);
+  border-color: var(--conversation-soft);
   box-shadow: none;
 }
 .conversation-wizard [data-active-question="true"] > textarea {
@@ -138,10 +148,14 @@
 }
 .conversation-wizard [data-active-question="true"] input:focus-visible,
 .conversation-wizard [data-active-question="true"] textarea:focus-visible {
-  border-color: var(--primary);
-  outline: 2px solid var(--primary);
-  outline-offset: 3px;
+  border-color: var(--conversation-accent);
   box-shadow: none;
+}
+.conversation-wizard [data-active-question="true"] input:focus-visible,
+.conversation-wizard [data-active-question="true"] textarea:focus-visible,
+.conversation-wizard button:focus-visible {
+  outline: 2px solid var(--conversation-accent);
+  outline-offset: 3px;
 }
 .conversation-wizard [data-active-question="true"] input[aria-invalid="true"] {
   border-color: var(--destructive);
@@ -159,7 +173,7 @@
   white-space: normal;
   text-align: left;
   font-size: 16px;
-  border-color: var(--border);
+  border-color: var(--conversation-soft);
   border-radius: 8px;
   color: var(--conversation-ink);
   background: var(--card);
@@ -167,12 +181,12 @@
 }
 .conversation-choices > button:hover {
   background: var(--card);
-  border-color: var(--primary);
+  border-color: var(--conversation-accent);
 }
 .conversation-choices > button[aria-checked="true"] {
   background: var(--card);
-  border-color: var(--primary);
-  box-shadow: inset 0 0 0 1px var(--primary);
+  border-color: var(--conversation-accent);
+  box-shadow: inset 0 0 0 1px var(--conversation-accent);
 }
 .conversation-choice-index {
   flex-shrink: 0;
@@ -277,10 +291,13 @@
   gap: 16px;
   padding: 64px 30px;
   text-align: center;
-  color: var(--primary);
 }
 .conversation-success h3 {
   font-size: 25px;
+}
+.conversation-success h3,
+.conversation-success > svg {
+  color: var(--conversation-accent);
 }
 .conversation-success p {
   font-size: 14px;

@@ -44,6 +44,22 @@ test("reports only allowlisted D1 status and error codes from an encrypted comma
   );
 });
 
+test("recognizes migration history mismatches in current and older command failures", async (t) => {
+  const messages = [
+    "D1 migration history contains migrations missing from this checkout.",
+    "Database uses the retired migration history.",
+  ];
+  for (const message of messages) {
+    const input = await fixture(
+      t,
+      `Error: ${message}\n    at readMigrationHistory (file:///private/path/scripts/apply-d1-migrations.mjs:167:11)`,
+    );
+    assert.deepEqual(await inspectPreviewMigrationFailure(input), [
+      { category: "D1_MIGRATION_HISTORY_MISMATCH" },
+    ]);
+  }
+});
+
 test("rejects links even when the archive is encrypted by a valid key", async (t) => {
   const input = await fixture(t, "unrelated", {
     extraEntry: async (directory) =>

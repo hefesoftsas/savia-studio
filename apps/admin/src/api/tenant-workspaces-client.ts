@@ -1,4 +1,6 @@
 import type { ApiClient } from "./api-client";
+import { getSessionReadsPaused } from "@/auth/logout-progress";
+import { getSessionGeneration } from "@/auth/session-scope";
 
 export type TenantWorkspace = {
   id: string;
@@ -8,39 +10,57 @@ export type TenantWorkspace = {
   apiBasePath: string;
 };
 
-let sharedPromise: Promise<TenantWorkspace[]> | null = null;
-let sharedCache: { data: TenantWorkspace[]; timestamp: number } | null = null;
+type WorkspaceCatalog = {
+  generation: number;
+  pending?: Promise<TenantWorkspace[]>;
+  cached?: { data: TenantWorkspace[]; timestamp: number };
+};
+
+let catalogs = new WeakMap<ApiClient, WorkspaceCatalog>();
+
+export const STUDIO_TENANTS_CHANGED = "savia-studio-tenants-changed";
+
+export function notifyStudioTenantsChanged(): void {
+  window.dispatchEvent(new Event(STUDIO_TENANTS_CHANGED));
+}
 
 export function invalidateTenantWorkspaces(): void {
-  sharedCache = null;
-  sharedPromise = null;
+  catalogs = new WeakMap();
 }
 
 if (typeof window !== "undefined") {
-  window.addEventListener(
-    "savia-studio-tenants-changed",
-    invalidateTenantWorkspaces,
-  );
+  window.addEventListener(STUDIO_TENANTS_CHANGED, invalidateTenantWorkspaces);
 }
 
 export async function fetchTenantWorkspaces(
   client: ApiClient,
 ): Promise<TenantWorkspace[]> {
-  if (sharedCache && Date.now() - sharedCache.timestamp < 30_000) {
-    return sharedCache.data;
+  if (getSessionReadsPaused())
+    throw new DOMException("Workspace reads are paused.", "AbortError");
+  const generation = getSessionGeneration();
+  const previous = catalogs.get(client);
+  const catalog =
+    previous?.generation === generation ? previous : { generation };
+  catalogs.set(client, catalog);
+  if (catalog.cached && Date.now() - catalog.cached.timestamp < 30_000) {
+    return catalog.cached.data;
   }
-  if (sharedPromise) return sharedPromise;
+  if (catalog.pending) return catalog.pending;
 
-  sharedPromise = client
+  catalog.pending = client
     .get<{ data: TenantWorkspace[] }>("/v1/tenant-workspaces")
     .then(({ data }) => {
-      sharedCache = { data, timestamp: Date.now() };
-      sharedPromise = null;
+      if (
+        getSessionReadsPaused() ||
+        getSessionGeneration() !== generation ||
+        catalogs.get(client) !== catalog
+      )
+        throw new DOMException("The workspace catalog changed.", "AbortError");
+      catalog.cached = { data, timestamp: Date.now() };
       return data;
     })
-    .catch((error) => {
-      sharedPromise = null;
-      throw error;
+    .finally(() => {
+      catalog.pending = undefined;
     });
-  return sharedPromise;
+  return catalog.pending;
 }

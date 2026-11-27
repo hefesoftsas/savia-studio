@@ -1,8 +1,15 @@
 diff --git a/dist/controller/list/useListController.cjs b/dist/controller/list/useListController.cjs
-index eb94ba4015ccf17b7cc3fad4035402b0efbc9ca3..b7f9490815cf5409687c34089e77e46de4d5bd0d 100644
+index eb94ba4015ccf17b7cc3fad4035402b0efbc9ca3..346a8845c641d61a65c75e35aff2b3761bc668e5 100644
 --- a/dist/controller/list/useListController.cjs
 +++ b/dist/controller/list/useListController.cjs
-@@ -101,6 +101,7 @@ const useListController = (props = {}) => {
+@@ -96,17 +96,20 @@ const useListController = (props = {}) => {
+         // While the query is disabled (e.g. during the auth check) or loading
+         // for the first time, data is null but that doesn't mean the page is
+         // empty, so don't reset it.
+-        if (isPending)
++        // Keep the failed page selected so the user can retry it.
++        if (isPending || error)
+             return;
          if (query.page <= 0 ||
              (!isFetching &&
                  query.page > 1 &&
@@ -10,7 +17,19 @@ index eb94ba4015ccf17b7cc3fad4035402b0efbc9ca3..b7f9490815cf5409687c34089e77e46d
                  (data == null || data?.length === 0))) {
              // Query for a page that doesn't exist, set page to 1
              queryModifiers.setPage(1);
-@@ -120,6 +121,7 @@ const useListController = (props = {}) => {
+             return;
+         }
+-        if (total == null) {
++        // A cursor can advance through short pages independently of the total.
++        if (total == null || pageInfo?.hasNextPage !== undefined) {
+             return;
+         }
+         const totalPages = Math.ceil(total / query.perPage) || 1;
+@@ -117,9 +120,11 @@ const useListController = (props = {}) => {
+         }
+     }, [
+         isPending,
++        error,
          isFetching,
          query.page,
          query.perPage,
@@ -19,10 +38,17 @@ index eb94ba4015ccf17b7cc3fad4035402b0efbc9ca3..b7f9490815cf5409687c34089e77e46d
          queryModifiers,
          total,
 diff --git a/dist/controller/list/useListController.js b/dist/controller/list/useListController.js
-index d91a95b0ebd823465ae196f328304f8aa38616ae..ee4172127a9cf995be84be428f9142c8a49bd7ee 100644
+index d91a95b0ebd823465ae196f328304f8aa38616ae..b712d1cfe332a92fe8fa290283ff14fac3b0bac0 100644
 --- a/dist/controller/list/useListController.js
 +++ b/dist/controller/list/useListController.js
-@@ -98,6 +98,7 @@ export const useListController = (props = {}) => {
+@@ -93,17 +93,20 @@ export const useListController = (props = {}) => {
+         // While the query is disabled (e.g. during the auth check) or loading
+         // for the first time, data is null but that doesn't mean the page is
+         // empty, so don't reset it.
+-        if (isPending)
++        // Keep the failed page selected so the user can retry it.
++        if (isPending || error)
+             return;
          if (query.page <= 0 ||
              (!isFetching &&
                  query.page > 1 &&
@@ -30,7 +56,19 @@ index d91a95b0ebd823465ae196f328304f8aa38616ae..ee4172127a9cf995be84be428f9142c8
                  (data == null || data?.length === 0))) {
              // Query for a page that doesn't exist, set page to 1
              queryModifiers.setPage(1);
-@@ -117,6 +118,7 @@ export const useListController = (props = {}) => {
+             return;
+         }
+-        if (total == null) {
++        // A cursor can advance through short pages independently of the total.
++        if (total == null || pageInfo?.hasNextPage !== undefined) {
+             return;
+         }
+         const totalPages = Math.ceil(total / query.perPage) || 1;
+@@ -114,9 +117,11 @@ export const useListController = (props = {}) => {
+         }
+     }, [
+         isPending,
++        error,
          isFetching,
          query.page,
          query.perPage,
@@ -39,10 +77,17 @@ index d91a95b0ebd823465ae196f328304f8aa38616ae..ee4172127a9cf995be84be428f9142c8
          queryModifiers,
          total,
 diff --git a/src/controller/list/useListController.ts b/src/controller/list/useListController.ts
-index 0b8968125245cc234edaf19dda38b841925e927a..f7df0e495dbc60b69ce0089431b2d12106d10823 100644
+index 0b8968125245cc234edaf19dda38b841925e927a..883af4d3dd35c4403f95fd3ed3b781b4bb8de510 100644
 --- a/src/controller/list/useListController.ts
 +++ b/src/controller/list/useListController.ts
-@@ -170,6 +170,7 @@ export const useListController = <
+@@ -165,18 +165,21 @@ export const useListController = <
+         // While the query is disabled (e.g. during the auth check) or loading
+         // for the first time, data is null but that doesn't mean the page is
+         // empty, so don't reset it.
+-        if (isPending) return;
++        // Keep the failed page selected so the user can retry it.
++        if (isPending || error) return;
+         if (
              query.page <= 0 ||
              (!isFetching &&
                  query.page > 1 &&
@@ -50,7 +95,20 @@ index 0b8968125245cc234edaf19dda38b841925e927a..f7df0e495dbc60b69ce0089431b2d121
                  (data == null || data?.length === 0))
          ) {
              // Query for a page that doesn't exist, set page to 1
-@@ -190,6 +191,7 @@ export const useListController = <
+             queryModifiers.setPage(1);
+             return;
+         }
+-        if (total == null) {
++        // A cursor can advance through short pages independently of the total.
++        if (total == null || pageInfo?.hasNextPage !== undefined) {
+             return;
+         }
+         const totalPages = Math.ceil(total / query.perPage) || 1;
+@@ -187,9 +190,11 @@ export const useListController = <
+         }
+     }, [
+         isPending,
++        error,
          isFetching,
          query.page,
          query.perPage,

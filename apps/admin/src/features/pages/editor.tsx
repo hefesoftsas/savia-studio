@@ -216,28 +216,29 @@ function AttachmentElement(props: PlateElementProps) {
     t = useMessages(pagesMessages);
   const [source, setSource] = useState<string>(),
     [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const fileId = String(props.element.fileId),
     mime = String(props.element.mimeType ?? "");
   useEffect(() => {
-    let active = true,
-      objectUrl: string | undefined;
+    const controller = new AbortController();
+    let objectUrl: string | undefined;
     setSource(undefined);
     setFailed(false);
     void pages
-      .file(pageId, fileId)
+      .file(pageId, fileId, controller.signal)
       .then((blob) => {
-        if (!active) return;
+        if (controller.signal.aborted) return;
         objectUrl = URL.createObjectURL(blob);
         setSource(objectUrl);
       })
       .catch(() => {
-        if (active) setFailed(true);
+        if (!controller.signal.aborted) setFailed(true);
       });
     return () => {
-      active = false;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [pages, pageId, fileId]);
+  }, [pages, pageId, fileId, attempt]);
   return (
     <PlateElement {...props}>
       <div contentEditable={false} className="my-4">
@@ -256,10 +257,20 @@ function AttachmentElement(props: PlateElementProps) {
           >
             {String(props.element.name)} · {t("Download")}
           </a>
+        ) : failed ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <p role="alert">{t("Attachment unavailable")}</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setAttempt((value) => value + 1)}
+            >
+              {t("Retry")}
+            </Button>
+          </div>
         ) : (
-          <p role={failed ? "alert" : "status"}>
-            {t(failed ? "Unavailable" : "Loading")}
-          </p>
+          <p role="status">{t("Loading attachment")}</p>
         )}
       </div>
       {props.children}

@@ -9,15 +9,20 @@ export const widgetMessages = {
       "Combine sua agenda com resumos das suas coleções em um só painel. Tudo é salvo automaticamente e você pode reordenar arrastando.",
     ],
   Personal: ["Personal", "Personal", "Pessoal"],
-  "Could not load your collections. Try again.": [
-    "No pudimos cargar tus colecciones. Reintenta.",
-    "Could not load your collections. Try again.",
-    "Não foi possível carregar suas coleções. Tente novamente.",
+  "Could not load the list of tenants.": [
+    "No pudimos cargar la lista de tenants.",
+    "Could not load the list of tenants.",
+    "Não foi possível carregar a lista de tenants.",
   ],
   "Could not load this tenant's collections.": [
     "No pudimos cargar las colecciones de este tenant.",
     "Could not load this tenant's collections.",
     "Não foi possível carregar as coleções deste tenant.",
+  ],
+  "Could not load this tenant's plugin widgets.": [
+    "No pudimos cargar los widgets de plugins de este tenant.",
+    "Could not load this tenant's plugin widgets.",
+    "Não foi possível carregar os widgets de plugins deste tenant.",
   ],
   "Could not read this collection.": [
     "No pudimos leer esta colección.",
@@ -226,6 +231,11 @@ export const widgetMessages = {
     "HubSpot reached its request limit. You can retry from %{p0}.",
     "O HubSpot atingiu o limite de solicitações. Você pode tentar novamente a partir de %{p0}.",
   ],
+  "You can retry from %{p0}.": [
+    "Puedes reintentar a partir de %{p0}.",
+    "You can retry from %{p0}.",
+    "Você pode tentar novamente a partir de %{p0}.",
+  ],
   "The record total is unavailable.": [
     "El total de registros no está disponible.",
     "The record total is unavailable.",
@@ -408,10 +418,10 @@ export const widgetMessages = {
     "Retry widget %{title}",
     "Tentar novamente o widget %{title}",
   ],
-  "Could not verify this widget extension. Try refreshing.": [
-    "No pudimos verificar la extensión de este widget. Reintenta desde Actualizar.",
-    "Could not verify this widget extension. Try refreshing.",
-    "Não foi possível verificar a extensão deste widget. Tente atualizar.",
+  "Could not verify this widget extension.": [
+    "No pudimos verificar la extensión de este widget.",
+    "Could not verify this widget extension.",
+    "Não foi possível verificar a extensão deste widget.",
   ],
   Gmail: ["Gmail", "Gmail", "Gmail"],
   Outlook: ["Outlook", "Outlook", "Outlook"],

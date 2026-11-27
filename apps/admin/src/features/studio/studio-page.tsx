@@ -12,11 +12,25 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useCanAccess } from "ra-core";
+import { RefreshCw } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import type { AppServices } from "@/app-services";
 import { createEmbeddedTransport } from "@/api/embedded-transport";
-import { invalidateTenantWorkspaces } from "@/api/tenant-workspaces-client";
+import {
+  invalidateTenantWorkspaces,
+  notifyStudioTenantsChanged,
+} from "@/api/tenant-workspaces-client";
+import {
+  getSessionReadsPaused,
+  useSessionReadsPaused,
+} from "@/auth/logout-progress";
+import {
+  getSessionGeneration,
+  useSessionGeneration,
+} from "@/auth/session-scope";
 import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { RouteLoading } from "@/components/admin/route-loading";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
@@ -64,19 +78,41 @@ export function StudioPage({
   });
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
-  const [tenants, setTenants] = useState<StudioTenant[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const knownTenantKeys = useRef<Set<string> | null>(null);
+  const sessionGeneration = useSessionGeneration();
+  const readsPaused = useSessionReadsPaused();
+  const scope = useMemo(
+    () =>
+      canAccess && !isPending && !readsPaused
+        ? { services, sessionGeneration }
+        : undefined,
+    [canAccess, isPending, readsPaused, services, sessionGeneration],
+  );
+  const [catalog, setCatalog] = useState<{
+    scope: NonNullable<typeof scope>;
+    tenants: StudioTenant[];
+    error?: string;
+  }>();
+  const [refreshingScope, setRefreshingScope] = useState<typeof scope>();
+  const current = catalog?.scope === scope ? catalog : undefined;
+  const tenants = current?.tenants ?? [];
+  const loading = !current;
+  const error = current?.error;
+  const refreshing = scope !== undefined && refreshingScope === scope;
 
   useEffect(() => {
-    if (!canAccess) return;
+    if (!scope) return;
+    const { services, sessionGeneration } = scope;
     let active = true;
+    let knownTenantKeys: Set<string> | undefined;
+    const isCurrent = () =>
+      active &&
+      !getSessionReadsPaused() &&
+      sessionGeneration === getSessionGeneration();
     try {
       void services.authSession
         .getIdentity?.()
         .then((identity) => {
-          if (!active) return;
+          if (!isCurrent()) return;
           const id = (identity as { id?: unknown } | undefined)?.id;
           setStudioQueryOwner(
             studioCacheOwner(window.location.origin, String(id ?? "anon")),
@@ -88,32 +124,40 @@ export function StudioPage({
     }
     let request = 0;
     const refresh = () => {
-      const current = ++request;
+      if (!isCurrent()) return;
+      const revision = ++request;
+      setRefreshingScope(scope);
       void listStudioTenants(services)
         .then((result) => {
-          if (!active || current !== request) return;
-          setTenants(result);
-          setError("");
+          if (!isCurrent() || revision !== request) return;
+          setCatalog({ scope, tenants: result });
           const keys = new Set(result.map((tenant) => tenant.id));
-          if (knownTenantKeys.current) pruneStudioQueryCache(keys);
-          knownTenantKeys.current = keys;
+          if (knownTenantKeys) pruneStudioQueryCache(keys);
+          knownTenantKeys = keys;
         })
         .catch((cause) => {
-          if (active && current === request) {
-            if (isReadAccessDenied(cause)) {
-              setTenants([]);
-              knownTenantKeys.current = null;
-              clearStudioQueryCache();
-              invalidateTenantWorkspaces();
-            }
-            setError(
-              cause instanceof Error
-                ? cause.message
-                : t("No se pudieron cargar los tenants."),
-            );
+          if (!isCurrent() || revision !== request) return;
+          const denied = isReadAccessDenied(cause);
+          if (denied) {
+            knownTenantKeys = undefined;
+            clearStudioQueryCache();
+            invalidateTenantWorkspaces();
           }
+          const error =
+            cause instanceof Error
+              ? cause.message
+              : t("No se pudieron cargar los tenants.");
+          setCatalog((previous) => ({
+            scope,
+            tenants:
+              !denied && previous?.scope === scope ? previous.tenants : [],
+            error,
+          }));
         })
-        .finally(() => active && current === request && setLoading(false));
+        .finally(() => {
+          if (isCurrent() && revision === request)
+            setRefreshingScope(undefined);
+        });
     };
     refresh();
     window.addEventListener(STUDIO_TENANTS_CHANGED, refresh);
@@ -121,7 +165,7 @@ export function StudioPage({
       active = false;
       window.removeEventListener(STUDIO_TENANTS_CHANGED, refresh);
     };
-  }, [canAccess, services]);
+  }, [scope]);
 
   const { tenantId: requestedTenantId } = parseStudioSearch(params.toString());
   const recordLink = !pluginStudio && !!params.get("record");
@@ -142,7 +186,7 @@ export function StudioPage({
   const requestedTool = studioItems.find(
     (item) => item.view === params.get("view"),
   );
-  if (isPending) return <RouteLoading variant="screens" />;
+  if (isPending || readsPaused) return <RouteLoading variant="screens" />;
   if (!canAccess)
     return (
       <p role="alert">
@@ -228,7 +272,7 @@ export function StudioPage({
               {tenants[0].label}
             </button>
           )}
-          {!loading && !tenants.length && (
+          {!loading && !error && !tenants.length && (
             <p className="text-sm text-muted-foreground">
               {t(
                 "No tienes tenants disponibles. Solicita acceso a un administrador.",
@@ -237,15 +281,34 @@ export function StudioPage({
           )}
         </header>
       )}
-      {error && !selected ? (
-        <p role="alert">{error}</p>
-      ) : loading ? (
+      {error ? (
+        <Alert className="mb-3" aria-label={error}>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>{error}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={notifyStudioTenantsChanged}
+              disabled={refreshing}
+            >
+              <RefreshCw
+                className={refreshing ? "size-3.5 animate-spin" : "size-3.5"}
+                aria-hidden="true"
+              />
+              {t("Reintentar")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {loading ? (
         <RouteLoading variant="screens" />
       ) : selected ? (
         <StudioWorkspace
-          key={selected.id}
+          key={`${sessionGeneration}:${selected.id}`}
           services={services}
           tenant={selected}
+          sessionGeneration={sessionGeneration}
           pluginStudio={pluginStudio}
           pluginSource={
             pluginStudio && params.get("source") && params.get("version")
@@ -278,7 +341,7 @@ export function StudioPage({
             setParams(next, { replace });
           }}
         />
-      ) : (
+      ) : error ? null : (
         <div className="py-8 text-muted-foreground">
           <h2 className="mb-2 text-lg font-semibold text-foreground">
             {requestedTool?.label ?? t("Pantallas")}
@@ -308,6 +371,7 @@ export function PluginStudioPage({ services }: { services: AppServices }) {
 function StudioWorkspace({
   services,
   tenant,
+  sessionGeneration,
   query,
   pluginStudio = false,
   pluginSource,
@@ -317,6 +381,7 @@ function StudioWorkspace({
 }: {
   services: AppServices;
   tenant: StudioTenant;
+  sessionGeneration: number;
   query: string;
   pluginStudio?: boolean;
   pluginSource?: { id: string; version: string };
@@ -340,6 +405,10 @@ function StudioWorkspace({
   const [studioClient, setStudioClient] = useState<QueryClient | null>(null);
   useLayoutEffect(() => {
     let active = true;
+    const isCurrent = () =>
+      active &&
+      !getSessionReadsPaused() &&
+      sessionGeneration === getSessionGeneration();
     let opened: LocalWorkspace | undefined;
     // El propietario aísla usuarios: si cambia, la caché se vacía.
     // Se resuelve junto a la apertura del espacio local para no bloquear
@@ -355,7 +424,7 @@ function StudioWorkspace({
       } else {
         void identityPromise
           .then((identity) => {
-            if (!active) return;
+            if (!isCurrent()) return;
             const id = (identity as { id?: unknown }).id;
             const owner = studioCacheOwner(
               window.location.origin,
@@ -365,7 +434,7 @@ function StudioWorkspace({
             setStudioClient(() => getStudioQueryClient(tenant.id, owner));
           })
           .catch(() => {
-            if (!active) return;
+            if (!isCurrent()) return;
             setStudioClient(() => getStudioQueryClient(tenant.id, "anon"));
           });
       }
@@ -373,7 +442,7 @@ function StudioWorkspace({
       setStudioClient(() => getStudioQueryClient(tenant.id, "anon"));
     }
     const install = (local?: LocalWorkspace) => {
-      if (!active) {
+      if (!isCurrent()) {
         local?.close();
         return;
       }
@@ -381,6 +450,7 @@ function StudioWorkspace({
       setStudioRuntime({
         embedded: true,
         tenantId: tenant.tenantId,
+        sessionGeneration,
         businessSetupEnabled: tenant.tenantId !== 0,
         apiBasePath: tenant.apiBasePath,
         transport: local?.transport ?? transport,
@@ -401,7 +471,7 @@ function StudioWorkspace({
         .open(tenant.apiBasePath)
         .then(install)
         .catch((error) => {
-          if (active)
+          if (isCurrent())
             setStartupError(
               error instanceof Error
                 ? error.message
@@ -416,7 +486,7 @@ function StudioWorkspace({
       opened?.close();
       setStudioRuntime({ embedded: false });
     };
-  }, [transport, pluginStudio]);
+  }, [transport, pluginStudio, sessionGeneration]);
   if (startupError)
     return (
       <div role="alert" className="p-4 text-sm text-destructive">

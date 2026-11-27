@@ -2,17 +2,24 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { join } from "node:path";
 
+export function isVersionedVscodeDownload(name) {
+  return /^savia-plugin-authoring-.*\.vsix(?:\.sha256)?$/.test(name);
+}
+
+export async function vscodeDownloadFilename(manifestPath) {
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version ?? "")) {
+    throw new Error("VS Code extension manifest has an invalid version.");
+  }
+  return `savia-plugin-authoring-${manifest.version}.vsix`;
+}
+
 export async function prepareVscodeDownload({
   manifestPath,
   artifactsDir,
   downloadsDir,
 }) {
-  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
-  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version ?? "")) {
-    throw new Error("VS Code extension manifest has an invalid version.");
-  }
-
-  const filename = `savia-plugin-authoring-${manifest.version}.vsix`;
+  const filename = await vscodeDownloadFilename(manifestPath);
   const artifact = join(artifactsDir, filename);
   const checksumFile = `${artifact}.sha256`;
   const artifactBytes = await fs.readFile(artifact);
@@ -62,7 +69,7 @@ export async function prepareVscodeDownload({
       if (
         entry !== filename &&
         entry !== `${filename}.sha256` &&
-        /^savia-plugin-authoring-.*\.vsix(?:\.sha256)?$/.test(entry)
+        isVersionedVscodeDownload(entry)
       ) {
         await fs.rm(join(downloadsDir, entry), { force: true });
       }

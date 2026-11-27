@@ -43,8 +43,18 @@ import {
   type StudioRecord,
   type StudioObject,
 } from "@savia/studio-shared/metadata";
-import type { AttachmentUploadStatus, PendingAttachment } from "./dynamic-form";
-import type { TemporaryR2Attachment } from "./r2-attachment-upload";
+import type {
+  AttachmentUploadStatus,
+  DynamicFormProps,
+  PendingAttachment,
+} from "./dynamic-form";
+import {
+  discardTemporaryAttachmentsInBackground,
+  expiredAttachmentIds,
+  TemporaryAttachmentUnavailableError,
+  type TemporaryR2Attachment,
+} from "./r2-attachment-upload";
+import { canonicalJson } from "@savia/studio-shared/solution-package";
 import {
   evaluateCondition,
   isSectionVisible,
@@ -59,7 +69,12 @@ import { api } from "./api";
 import { useFieldLabelLocale } from "./localized-field-label-editor";
 import "./conversation-wizard.css";
 import { useDependentOptions } from "./dependent-options";
-import { AttachmentQueueProvider } from "./attachment-queue";
+import {
+  AttachmentQueueProvider,
+  releaseUnavailableAttachmentUploads,
+  updateUploadingFiles,
+  type AttachmentUploadFailure,
+} from "./attachment-queue";
 const EMPTY: Record<string, unknown> = {};
 const Context = createContext<{
   active: string | null;
@@ -227,19 +242,13 @@ export default function ConversationWizard({
 }: {
   object: StudioObject;
   values?: Record<string, unknown>;
-  onSave: (
-    data: Record<string, unknown>,
-    previous?: StudioRecord,
-  ) => Promise<StudioRecord | void>;
+  onSave: DynamicFormProps["onSave"];
   onPersistAttachments?: (
     record: StudioRecord,
     attachments: PendingAttachment[],
     onStatus: (status: AttachmentUploadStatus) => void,
   ) => Promise<void>;
-  onUploadTemporaryAttachment?: (
-    field: string,
-    file: File,
-  ) => Promise<TemporaryR2Attachment>;
+  onUploadTemporaryAttachment?: DynamicFormProps["onUploadTemporaryAttachment"];
   onPersistTemporaryAttachments?: (
     record: StudioRecord,
     attachments: TemporaryR2Attachment[],
@@ -293,8 +302,11 @@ export default function ConversationWizard({
     Record<string, File[]>
   >({});
   const [uploadingAttachments, setUploadingAttachments] = useState<
-    Record<string, File | undefined>
+    Record<string, File[]>
   >({});
+  const [failedAttachments, setFailedAttachments] = useState<
+    AttachmentUploadFailure[]
+  >([]);
   const [temporaryAttachments, setTemporaryAttachments] = useState<
     { field: string; file: File; attachment: TemporaryR2Attachment }[]
   >([]);
@@ -302,11 +314,19 @@ export default function ConversationWizard({
   const [savedRecordId, setSavedRecordId] = useState(() =>
     String(values.id ?? ""),
   );
-  const [savedRecord, setSavedRecord] = useState<StudioRecord | undefined>();
+  const confirmedWrite = useRef<
+    | {
+        record: StudioRecord;
+        payload: string;
+        pendingAttachments: boolean;
+      }
+    | undefined
+  >(undefined);
   const queuedAttachmentsRef = useRef<Record<string, File[]>>({});
   const temporaryAttachmentsRef = useRef<
     { field: string; file: File; attachment: TemporaryR2Attachment }[]
   >([]);
+  const submittedAttachments = useRef<TemporaryR2Attachment[]>([]);
   const handledAttachmentsRef = useRef(new Set<File>());
   const cancelledRef = useRef(false);
   const discardTemporaryAttachmentsRef = useRef(onDiscardTemporaryAttachments);
@@ -316,11 +336,15 @@ export default function ConversationWizard({
   useEffect(
     () => () => {
       cancelledRef.current = true;
-      const attachments = temporaryAttachmentsRef.current.map(
-        ({ attachment }) => attachment,
+      const attachments = temporaryAttachmentsRef.current
+        .map(({ attachment }) => attachment)
+        .filter(
+          (attachment) => !submittedAttachments.current.includes(attachment),
+        );
+      discardTemporaryAttachmentsInBackground(
+        discardTemporaryAttachmentsRef.current,
+        attachments,
       );
-      if (attachments.length)
-        void discardTemporaryAttachmentsRef.current?.(attachments);
     },
     [],
   );
@@ -332,10 +356,11 @@ export default function ConversationWizard({
     cancelledRef.current = false;
     setQueuedAttachments({});
     setUploadingAttachments({});
+    setFailedAttachments([]);
     setTemporaryAttachments([]);
     setAttachmentVersion(0);
     setSavedRecordId(String(values.id ?? ""));
-    setSavedRecord(undefined);
+    confirmedWrite.current = undefined;
   }, [editorKey, values.id]);
   const replaceTemporaryAttachments = (
     next: { field: string; file: File; attachment: TemporaryR2Attachment }[],
@@ -343,10 +368,50 @@ export default function ConversationWizard({
     temporaryAttachmentsRef.current = next;
     setTemporaryAttachments(next);
   };
+  const restartTemporaryUploads = (ids: string[]) => {
+    const previous = temporaryAttachmentsRef.current;
+    const retained = releaseUnavailableAttachmentUploads(
+      previous,
+      ids,
+      handledAttachmentsRef.current,
+    );
+    if (retained === previous) return false;
+    replaceTemporaryAttachments(retained);
+    setQueuedAttachments({ ...queuedAttachmentsRef.current });
+    setError(
+      t("Estamos volviendo a cargar un adjunto. Guarda cuando termine."),
+    );
+    return true;
+  };
   const setAttachmentFiles = (field: string, files: File[]) => {
+    if (saving.current) return;
+    for (const previous of queuedAttachmentsRef.current[field] ?? [])
+      if (!files.includes(previous))
+        handledAttachmentsRef.current.delete(previous);
+    setFailedAttachments((previous) =>
+      previous.filter(
+        (failure) => failure.field !== field || files.includes(failure.file),
+      ),
+    );
     const next = { ...queuedAttachmentsRef.current, [field]: files };
     queuedAttachmentsRef.current = next;
     setQueuedAttachments(next);
+  };
+  const retryAttachment = (field: string, file: File) => {
+    if (
+      saving.current ||
+      !failedAttachments.some(
+        (failure) => failure.field === field && failure.file === file,
+      )
+    )
+      return;
+    handledAttachmentsRef.current.delete(file);
+    setFailedAttachments((previous) =>
+      previous.filter(
+        (failure) => failure.field !== field || failure.file !== file,
+      ),
+    );
+    setQueuedAttachments({ ...queuedAttachmentsRef.current });
   };
   useEffect(() => {
     if (!onUploadTemporaryAttachment) return;
@@ -368,14 +433,23 @@ export default function ConversationWizard({
       for (const file of files) {
         if (handledAttachmentsRef.current.has(file)) continue;
         handledAttachmentsRef.current.add(file);
-        setUploadingAttachments((previous) => ({ ...previous, [field]: file }));
-        void onUploadTemporaryAttachment(field, file)
-          .then(async (attachment) => {
+        setUploadingAttachments((previous) =>
+          updateUploadingFiles(previous, field, file, true),
+        );
+        void onUploadTemporaryAttachment(
+          field,
+          file,
+          savedRecordId || undefined,
+        )
+          .then((attachment) => {
             if (
               cancelledRef.current ||
               !queuedAttachmentsRef.current[field]?.includes(file)
             ) {
-              await onDiscardTemporaryAttachments?.([attachment]);
+              discardTemporaryAttachmentsInBackground(
+                onDiscardTemporaryAttachments,
+                [attachment],
+              );
               return;
             }
             replaceTemporaryAttachments([
@@ -384,18 +458,32 @@ export default function ConversationWizard({
             ]);
             setAttachmentVersion((version) => version + 1);
           })
-          .catch((cause: Error) => setError(cause.message))
-          .finally(() =>
-            setUploadingAttachments((previous) => ({
+          .catch((cause: unknown) => {
+            if (
+              cancelledRef.current ||
+              !queuedAttachmentsRef.current[field]?.includes(file)
+            )
+              return;
+            setFailedAttachments((previous) => [
               ...previous,
-              [field]: undefined,
-            })),
+              {
+                field,
+                file,
+                message: cause instanceof Error ? cause.message : "",
+              },
+            ]);
+          })
+          .finally(() =>
+            setUploadingAttachments((previous) =>
+              updateUploadingFiles(previous, field, file, false),
+            ),
           );
       }
   }, [
     onDiscardTemporaryAttachments,
     onUploadTemporaryAttachment,
     queuedAttachments,
+    savedRecordId,
   ]);
   const uploadedAttachmentFiles = useMemo(
     () =>
@@ -405,8 +493,9 @@ export default function ConversationWizard({
       }, {}),
     [temporaryAttachments],
   );
-  const hasPendingAttachmentUpload =
-    Object.values(uploadingAttachments).some(Boolean);
+  const hasPendingAttachmentUpload = Object.values(uploadingAttachments).some(
+    (files) => files.length > 0,
+  );
   const markAttachmentUploaded = (field: string, file: File) =>
     setQueuedAttachments((previous) => ({
       ...previous,
@@ -421,15 +510,10 @@ export default function ConversationWizard({
     file,
     status,
   }: AttachmentUploadStatus) => {
-    if (status === "uploading") {
-      setUploadingAttachments((previous) => ({ ...previous, [field]: file }));
-      return;
-    }
-    setUploadingAttachments((previous) => ({
-      ...previous,
-      [field]: undefined,
-    }));
-    refreshAttachments(field, file);
+    setUploadingAttachments((previous) =>
+      updateUploadingFiles(previous, field, file, status === "uploading"),
+    );
+    if (status === "uploaded") refreshAttachments(field, file);
   };
   const root = useRef<HTMLDivElement>(null),
     heading = useRef<HTMLHeadingElement>(null),
@@ -572,6 +656,27 @@ export default function ConversationWizard({
       setFocusRequest((n) => n + 1);
       return;
     }
+    const failed = failedAttachments.find(
+      ({ field }) => isReview || field === name,
+    );
+    if (failed) {
+      if (isReview) {
+        const question = questions.findIndex(([key]) => key === failed.field);
+        if (question < 0) {
+          setError(
+            t(
+              "Revisa los archivos antes de guardar. Uno o más no se pudieron cargar.",
+            ),
+          );
+          return;
+        }
+        setPosition(question);
+        setReview(false);
+        setEditingReview(true);
+      }
+      setFocusRequest((current) => current + 1);
+      return;
+    }
     if (!isReview) {
       if (editingReview || index === questions.length - 1) {
         setReview(true);
@@ -598,6 +703,12 @@ export default function ConversationWizard({
       );
       return;
     }
+    if (
+      !confirmedWrite.current &&
+      restartTemporaryUploads(expiredAttachmentIds(temporary))
+    )
+      return;
+    submittedAttachments.current = temporary;
     saving.current = true;
     setBusy(true);
     try {
@@ -607,11 +718,27 @@ export default function ConversationWizard({
           ? [{ field, files: queuedAttachments[field] }]
           : [],
       );
-      const savedResult = savedRecord
-        ? await onSave(validated.data, savedRecord)
-        : await onSave(validated.data);
+      const previousWrite = confirmedWrite.current;
+      const payload = canonicalJson(validated.data);
+      let savedResult: StudioRecord | void = previousWrite?.record;
+      if (
+        !previousWrite?.pendingAttachments ||
+        payload !== previousWrite.payload
+      ) {
+        savedResult = temporary.length
+          ? await onSave(validated.data, previousWrite?.record, undefined, {
+              hasTemporaryAttachments: true,
+            })
+          : previousWrite
+            ? await onSave(validated.data, previousWrite.record)
+            : await onSave(validated.data);
+      }
       if (savedResult) {
-        setSavedRecord(savedResult);
+        confirmedWrite.current = {
+          record: savedResult,
+          payload,
+          pendingAttachments: temporary.length > 0 || attachments.length > 0,
+        };
         setSavedRecordId(savedResult.id);
       }
       if (temporary.length) {
@@ -639,11 +766,19 @@ export default function ConversationWizard({
           updateAttachmentStatus,
         );
       }
+      if (confirmedWrite.current)
+        confirmedWrite.current.pendingAttachments = false;
       onSaved?.(savedResult);
       setSaved(true);
     } catch (e) {
-      setError((e as Error).message);
+      if (!(
+        !cancelledRef.current &&
+        e instanceof TemporaryAttachmentUnavailableError &&
+        restartTemporaryUploads([e.attachmentId])
+      ))
+        setError((e as Error).message);
     } finally {
+      submittedAttachments.current = [];
       saving.current = false;
       setBusy(false);
       setUploadingAttachments({});
@@ -699,7 +834,10 @@ export default function ConversationWizard({
             setFiles: setAttachmentFiles,
             uploading: uploadingAttachments,
             uploaded: uploadedAttachmentFiles,
+            failures: failedAttachments,
+            retry: retryAttachment,
             version: attachmentVersion,
+            saving: busy,
           }}
         >
           <RulesEngineProvider>

@@ -96,6 +96,18 @@ type StoreItem = {
   installed: { version: string; enabled: boolean } | null;
 };
 
+type PluginInventory = {
+  items: StoreItem[];
+  bundled: ReadonlySet<string>;
+  canDeleteFromRegistry: boolean;
+};
+
+const emptyInventory: PluginInventory = {
+  items: [],
+  bundled: new Set(),
+  canDeleteFromRegistry: false,
+};
+
 type StatusFilter = "all" | "active" | "inactive" | "available" | "updates";
 
 type GroupedPlugin = {
@@ -172,7 +184,8 @@ export default function PluginStoreManager({
   const fileRef = useRef<HTMLInputElement>(null);
   const listGeneration = useRef(0);
 
-  const [items, setItems] = useState<StoreItem[]>([]);
+  const [inventory, setInventory] = useState(emptyInventory);
+  const { items, bundled, canDeleteFromRegistry } = inventory;
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -184,7 +197,6 @@ export default function PluginStoreManager({
     group: GroupedPlugin;
     version?: string;
   } | null>(null);
-  const [canDeleteFromRegistry, setCanDeleteFromRegistry] = useState(false);
   const [deleteFromRegistry, setDeleteFromRegistry] = useState(false);
 
   function confirmDeletion(group: GroupedPlugin, version?: string) {
@@ -210,7 +222,8 @@ export default function PluginStoreManager({
       solutions.data.flatMap(({ manifest }) => manifest.requires),
     );
     return {
-      items: response.data.filter((item) => !bundled.has(item.manifest.id)),
+      items: response.data,
+      bundled,
       canDeleteFromRegistry: response.canDeleteFromRegistry === true,
     };
   }
@@ -219,13 +232,12 @@ export default function PluginStoreManager({
     try {
       const response = await loadItems();
       if (generation === listGeneration.current) {
-        setItems(response.items);
-        setCanDeleteFromRegistry(response.canDeleteFromRegistry);
+        setInventory(response);
         setError("");
       }
     } catch (reason) {
       if (generation === listGeneration.current && isReadAccessDenied(reason)) {
-        setItems([]);
+        setInventory(emptyInventory);
         setOpenPluginId(null);
         setDeleteTarget(null);
         setError(message(reason));
@@ -270,13 +282,12 @@ export default function PluginStoreManager({
     loadItems()
       .then((response) => {
         if (active && generation === listGeneration.current) {
-          setItems(response.items);
-          setCanDeleteFromRegistry(response.canDeleteFromRegistry);
+          setInventory(response);
         }
       })
       .catch((reason) => {
         if (active && generation === listGeneration.current) {
-          if (isReadAccessDenied(reason)) setItems([]);
+          if (isReadAccessDenied(reason)) setInventory(emptyInventory);
           setError(message(reason));
         }
       })
@@ -326,7 +337,10 @@ export default function PluginStoreManager({
     }
   }
 
-  const grouped = useMemo(() => groupById(items), [items]);
+  const grouped = useMemo(
+    () => groupById(items.filter((item) => !bundled.has(item.manifest.id))),
+    [items, bundled],
+  );
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -407,6 +421,7 @@ export default function PluginStoreManager({
       <PluginVscodeGuide tenantId={getStudioRuntime().tenantId} />
       <PluginRegistry
         key={getStudioRuntime().tenantId}
+        workspaceVersions={items}
         onImported={async () => {
           await reload();
           await onChanged();

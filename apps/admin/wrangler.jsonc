@@ -3,6 +3,7 @@
   "name": "savia",
   "main": "src/edge-gateway.ts",
   "compatibility_date": "2026-08-31",
+  "compatibility_flags": ["enable_request_signal"],
   "vars": { "CANONICAL_HOST": "savia.hefesoft.com" },
   "routes": [
     { "pattern": "savia.hefesoft.com", "custom_domain": true },

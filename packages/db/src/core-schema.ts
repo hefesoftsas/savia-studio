@@ -124,6 +124,10 @@ export const identityPrincipals = sqliteTable(
     email: text("email").notNull(),
     displayName: text("display_name").notNull(),
     isActive: integer("is_active", { mode: "boolean" }).notNull(),
+    deletionStartedAt: text("deletion_started_at"),
+    platformAdminRevoked: integer("platform_admin_revoked", { mode: "boolean" })
+      .notNull()
+      .default(false),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
@@ -143,6 +147,7 @@ export const identityGlobalRoles = sqliteTable(
       .references(() => identityPrincipals.id),
     role: text("role").notNull(),
     createdAt: text("created_at").notNull(),
+    sessionAfter: text("session_after"),
   },
   (table) => [
     uniqueIndex("identity_global_role_principal_role_unique").on(

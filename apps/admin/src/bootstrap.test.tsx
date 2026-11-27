@@ -131,6 +131,8 @@ it("lets anonymous visitors switch ES/EN/PT and updates document language withou
     ),
   );
   expect(document.documentElement.lang).toBe("en");
+  const englishNotice = screen.getByRole("region", { name: "We use cookies" });
+  expect(englishNotice).toHaveTextContent("Essential only");
   fireEvent.change(screen.getByLabelText("Language"), {
     target: { value: "pt" },
   });
@@ -140,6 +142,14 @@ it("lets anonymous visitors switch ES/EN/PT and updates document language withou
     ),
   );
   expect(document.documentElement.lang).toBe("pt-BR");
+  const portugueseNotice = screen.getByRole("region", {
+    name: "Usamos cookies",
+  });
+  expect(portugueseNotice).toHaveTextContent("Somente essenciais");
+  fireEvent.click(screen.getByRole("button", { name: "Preferências" }));
+  expect(
+    screen.getByRole("dialog", { name: "Preferências" }),
+  ).toHaveTextContent("Salvar preferências");
 });
 
 it("opens tenant registration anonymously without loading private services", async () => {

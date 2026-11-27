@@ -106,6 +106,9 @@ export const studioItems: ReadonlyArray<{
 
 export function isStudioNavigationMessage(data: unknown): data is {
   type: typeof STUDIO_NAVIGATION_MESSAGE;
+  tenantId?: number;
+  sessionGeneration?: number;
+  accessDenied?: boolean;
   objects: StudioNavigationObject[];
   hubspotCount?: { name: string; total: number };
 } {

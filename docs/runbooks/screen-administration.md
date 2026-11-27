@@ -25,6 +25,10 @@ The form designer inherits the active workspace theme, including the unused
 space below its canvas and panels. Its container uses the shared background
 token so it remains consistent in both light and dark mode.
 
+Guided record forms use the active theme for question labels, hints, review,
+and save confirmation. Text and keyboard focus remain readable in both light
+and dark mode, including workspaces with custom branding.
+
 ## Visibilidad en la barra lateral (Sidebar Visibility)
 
 On narrow screens, each screen row places visibility and management controls
@@ -44,6 +48,60 @@ Desde la barra de administración de pantallas o el diálogo de nueva pantalla s
 - **Lectura e inferencia en el cliente**: Admite `.xlsx`, `.xls` y `.csv`. Analiza tipos (`Toggle`, `DateControl`, `Currency`, `Number`, `Dropdown`, `Email`, `Phone`, `Url`, `Textarea`, `Textbox`) y sanitiza cabeceras a identificadores válidos para D1.
 - **Configuración de pantalla**: Permite definir sección de menú, icono Lucide, superficie (`drawer-long`, `modal`, etc.), distribución en columnas y activación opcional de vista Pipeline Kanban si se detectan etapas.
 - **Matriz de campos e importación**: Ofrece una tabla interactiva para redefinir tipos, editar etiquetas y desmarcar columnas antes de crear el objeto e importar los registros iniciales.
+
+For workbooks with multiple sheets, use **Active worksheet** to select the
+sheet that supplies the fields and rows. If a sheet cannot be read, the wizard
+shows the error and keeps the last sheet it loaded successfully.
+
+The wizard names untitled Excel columns that contain data and gives repeated
+headings distinct names. Review the generated labels in **Fields and types**
+before creating the screen.
+
+Headers that match reserved record fields keep their visible labels and get
+distinct internal keys. The wizard imports an `ID` column as text to preserve
+identifiers such as `00042`.
+
+If an import request fails after the collection is created, keep the wizard open
+and select **Resume import**. The wizard continues from the pending batch and
+reuses its confirmation ID if the preview already completed.
+
+When any rows are skipped or rejected, the wizard shows the imported, skipped,
+and failed counts across all batches before opening the screen. It also shows
+the first row error when one is available.
+
+Imports preserve leading signs in cell values, such as international phone
+numbers and negative amounts. Native Excel values mapped to a date field
+keep the workbook's calendar day, including in workbooks using the 1904
+date system.
+
+CSV imports accept decimal commas and consistent thousands grouping in number
+and currency fields. Use an ungrouped number with a decimal point when a
+formatted amount could have two meanings, such as `COP 1.234`. Currency
+codes in the file must match the currency configured for the field.
+
+CSV imports recognize comma and semicolon separators. Punctuation and embedded
+line breaks inside quoted headers are kept as part of the header.
+
+The wizard applies an inferred calculation only when it reproduces the
+column's values across the entire file. For subtraction, it keeps the operand
+order that matches those values.
+
+An inferred relation uses a selection field. Formulas need their result and
+all operands to be included numeric fields. A Pipeline needs an included static
+selection field. Its optional amount needs an included numeric field. The
+wizard drops incompatible formulas and Pipeline settings when you exclude
+fields or change their types.
+
+Toggling form sections preserves screen settings and field edits. Section
+assignments use the included fields and their current types.
+
+The wizard sends only included columns to the import API. It counts rows
+with empty selected fields as skipped and shows that count before import
+and in the result.
+
+The wizard divides records into batches using the API's CSV length limit and
+its 1,000-row limit. An oversized record appears as an error in the result while
+other records continue to import.
 
 Verificación: pruebas con nombres arbitrarios y pantallas ocultas, navegación contextual, relaciones, filtro de auditoría en D1, TypeScript y revisión visual en navegador.
 
@@ -70,7 +128,32 @@ Tab changes preserve existing query parameters and create browser history entrie
 
 In **Operaciones → Importar y exportar**, Studio validates the CSV response
 before saving it. The export button remains disabled while the file downloads
-and becomes available again when the download finishes or reports an error.
+and becomes available again when the download finishes. **Cancel download**
+stops a pending export without saving a partial file and makes the export
+button available again. When the server
+rate-limits an export with a retry deadline, Studio shows the time and enables
+exporting that collection once the deadline passes. Other collections can
+still be exported.
+
+Changing the import collection, file, column mapping, or duplicate settings
+discards any pending CSV preview. Validate the updated configuration before
+confirming. During confirmation the import keeps the validated collection and
+settings fixed until the server responds.
+Retrying the same confirmation reports rows already saved by that import as
+created and preserves their record IDs. Other duplicates still follow the
+selected duplicate policy.
+During confirmation, a write failure leaves the duplicate value available
+for a later valid row in the same batch.
+When two batches confirm the same duplicate value concurrently, the first
+successful write keeps the value. The other batch applies its selected
+duplicate policy.
+
+When the importer has scoped access, a missing or unreadable related record
+is reported on its row during validation and confirmation. Other rows with
+valid references can still be imported.
+Confirmation checks the current import permissions for every row before
+saving any records in the batch. A batch outside the current import scope
+is rejected before writes begin.
 
 ## Tenant API tools
 

@@ -503,6 +503,7 @@ test("workflow, tests, documentation, and known asset-only files do not require 
       "scripts/preview-release-plan.mjs",
       "scripts/warm-preview-frontend.mjs",
       "scripts/dev-local.sh",
+      "scripts/dev-local-lock.mjs",
       "scripts/dev-api-runtime.mjs",
       "scripts/verify-local-stack.sh",
       "scripts/preview-component-evidence.mjs",
@@ -554,6 +555,32 @@ test("updating the manual branch command alone does not redeploy shared Preview"
   ]) {
     assert.equal(releaseRuntimeChanged([...manualChanges, runtimePath]), true);
   }
+});
+
+test("self-hosted smoke scripts publish no Preview runtime unless hosted code also changes", () => {
+  const smokePaths = [
+    "apps/self-hosted/scripts/account-email-smoke.ts",
+    "apps/self-hosted/scripts/saml-keycloak-smoke.ts",
+    "apps/self-hosted/scripts/saml-smoke-form.ts",
+    "apps/self-hosted/test/saml-smoke-form.test.ts",
+    "docs/guides/keycloak-saml-testing.md",
+  ];
+  assert.equal(releaseRuntimeChanged(smokePaths), false);
+  for (const runtimePath of [
+    "apps/auth/src/index.ts",
+    "apps/self-hosted/scripts/unknown-release-helper.ts",
+  ]) {
+    assert.equal(releaseRuntimeChanged([...smokePaths, runtimePath]), true);
+  }
+});
+
+test("VS Code validation changes skip Preview while extension source updates still publish", () => {
+  const workflowPath = ".github/workflows/build-vscode-extension.yml";
+  assert.equal(releaseRuntimeChanged([workflowPath]), false);
+  assert.equal(
+    releaseRuntimeChanged([workflowPath, "apps/vscode/src/extension.ts"]),
+    true,
+  );
 });
 
 test("legacy Office success survives a later plugin failure but incomplete uploads do not", () => {

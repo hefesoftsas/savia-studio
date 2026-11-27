@@ -1,7 +1,13 @@
 import { formatRetryTime } from "@/api/retry-after";
+import type { AppLocale } from "@/i18n/app-locale";
 import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  retryIsBlocked,
+  useRetryBlocked,
+  useRetryDeadline,
+} from "@/hooks/use-retry-blocked";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { loadCaptcha } from "../public-forms/public-form-submission";
 import { mountAltcha } from "../public-forms/altcha-widget";
@@ -50,9 +56,19 @@ const createIdempotencyKey = () =>
 
 type BookingSubmission = {
   key: string;
-  body: string;
+  body: {
+    serviceId: string;
+    professionalId: string;
+    startsAt: string;
+    customerName: string;
+    customerEmail: string;
+    customerLocale: AppLocale;
+    captchaToken: string;
+  };
   selection: BookingSelection;
 };
+type UnconfirmedBooking = BookingSubmission & { needsVerification: boolean };
+type BookingLimit = { daily: boolean; retryAt?: number };
 
 export function PublicBookingPage({ token }: { token: string }) {
   return <PublicBookingLink key={token} token={token} />;
@@ -71,7 +87,7 @@ function PublicBookingLink({ token }: { token: string }) {
   const [loading, setLoading] = useState(true);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [catalogLoadError, setCatalogLoadError] = useState<
-    "unavailable" | "retryable" | "other"
+    "unavailable" | "retryable" | "rate-limited" | "other"
   >();
   const [error, setError] = useState("");
   const [serviceId, setServiceId] = useState("");
@@ -79,6 +95,12 @@ function PublicBookingLink({ token }: { token: string }) {
   const [displayTimeZone, setDisplayTimeZone] = useState("");
   const [selection, setSelection] = useState<BookingSelection>();
   const [availabilityReady, setAvailabilityReady] = useState(false);
+  const {
+    retryAt: readRetryAt,
+    blocked: readBlocked,
+    remember: rememberReadDeadline,
+    isBlockedNow: readIsBlocked,
+  } = useRetryDeadline();
   const [customerName, setCustomerName] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [captchaToken, setCaptchaToken] = useState("");
@@ -89,8 +111,12 @@ function PublicBookingLink({ token }: { token: string }) {
   const stepHeadingRef = useRef<HTMLHeadingElement>(null);
   const previousStepRef = useRef(step);
   const [busy, setBusy] = useState(false);
+  const [submissionLimit, setSubmissionLimit] = useState<BookingLimit>();
+  const submissionBlocked = useRetryBlocked(submissionLimit?.retryAt);
   const [unconfirmedBooking, setUnconfirmedBooking] =
-    useState<BookingSubmission>();
+    useState<UnconfirmedBooking>();
+  const verifyPreviousBooking =
+    step === 2 && unconfirmedBooking?.needsVerification;
   const [reservation, setReservation] = useState<{
     selection: BookingSelection;
     status: "confirmed" | "cancelled";
@@ -140,7 +166,12 @@ function PublicBookingLink({ token }: { token: string }) {
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        const status = (error as PublicBookingApiError | undefined)?.status;
+        const { status, retryAt } = (error as PublicBookingApiError) ?? {};
+        if (status === 429) {
+          rememberReadDeadline(retryAt);
+          setCatalogLoadError("rate-limited");
+          return;
+        }
         setCatalogLoadError(
           status === 404 || status === 410
             ? "unavailable"
@@ -153,12 +184,12 @@ function PublicBookingLink({ token }: { token: string }) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [token, loadAttempt]);
+  }, [token, loadAttempt, rememberReadDeadline]);
 
   useEffect(() => {
     if (
       !catalog ||
-      step !== 3 ||
+      (step !== 3 && !verifyPreviousBooking) ||
       catalog.captcha.captchaProvider === "disabled" ||
       reservation
     )
@@ -218,7 +249,16 @@ function PublicBookingLink({ token }: { token: string }) {
       active = false;
       widget?.remove();
     };
-  }, [catalog, locale, token, reservation, captchaAttempt, step, t]);
+  }, [
+    catalog,
+    locale,
+    token,
+    reservation,
+    captchaAttempt,
+    step,
+    t,
+    verifyPreviousBooking,
+  ]);
 
   const selectedService = useMemo(
     () => catalog?.services.find((service) => service.id === serviceId),
@@ -233,11 +273,13 @@ function PublicBookingLink({ token }: { token: string }) {
   );
 
   function reloadCatalog() {
-    setLoading(true);
+    const waiting = readIsBlocked();
+    setLoading(!waiting);
     setCatalog(undefined);
+    setCatalogLoadError(waiting ? "rate-limited" : undefined);
     setAvailabilityReady(false);
     setCaptchaToken("");
-    setLoadAttempt((attempt) => attempt + 1);
+    if (!waiting) setLoadAttempt((attempt) => attempt + 1);
   }
 
   function submit(event: FormEvent) {
@@ -252,6 +294,7 @@ function PublicBookingLink({ token }: { token: string }) {
       selection.professionalId !== professionalId ||
       !captchaToken ||
       !availabilityReady ||
+      retryIsBlocked(submissionLimit?.retryAt) ||
       busy
     )
       return;
@@ -278,18 +321,30 @@ function PublicBookingLink({ token }: { token: string }) {
       };
     void sendBooking({
       key: idempotency.current.key,
-      body: JSON.stringify({
+      body: {
         ...body,
         customerLocale: idempotency.current.customerLocale,
-      }),
+      },
       selection,
     });
   }
 
+  function retryPreviousBooking(booking: UnconfirmedBooking) {
+    if (booking.needsVerification && !captchaToken) return;
+    const body = booking.needsVerification
+      ? { ...booking.body, captchaToken }
+      : booking.body;
+    void sendBooking({ ...booking, body });
+  }
+
   async function sendBooking(submission: BookingSubmission) {
-    if (!catalog || busy) return;
+    if (!catalog || busy || retryIsBlocked(submissionLimit?.retryAt)) return;
+    const retryingUnconfirmed = unconfirmedBooking?.key === submission.key;
+    const previousBookingNeedsVerification =
+      retryingUnconfirmed && unconfirmedBooking?.needsVerification === true;
     setBusy(true);
     setUnconfirmedBooking(undefined);
+    setSubmissionLimit(undefined);
     setError("");
     try {
       const result = await publicRequest<{
@@ -306,7 +361,7 @@ function PublicBookingLink({ token }: { token: string }) {
           "Content-Type": "application/json",
           "Idempotency-Key": submission.key,
         },
-        body: submission.body,
+        body: JSON.stringify(submission.body),
       });
       setReservation({
         selection: {
@@ -321,7 +376,8 @@ function PublicBookingLink({ token }: { token: string }) {
         managementUrl: result.managementUrl,
       });
     } catch (requestError) {
-      const { status, code } = (requestError as PublicBookingApiError) ?? {};
+      const { status, code, retryAt } =
+        (requestError as PublicBookingApiError) ?? {};
       const requiresVerification =
         catalog.captcha.captchaProvider !== "disabled";
       const dailyLimit = status === 429 && code === "BOOKING_DAILY_LIMIT";
@@ -335,27 +391,20 @@ function PublicBookingLink({ token }: { token: string }) {
         setCaptchaAttempt((attempt) => attempt + 1);
       }
       if (status === 403 && requiresVerification) {
+        if (retryingUnconfirmed)
+          setUnconfirmedBooking({ ...submission, needsVerification: true });
         setError(t("Complete verification again to retry your booking."));
         return;
       }
       if (status === 429) {
-        const retryTime = formatRetryTime(requestError, intlLocale(locale));
-        setError(
-          dailyLimit
-            ? retryTime
-              ? t(
-                  "The daily booking limit was reached. Try again after %{time}.",
-                  { time: retryTime },
-                )
-              : t(
-                  "The daily booking limit was reached. Try again after midnight UTC.",
-                )
-            : retryTime
-              ? t("Too many booking requests. Try again after %{time}.", {
-                  time: retryTime,
-                })
-              : t("Too many booking requests. Try again shortly."),
-        );
+        setSubmissionLimit({ daily: dailyLimit, retryAt });
+        if (retryingUnconfirmed)
+          setUnconfirmedBooking({
+            ...submission,
+            needsVerification:
+              previousBookingNeedsVerification ||
+              (requiresVerification && dailyLimit),
+          });
         return;
       }
       if (status === 404 || status === 410) {
@@ -363,7 +412,11 @@ function PublicBookingLink({ token }: { token: string }) {
         reloadCatalog();
         return;
       }
-      if (outcomeUncertain) setUnconfirmedBooking(submission);
+      if (outcomeUncertain)
+        setUnconfirmedBooking({
+          ...submission,
+          needsVerification: previousBookingNeedsVerification,
+        });
       if (status === 409) {
         setSelection(undefined);
         setSlotsAttempt((attempt) => attempt + 1);
@@ -385,6 +438,26 @@ function PublicBookingLink({ token }: { token: string }) {
     }
   }
 
+  function bookingLimitMessage(limit: BookingLimit) {
+    const retryTime = formatRetryTime(
+      { status: 429, retryAt: limit.retryAt },
+      intlLocale(locale),
+    );
+    if (limit.daily)
+      return retryTime
+        ? t("The daily booking limit was reached. Try again after %{time}.", {
+            time: retryTime,
+          })
+        : t(
+            "The daily booking limit was reached. Try again after midnight UTC.",
+          );
+    return retryTime
+      ? t("Too many booking requests. Try again after %{time}.", {
+          time: retryTime,
+        })
+      : t("Too many booking requests. Try again shortly.");
+  }
+
   if (loading)
     return (
       <main className="mx-auto grid max-w-2xl gap-4 px-4 py-10" role="status">
@@ -401,13 +474,20 @@ function PublicBookingLink({ token }: { token: string }) {
             ? t(
                 "This booking link is no longer available. Ask the booking owner for a new link.",
               )
-            : t("Booking settings could not be loaded.")}
+            : catalogLoadError === "rate-limited"
+              ? bookingLimitMessage({
+                  daily: false,
+                  retryAt: readBlocked ? readRetryAt : undefined,
+                })
+              : t("Booking settings could not be loaded.")}
         </p>
-        {catalogLoadError === "retryable" && (
+        {(catalogLoadError === "retryable" ||
+          catalogLoadError === "rate-limited") && (
           <Button
             type="button"
             variant="outline"
             className="w-fit"
+            disabled={readBlocked}
             onClick={reloadCatalog}
           >
             {t("Retry")}
@@ -448,7 +528,34 @@ function PublicBookingLink({ token }: { token: string }) {
       </main>
     );
 
-  const disabledCaptcha = catalog.captcha.captchaProvider === "disabled";
+  const captcha = catalog.captcha.captchaProvider !== "disabled" && (
+    <div className="grid gap-1.5">
+      <div
+        ref={captchaElement}
+        aria-label="CAPTCHA"
+        className="min-h-16 max-w-full overflow-hidden"
+      />
+      {captchaError && (
+        <div className="grid gap-2">
+          <p role="alert" className="text-sm text-destructive">
+            {captchaError}
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="w-fit"
+            onClick={() => {
+              stepHeadingRef.current?.focus();
+              setCaptchaAttempt((attempt) => attempt + 1);
+            }}
+          >
+            {t("Retry verification")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
   const selectedProfessional = (
     catalog.fixedProfessionalId ? catalog.professionals : eligibleProfessionals
   ).find(
@@ -481,6 +588,9 @@ function PublicBookingLink({ token }: { token: string }) {
     selection.professionalId === professionalId &&
     availabilityReady,
   );
+  const visibleError = submissionLimit
+    ? bookingLimitMessage(submissionLimit)
+    : error;
   return (
     <main className="mx-auto grid max-w-3xl gap-5 px-4 py-6 md:gap-7 md:py-12">
       <header className="grid gap-3">
@@ -534,9 +644,9 @@ function PublicBookingLink({ token }: { token: string }) {
         </ol>
       </nav>
       <form className="grid gap-6" onSubmit={submit}>
-        {error && (
+        {visibleError && (
           <p role="alert" className="text-sm text-destructive">
-            {error}
+            {visibleError}
           </p>
         )}
         <fieldset disabled={busy} className="grid min-w-0 gap-6 border-0 p-0">
@@ -549,11 +659,15 @@ function PublicBookingLink({ token }: { token: string }) {
                 catalog={catalog}
                 selection={unconfirmedBooking.selection}
               />
+              {verifyPreviousBooking && captcha}
               <Button
                 type="button"
                 variant="outline"
                 className="w-fit"
-                onClick={() => void sendBooking(unconfirmedBooking)}
+                disabled={
+                  submissionBlocked || (verifyPreviousBooking && !captchaToken)
+                }
+                onClick={() => retryPreviousBooking(unconfirmedBooking)}
               >
                 {t("Retry previous booking")}
               </Button>
@@ -684,6 +798,8 @@ function PublicBookingLink({ token }: { token: string }) {
                     setSelection(next);
                   }}
                   onReadyChange={setAvailabilityReady}
+                  readRetryAt={readRetryAt}
+                  onRateLimited={rememberReadDeadline}
                   hideHeading
                   refreshKey={slotsAttempt}
                 />
@@ -760,34 +876,7 @@ function PublicBookingLink({ token }: { token: string }) {
                   />
                 </label>
               </div>
-              {!disabledCaptcha && (
-                <div className="grid gap-1.5">
-                  <div
-                    ref={captchaElement}
-                    aria-label="CAPTCHA"
-                    className="min-h-16 max-w-full overflow-hidden"
-                  />
-                  {captchaError && (
-                    <div className="grid gap-2">
-                      <p role="alert" className="text-sm text-destructive">
-                        {captchaError}
-                      </p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="w-fit"
-                        onClick={() => {
-                          stepHeadingRef.current?.focus();
-                          setCaptchaAttempt((attempt) => attempt + 1);
-                        }}
-                      >
-                        {t("Retry verification")}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              )}
+              {captcha}
               <div className="flex items-center justify-between border-t pt-5">
                 <Button
                   type="button"
@@ -801,12 +890,16 @@ function PublicBookingLink({ token }: { token: string }) {
                   type="submit"
                   className="h-11 min-w-40"
                   disabled={
-                    busy || !availabilityReady || !captchaToken || !selection
+                    busy ||
+                    submissionBlocked ||
+                    !availabilityReady ||
+                    !captchaToken ||
+                    !selection
                   }
                 >
                   {busy
                     ? t("Loading booking settings…")
-                    : error
+                    : visibleError
                       ? t("Retry booking")
                       : t("Book appointment")}
                 </Button>

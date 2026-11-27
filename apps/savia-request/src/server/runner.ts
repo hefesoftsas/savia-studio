@@ -2,7 +2,7 @@ import { lookupDaneCity } from "./dane";
 import type { Env } from "./env";
 import type { Flow, Run, Trace } from "./types";
 import { createRun, getVariables, persistRun } from "./store";
-import { scopeTenant } from "./tenant";
+import { scopeTenant, TenantPurgedError } from "./tenant";
 import { hook } from "./hooks";
 import { responsePreview } from "./response-preview";
 import { cacheRequest } from "./request-cache";
@@ -30,6 +30,25 @@ function interpolate(
     return encode(String(values[key]));
   });
 }
+const invalidDestination =
+  "URL o método inválido. Usa HTTP o HTTPS sin credenciales en la URL.";
+
+function requestDestination(template: string, values: Record<string, string>) {
+  const wholeUrl = /^\{\{[^}]+\}\}$/.test(template);
+  // A whole-URL variable already contains a URL, not a path segment.
+  const destination = URL.parse(
+    interpolate(template, values, wholeUrl ? undefined : encodeURIComponent),
+  );
+  if (
+    !destination ||
+    !["https:", "http:"].includes(destination.protocol) ||
+    destination.username ||
+    destination.password
+  )
+    throw new Error(invalidDestination);
+  return destination;
+}
+
 function requestBody(
   template: string,
   values: Record<string, string>,
@@ -79,6 +98,7 @@ export async function execute(
   mode: "mock" | "live",
   versionId: string | null,
   tenant = "",
+  requestStartedAt = Date.now(),
 ) {
   const scope = scopeTenant(tenant);
   const run: Run = {
@@ -91,7 +111,7 @@ export async function execute(
     steps: [],
     result: null,
   };
-  await createRun(env, run, scope);
+  await createRun(env, run, scope, requestStartedAt);
   const start = Date.now();
   const persist = () => persistRun(env, run, scope);
   try {
@@ -107,6 +127,7 @@ export async function execute(
         env,
         flow.steps[0]?.cache,
         scope,
+        requestStartedAt,
       );
       run.result = result;
       run.status = "success";
@@ -143,9 +164,11 @@ export async function execute(
     }
     const produced = new Set(
       flow.steps.flatMap((step) =>
-        [...step.post.matchAll(/bru\.setVar\(["']([^"']+)["']/g)].map(
-          (m) => m[1],
-        ),
+        [
+          ...`${step.pre}\n${step.post}`.matchAll(
+            /bru\.setVar\(["']([^"']+)["']/g,
+          ),
+        ].map((m) => m[1]),
       ),
     );
     const referenced = new Set(
@@ -174,30 +197,24 @@ export async function execute(
     if (missing.length && !mockProviderQuote)
       throw new Error("Completa las variables: " + missing.join(", "));
 
-    const destinations = mockProviderQuote
-      ? flow.steps.map(() => new URL("https://mock.savia.invalid"))
-      : flow.steps.map((step) => {
-          const whole = step.url.match(/^\{\{([^}]+)\}\}$/);
-          const url = new URL(
-            whole
-              ? values[whole[1]]
-              : interpolate(step.url, values, encodeURIComponent),
-          );
-          // A URL stored as a whole variable is already encoded as a URL, not a path segment.
-          return url;
-        });
-    for (let i = 0; i < destinations.length; i++)
+    // Validate the configured origins and methods before sending any requests.
+    // Hook outputs can fill paths and queries once their steps have run.
+    const initialUrlValues: Record<string, string> = Object.assign(
+      Object.create(null),
+      values,
+    );
+    for (const key of produced) initialUrlValues[key] ??= "savia-variable";
+    const origins = flow.steps.map((step) => {
       if (
-        !["https:", "http:"].includes(destinations[i].protocol) ||
-        destinations[i].username ||
-        destinations[i].password ||
         !["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].includes(
-          flow.steps[i].method,
+          step.method,
         )
       )
-        throw new Error(
-          "URL o método inválido. Usa HTTP o HTTPS sin credenciales en la URL.",
-        );
+        throw new Error(invalidDestination);
+      return mockProviderQuote
+        ? undefined
+        : requestDestination(step.url, initialUrlValues).origin;
+    });
     let latestResponse: unknown = null;
     for (let index = 0; index < flow.steps.length; index++) {
       const step = flow.steps[index];
@@ -226,6 +243,9 @@ export async function execute(
               throw new Error("Un hook no puede reemplazar secretos.");
             values[key] = value;
           }
+          const destination = requestDestination(step.url, values);
+          if (destination.origin !== origins[index])
+            throw new Error("El hook no puede cambiar el origen del request.");
           const headers = Object.fromEntries(
             Object.entries(step.headers).map(([key, value]) => [
               key,
@@ -266,7 +286,7 @@ export async function execute(
               },
             );
           } else {
-            const request = new Request(destinations[index], {
+            const request = new Request(destination, {
               method: step.method,
               headers,
               body,
@@ -294,7 +314,7 @@ export async function execute(
                 env,
                 request,
                 flow.kind === "auth" ? undefined : step.cache,
-                { tenant: scope, revision },
+                { tenant: scope, revision, requestStartedAt },
                 fetch,
               );
               const status = response.headers.get("x-savia-cache");
@@ -349,7 +369,7 @@ export async function execute(
         trace.status = "failed";
         trace.error =
           error instanceof Error &&
-          /^(Proveedor |El hook|Un hook|Falta variable|Respuesta|SAMPLE )/.test(
+          /^(Proveedor |El hook|Un hook|Falta variable|Respuesta|SAMPLE |URL o método)/.test(
             error.message,
           )
             ? error.message
@@ -387,6 +407,7 @@ export async function execute(
       };
     run.status = "success";
   } catch (error) {
+    if (error instanceof TenantPurgedError) throw error;
     run.status = "failed";
     run.error = error instanceof Error ? error.message : "Falló la ejecución.";
   }

@@ -74,9 +74,30 @@ No wildcard or automatic inheritance exists. A tenant absent from this map has n
 - **Local development:** add `PLUGIN_REGISTRY_TENANTS='{"tenant:42":{...}}'` to `infra/secrets/plugin-registry.dev.env`, then restart `pnpm dev`.
 - **Docker:** add the same environment variable to the file selected by `SAVIA_ENV_FILE`, then recreate the Savia service. Both SQLite and PostgreSQL use the same registry consumer. Tokens remain server-side.
 
-A tenant administrator opens **My plugins → Shared catalog**, selects a displayed version, and chooses **Add to workspace**. The backend verifies the pinned ZIP digest and manifest identity, revalidates the package, checks local quotas, then adds it to that tenant's local catalog. After import, **Install version** activates that exact version; the ordinary local store install button retains its latest-version behavior. Installation remains a separate deliberate action. Importing does not overwrite tenant settings or credentials. Existing-version conflicts require a new version; import does not silently replace content.
+A tenant administrator opens **My plugins → Shared catalog**, selects a
+displayed version, and chooses **Add to workspace**. The backend verifies the
+pinned ZIP digest and manifest identity, revalidates the package, checks local
+quotas, then adds it to that tenant's local catalog. Importing preserves tenant
+settings and credentials. If the workspace already has the same version with a
+different ZIP digest, the import reports a conflict and preserves the existing
+copy.
+
+After import, **Install version** verifies the selected version and ZIP digest
+against the workspace copy before activating it. If the copy changed, reload
+the page and review the version in **My plugins** before trying again.
+The ordinary local store install button continues selecting the latest version.
+
+The shared catalog restores imported and active statuses from the current
+workspace inventory when it finds the same version and ZIP digest. If an
+import or installation succeeds while refreshing the workspace list fails,
+**Refresh plugin list** retries the refresh by itself.
 
 ## Publish once and promote identical bytes
+
+Keep first-party plugin sources, release lockfiles, store ZIPs and their
+checksums in the private repository or release storage. The public repository
+contains the SDK and the source for the HTTP Echo example. Its release check
+reviews staged and locally edited copies of tracked files.
 
 Set `SAVIA_PLUGIN_REGISTRY_URL` and `SAVIA_PLUGIN_REGISTRY_TOKEN` in the publishing process environment. Use a publish-capable credential only in a trusted operator/CI job. Do not pass tokens on the command line.
 

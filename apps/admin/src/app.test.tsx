@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppServices } from "./app-services";
 import { App } from "./app";
 import { rotateSessionScope } from "./auth/session-scope";
+import { beginLogout, resumeSessionReads } from "./auth/logout-progress";
 import { createReactAdminAuthProvider } from "./auth/react-admin-auth-provider";
 import { BetterAuthOAuthSession } from "./auth/better-auth-oauth-session";
 import { OAuthCallbackError } from "./auth/auth-session";
 import { clearSharedLink, updateSharedLink } from "./pwa/share-target";
+import { ApiClientError } from "./api/api-client";
 
 type AgencyListResult = {
   data: Array<{ id: number; name: string }>;
@@ -166,6 +168,29 @@ function mockAccountRequests(actionPath: string) {
 }
 
 describe("App", () => {
+  it("waits for authentication before reading Office availability", async () => {
+    const services = createServices();
+    let finishAuth!: () => void;
+    const pendingAuth = new Promise<void>((resolve) => {
+      finishAuth = resolve;
+    });
+    vi.mocked(services.authProvider.checkAuth).mockReturnValue(pendingAuth);
+    const officeReads = () =>
+      vi
+        .mocked(services.apiClient.get)
+        .mock.calls.filter(([path]) => path === "/v1/office-settings").length;
+
+    render(<App services={services} />);
+    await waitFor(() =>
+      expect(services.authProvider.checkAuth).toHaveBeenCalled(),
+    );
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(officeReads()).toBe(0);
+
+    await act(async () => finishAuth());
+    await waitFor(() => expect(officeReads()).toBe(1), { timeout: 10000 });
+  });
+
   it("completes logout without remounting background readers during cleanup", async () => {
     const services = createServices();
     let finishCleanup!: () => void;
@@ -222,9 +247,8 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: "Abrir menú de cuenta" }),
     ).toBeDisabled();
-    // Only the existing availability reader reacts to the two invalidation events.
-    // Remounting would add another initial read and abandon the active logout hook.
-    expect(officeReads()).toBe(readsBeforeLogout + 2);
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(officeReads()).toBe(readsBeforeLogout);
     await act(async () => finishCleanup());
     await waitFor(() => expect(window.location.hash).toBe("#/login"));
     expect(
@@ -257,6 +281,7 @@ describe("App", () => {
 
   afterEach(() => {
     cleanup();
+    resumeSessionReads();
     clearSharedLink();
     vi.restoreAllMocks();
   });
@@ -744,6 +769,119 @@ describe("App", () => {
       ),
     );
     expect(window.location.pathname).toBe("/");
+  });
+
+  it("keeps the local organization selection in Bookings and handles denied access", async () => {
+    const services = createServices();
+    const get = vi.mocked(services.apiClient.get);
+    const fallback = get.getMockImplementation()!;
+    get.mockImplementation((path, options) => {
+      if (path === "/v1/tenants")
+        return Promise.resolve({
+          data: [
+            {
+              id: 42,
+              name: "Clinic fixture",
+              idSlug: "clinic-fixture",
+              kind: "commercial",
+              isActive: true,
+            },
+          ],
+        }) as ReturnType<typeof get>;
+      if (path === "/v1/tenants/42/booking")
+        return Promise.reject(new ApiClientError(403, "FORBIDDEN", "Denied"));
+      return fallback(path, options);
+    });
+    window.location.hash = "#/bookings?tab=availability&date=2026-11-25";
+    render(<App services={services} />);
+
+    const organization = await screen.findByRole("link", {
+      name: "Clinic fixture",
+    });
+    await userEvent.click(organization);
+    await waitFor(() =>
+      expect(get).toHaveBeenCalledWith("/v1/tenants/42/booking", {
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    const picker = await screen.findByRole("link", {
+      name: /Choose another organization|Elegir otra organización/,
+    });
+    expect(picker).toHaveAttribute(
+      "href",
+      "/#/bookings?tab=availability&date=2026-11-25",
+    );
+  });
+
+  it("hides the Bookings organization picker and stops its reads during logout", async () => {
+    const services = createServices();
+    const get = vi.mocked(services.apiClient.get);
+    const fallback = get.getMockImplementation()!;
+    const catalogReads = vi.fn(async () => ({
+      data: [
+        {
+          id: 42,
+          name: "Clinic fixture",
+          idSlug: "clinic-fixture",
+          kind: "commercial",
+          isActive: true,
+        },
+      ],
+    }));
+    get.mockImplementation((path, options) =>
+      path === "/v1/tenants"
+        ? (catalogReads() as ReturnType<typeof get>)
+        : fallback(path, options),
+    );
+    window.location.hash = "#/bookings?tab=reservations";
+    render(<App services={services} />);
+    await screen.findByRole("link", { name: "Clinic fixture" });
+    expect(catalogReads).toHaveBeenCalledOnce();
+
+    let finishLogout!: () => void;
+    act(() => {
+      finishLogout = beginLogout();
+    });
+    try {
+      expect(screen.queryByRole("link", { name: "Clinic fixture" })).toBeNull();
+      await act(async () => rotateSessionScope("logout"));
+      expect(catalogReads).toHaveBeenCalledOnce();
+    } finally {
+      act(() => finishLogout());
+    }
+  });
+
+  it("cancels a pending Bookings settings read when logout starts", async () => {
+    const services = createServices();
+    const get = vi.mocked(services.apiClient.get);
+    const fallback = get.getMockImplementation()!;
+    const reads: AbortSignal[] = [];
+    get.mockImplementation((path, options) => {
+      if (path !== "/v1/tenants/42/booking") return fallback(path, options);
+      const signal = options?.signal;
+      if (!signal) throw new Error("Expected a cancellable Bookings read");
+      reads.push(signal);
+      return new Promise<never>((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
+      );
+    });
+    window.location.hash = "#/bookings?tenantId=42&tab=reservations";
+    render(<App services={services} />);
+    await waitFor(() => expect(reads).toHaveLength(1));
+
+    let finishLogout!: () => void;
+    act(() => {
+      finishLogout = beginLogout();
+    });
+    try {
+      expect(reads[0]?.aborted).toBe(true);
+      await act(async () => rotateSessionScope("logout"));
+      expect(reads).toHaveLength(1);
+    } finally {
+      act(() => finishLogout());
+    }
   });
 
   it("resumes the shared-link review after the OAuth callback", async () => {

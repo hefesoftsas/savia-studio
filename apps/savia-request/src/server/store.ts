@@ -4,8 +4,9 @@ import type { Env } from "./env";
 import type { Flow, Run, Variable } from "./types";
 import seed from "./seed.json";
 import catalog from "./catalog.json";
-import { isPlatformTenant, scopeTenant } from "./tenant";
+import { isPlatformTenant, scopeTenant, TenantPurgedError } from "./tenant";
 import { isBundleFlow } from "./provider-profile";
+import { prepareTenantCachePurge, tenantPurgeKey } from "./request-cache";
 
 const exampleRequestBundleBundleId = "example-request-bundle";
 const exampleRequestBundleBundleVersion = "1.1.0";
@@ -1445,7 +1446,8 @@ export async function getVersionDefinition(
 export async function createRun(
   env: Env,
   run: Run,
-  tenant = "",
+  tenant: string,
+  requestStartedAt: number,
 ): Promise<void> {
   const scope = scopeTenant(tenant);
   if (isPlatformTenant(scope)) {
@@ -1464,8 +1466,12 @@ export async function createRun(
       .run();
     return;
   }
-  await env.DB.prepare(
-    "INSERT INTO tenant_flow_runs(id,tenant_id,flow_id,version_id,mode,status,created_at,summary) VALUES(?,?,?,?,?,?,?,?)",
+  const created = await env.DB.prepare(
+    `INSERT INTO tenant_flow_runs(id,tenant_id,flow_id,version_id,mode,status,created_at,summary)
+     SELECT ?,?,?,?,?,?,?,?
+     WHERE NOT EXISTS (
+       SELECT 1 FROM savia_request_cache WHERE cache_key=? AND created_at>=?
+     )`,
   )
     .bind(
       run.id,
@@ -1476,8 +1482,11 @@ export async function createRun(
       run.status,
       run.createdAt,
       JSON.stringify(run),
+      tenantPurgeKey(scope),
+      new Date(requestStartedAt).toISOString(),
     )
     .run();
+  if (created.meta.changes === 0) throw new TenantPurgedError();
 }
 
 export async function persistRun(
@@ -1492,11 +1501,13 @@ export async function persistRun(
       .run();
     return;
   }
-  await env.DB.prepare(
+  const updated = await env.DB.prepare(
     "UPDATE tenant_flow_runs SET status=?,summary=? WHERE tenant_id=? AND id=?",
   )
     .bind(run.status, JSON.stringify(run), scope, run.id)
     .run();
+  // A tenant purge removes the run receipt along with the tenant's history.
+  if (updated.meta.changes === 0) throw new TenantPurgedError();
 }
 
 export async function listRuns(
@@ -1554,20 +1565,23 @@ export async function purgeTenant(
   const scope = scopeTenant(tenant);
   if (isPlatformTenant(scope))
     throw new Error("El catálogo de plataforma no se puede purgar.");
-  const purged: Record<string, number> = {};
   const tables: Array<[string, string]> = [
     ["variables", "DELETE FROM tenant_flow_variables WHERE tenant_id=?"],
     ["versions", "DELETE FROM tenant_flow_versions WHERE tenant_id=?"],
     ["runs", "DELETE FROM tenant_flow_runs WHERE tenant_id=?"],
     ["folders", "DELETE FROM tenant_folders WHERE tenant_id=?"],
     ["bundles", "DELETE FROM tenant_bundles WHERE tenant_id=?"],
+    ["bundleFlowStates", "DELETE FROM bundle_flow_state WHERE scope=?"],
     ["flows", "DELETE FROM tenant_flows WHERE tenant_id=?"],
   ];
-  for (const [key, sql] of tables) {
-    const result = await env.DB.prepare(sql).bind(scope).run();
-    purged[key] = result.meta?.changes ?? 0;
-  }
-  return purged;
+  const results = await env.DB.batch([
+    ...tables.map(([, sql]) => env.DB.prepare(sql).bind(scope)),
+    ...prepareTenantCachePurge(env.DB, scope),
+  ]);
+  const purged = Object.fromEntries(
+    tables.map(([key], index) => [key, results[index].meta?.changes ?? 0]),
+  );
+  return { ...purged, cache: results.at(-1)?.meta?.changes ?? 0 };
 }
 
 export type AuditAction =

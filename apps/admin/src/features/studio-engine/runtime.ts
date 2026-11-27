@@ -9,6 +9,7 @@ export type StudioRuntime = {
   localWorkspace?: LocalWorkspace;
   apiBasePath?: string;
   tenantId?: number;
+  sessionGeneration?: number;
   businessSetupEnabled?: boolean;
   transport?: StudioTransport;
   /** Authenticated backend transport for plugins requiring committed records. */

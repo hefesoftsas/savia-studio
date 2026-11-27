@@ -1,9 +1,18 @@
 import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
+import {
+  getSessionReadsPaused,
+  useSessionReadsPaused,
+} from "@/auth/logout-progress";
+import {
+  getSessionGeneration,
+  useSessionGeneration,
+} from "@/auth/session-scope";
 import { useAppLocale } from "@/i18n/core";
 import { localizedExtensionObjectLabel } from "@/features/studio-engine/extension-screens";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useAppServices } from "@/features/assistant/assistant-context";
+import { isReadAccessDenied } from "@/queries/read-state";
 import {
   STUDIO_TENANTS_CHANGED,
   listStudioTenants,
@@ -24,142 +33,198 @@ export function useStudioSidebarNavigation(enabled: boolean): {
   children: StudioSidebarChild[];
 } {
   const services = useAppServices();
+  const readsPaused = useSessionReadsPaused();
+  const sessionGeneration = useSessionGeneration();
+  const canLoad = enabled && !readsPaused;
   const locale = useAppLocale();
   const location = useLocation();
-  const current = parseStudioSearch(location.search);
-  const [tenants, setTenants] = useState<StudioTenant[]>([]);
+  const { object: activeObject, tenantId: requestedTenantId } =
+    parseStudioSearch(location.search);
+  const catalogScope = useMemo(
+    () => (canLoad ? { services, sessionGeneration } : undefined),
+    [canLoad, services, sessionGeneration],
+  );
+  const [catalog, setCatalog] = useState<{
+    scope: NonNullable<typeof catalogScope>;
+    tenants: StudioTenant[];
+    revision: number;
+  }>();
+  const currentCatalog = catalog?.scope === catalogScope ? catalog : undefined;
+  const tenants = currentCatalog?.tenants ?? [];
+  const catalogRevision = currentCatalog?.revision ?? 0;
+  const tenant = selectStudioTenant(tenants, requestedTenantId);
+  const tenantId = tenant?.tenantId;
+  const apiBasePath = tenant?.apiBasePath;
+  const tenantScope = useMemo(
+    () =>
+      catalogScope && tenantId !== undefined && apiBasePath
+        ? { ...catalogScope, tenantId, apiBasePath }
+        : undefined,
+    [catalogScope, tenantId, apiBasePath],
+  );
   const [catalogVersion, setCatalogVersion] = useState(0);
-  const [snapshot, setSnapshot] = useState<{
-    tenantId: number;
-    objects: StudioNavigationObject[];
-  }>();
-  const [hubspotCount, setHubspotCount] = useState<{
-    tenantId: number;
-    name: string;
-    total: number;
-  }>();
+  type TenantScope = NonNullable<typeof tenantScope>;
+  const [snapshot, setSnapshot] = useState<
+    { scope: TenantScope } & (
+      | {
+          status: "ready";
+          objects: StudioNavigationObject[];
+          hubspotCount?: { name: string; total: number };
+        }
+      | { status: "denied" }
+    )
+  >();
+  const metadataRead = useRef<{
+    scope: TenantScope;
+    controller: AbortController;
+  }>(undefined);
   useEffect(() => {
     const refresh = () => setCatalogVersion((value) => value + 1);
     window.addEventListener(STUDIO_TENANTS_CHANGED, refresh);
     return () => window.removeEventListener(STUDIO_TENANTS_CHANGED, refresh);
   }, []);
   useEffect(() => {
-    if (!enabled) return;
+    if (!catalogScope) return;
     let active = true;
-    void listStudioTenants(services).then(
+    void listStudioTenants(catalogScope.services).then(
       (result) => {
-        if (active) setTenants(result);
+        if (active)
+          setCatalog((previous) => ({
+            scope: catalogScope,
+            tenants: result,
+            revision:
+              previous?.scope === catalogScope ? previous.revision + 1 : 0,
+          }));
       },
-      () => {
-        if (active) setTenants([]);
+      (error: unknown) => {
+        if (active && isReadAccessDenied(error))
+          setCatalog({ scope: catalogScope, tenants: [], revision: 0 });
       },
     );
     return () => {
       active = false;
     };
-  }, [enabled, services, catalogVersion]);
-  const tenant = selectStudioTenant(tenants, current.tenantId);
-  const [remoteRevision, setRemoteRevision] = useState(0);
+  }, [catalogScope, catalogVersion]);
+  const [remoteRefresh, setRemoteRefresh] = useState<{
+    scope: TenantScope;
+    revision: number;
+  }>();
+  const remoteRevision =
+    remoteRefresh?.scope === tenantScope ? (remoteRefresh?.revision ?? 0) : 0;
   useRealtimeRefresh({
     topics: ["studio", "records"],
-    tenantId: tenant?.tenantId,
-    enabled: enabled && !!tenant,
+    tenantId,
+    enabled: Boolean(tenantScope),
+    refreshScope: tenantScope,
     refreshOnInitialConnect: Boolean(services.localData),
-    refresh: () => setRemoteRevision((value) => value + 1),
-  });
-  useRealtimeRefresh({
-    topics: ["account"],
-    enabled,
-    refresh: () => setCatalogVersion((value) => value + 1),
+    refresh: () => {
+      if (!tenantScope) return;
+      setRemoteRefresh((previous) => ({
+        scope: tenantScope,
+        revision: previous?.scope === tenantScope ? previous.revision + 1 : 1,
+      }));
+    },
   });
   useEffect(() => {
-    if (!enabled || !tenant) return;
-    let active = true;
+    if (!tenantScope) return;
+    const { services, apiBasePath } = tenantScope;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const request = { scope: tenantScope, controller };
+    metadataRead.current = request;
     const load = () =>
       services.apiClient.get<{ data: unknown[] }>(
-        `${tenant.apiBasePath}/api/objects`,
+        `${apiBasePath}/api/objects`,
+        { signal },
       );
     void (
-      services.localData && remoteRevision === 0
-        ? services.localData.cachedMetadata(
-            `navigation:${tenant.apiBasePath}`,
-            load,
-          )
+      services.localData && remoteRevision === 0 && catalogRevision === 0
+        ? services.localData.cachedMetadata(`navigation:${apiBasePath}`, load)
         : load()
     )
       .then((response) => {
-        if (active)
-          setSnapshot({
-            tenantId: tenant.tenantId,
-            objects: response.data
-              .map((row) =>
-                summarizeStudioObject(
-                  (row ?? {}) as Parameters<typeof summarizeStudioObject>[0],
-                ),
-              )
-              .filter((row): row is StudioNavigationObject => Boolean(row)),
-          });
+        if (signal.aborted) return;
+        const objects = response.data
+          .map((row) =>
+            summarizeStudioObject(
+              (row ?? {}) as Parameters<typeof summarizeStudioObject>[0],
+            ),
+          )
+          .filter((row): row is StudioNavigationObject => Boolean(row));
+        setSnapshot((previous) => ({
+          scope: tenantScope,
+          status: "ready",
+          objects,
+          hubspotCount:
+            previous?.scope === tenantScope && previous.status === "ready"
+              ? previous.hubspotCount
+              : undefined,
+        }));
       })
-      .catch(() => {
-        if (active) setSnapshot({ tenantId: tenant.tenantId, objects: [] });
+      .catch((error: unknown) => {
+        if (!signal.aborted && isReadAccessDenied(error))
+          setSnapshot({ scope: tenantScope, status: "denied" });
       });
     return () => {
-      active = false;
+      controller.abort();
+      if (metadataRead.current === request) metadataRead.current = undefined;
     };
-  }, [
-    tenant?.tenantId,
-    tenant?.apiBasePath,
-    enabled,
-    services,
-    remoteRevision,
-  ]);
+  }, [tenantScope, remoteRevision, catalogRevision]);
   useEffect(() => {
+    if (!tenantScope) return;
+    const scope = tenantScope;
     function onMessage(event: MessageEvent) {
       if (
         event.origin !== window.location.origin ||
-        !isStudioNavigationMessage(event.data)
+        !isStudioNavigationMessage(event.data) ||
+        getSessionReadsPaused() ||
+        getSessionGeneration() !== scope.sessionGeneration ||
+        event.data.sessionGeneration !== scope.sessionGeneration ||
+        event.data.tenantId !== scope.tenantId
       )
         return;
-      if (
-        !tenant ||
-        (event.data as { tenantId?: number }).tenantId !== tenant.tenantId
-      )
+      if (event.data.accessDenied === true) {
+        if (metadataRead.current?.scope === scope)
+          metadataRead.current.controller.abort();
+        setSnapshot({ scope, status: "denied" });
         return;
-      setSnapshot({
-        tenantId: tenant.tenantId,
-        objects: event.data.objects
-          .map((row) => summarizeStudioObject(row))
-          .filter((row): row is StudioNavigationObject => Boolean(row)),
-      });
+      }
+      const objects = event.data.objects
+        .map((row) => summarizeStudioObject(row))
+        .filter((row): row is StudioNavigationObject => Boolean(row));
       const count = event.data.hubspotCount;
-      setHubspotCount(
+      const hubspotCount =
         count &&
-          typeof count.name === "string" &&
-          Number.isSafeInteger(count.total) &&
-          count.total >= 0
-          ? { tenantId: tenant.tenantId, ...count }
-          : undefined,
+        typeof count.name === "string" &&
+        Number.isSafeInteger(count.total) &&
+        count.total >= 0
+          ? count
+          : undefined;
+      setSnapshot((previous) =>
+        previous?.scope === scope && previous.status === "denied"
+          ? previous
+          : { scope, status: "ready", objects, hubspotCount },
       );
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [tenant?.tenantId]);
+  }, [tenantScope]);
   const children = useMemo(() => {
-    if (!enabled) return [];
-    const objects =
-      snapshot?.tenantId === tenant?.tenantId ? (snapshot?.objects ?? []) : [];
+    if (!canLoad) return [];
+    const current = snapshot?.scope === tenantScope ? snapshot : undefined;
+    const objects = current?.status === "ready" ? current.objects : [];
+    const hubspotCount =
+      current?.status === "ready" ? current.hubspotCount : undefined;
     return studioSidebarChildren(
       objects.map((object) => ({
         ...object,
-        ...(object.hubspot &&
-        hubspotCount?.tenantId === tenant?.tenantId &&
-        hubspotCount?.name === object.name
+        ...(object.hubspot && hubspotCount?.name === object.name
           ? { count: hubspotCount.total }
           : {}),
         label: localizedExtensionObjectLabel(object.name, object.label, locale),
       })),
-      tenant?.tenantId,
-      current.object,
+      tenantId,
+      tenantScope && current?.status !== "denied" ? activeObject : undefined,
     ).map((item) =>
       item.id === "studio:admin"
         ? {
@@ -173,13 +238,6 @@ export function useStudioSidebarNavigation(enabled: boolean): {
           }
         : item,
     );
-  }, [
-    enabled,
-    snapshot,
-    hubspotCount,
-    tenant?.tenantId,
-    current.object,
-    locale,
-  ]);
-  return { tenantId: tenant?.tenantId, children };
+  }, [canLoad, snapshot, tenantId, tenantScope, activeObject, locale]);
+  return { tenantId, children };
 }

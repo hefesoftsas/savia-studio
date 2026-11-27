@@ -199,18 +199,35 @@ if (
     ],
     { cwd: repository, stdio: "inherit", detached: true },
   );
+  let killTimer;
+  function signalRuntime(signal) {
+    if (!child.pid) return false;
+    try {
+      return process.kill(-child.pid, signal);
+    } catch (error) {
+      if (error.code !== "ESRCH") {
+        console.error("Could not stop the local API runtime.");
+        process.exitCode ||= 1;
+      }
+      return false;
+    }
+  }
+  function stopRuntime(signal) {
+    if (killTimer || !signalRuntime(signal)) return;
+    // A wrapper can exit while a descendant still holds the API port.
+    killTimer = setTimeout(() => signalRuntime("SIGKILL"), 1000);
+  }
   for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"])
-    process.on(signal, () => {
-      try {
-        // The detached runtime misses the terminal hangup. Ask it to stop.
-        process.kill(-child.pid, signal === "SIGHUP" ? "SIGTERM" : signal);
-      } catch {}
-    });
+    process.on(signal, () =>
+      stopRuntime(signal === "SIGHUP" ? "SIGTERM" : signal),
+    );
   child.on("error", () => {
     console.error("Could not start the local API runtime.");
     process.exitCode = 1;
   });
   child.on("exit", (code) => {
     process.exitCode = code ?? 1;
+    if (killTimer && !signalRuntime(0)) clearTimeout(killTimer);
+    else stopRuntime("SIGTERM");
   });
 }

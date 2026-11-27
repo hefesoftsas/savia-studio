@@ -16,6 +16,10 @@ into `react-vendor` or `ui-vendor`. The compact brand factory belongs to the sha
 icons chunk explicitly so the extension host cannot absorb it into its much larger
 manually selected chunk.
 
+The sidebar renders built-in icons directly. A configured Lucide icon shows the
+default file icon while fetching its catalog and icon module. The same fallback
+stays visible when an icon name is missing or the modules are unavailable.
+
 The gateway serves canonical asset URLs. Cloudflare negotiates transport
 compression; it does not use the former manually generated `.gz` and `.br`
 copies. Removing these unused copies reduces artifact size without changing

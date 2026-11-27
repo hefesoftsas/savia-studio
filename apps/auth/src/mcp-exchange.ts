@@ -1,5 +1,8 @@
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from "jose";
-import type { OAuthRuntime } from "./oauth";
+import {
+  SAVIA_ACCESS_TOKEN_SESSION_CREATED_AT_CLAIM,
+  type OAuthRuntime,
+} from "./oauth";
 
 type JwtService = {
   api: {
@@ -60,6 +63,7 @@ export async function exchangeMcpToken(
     );
   const now = Math.floor(Date.now() / 1000);
   const exp = Math.min(claims.exp!, now + 120);
+  const sessionCreatedAt = claims[SAVIA_ACCESS_TOKEN_SESSION_CREATED_AT_CLAIM];
   const { token } = await auth.api.signJWT({
     body: {
       payload: {
@@ -78,6 +82,11 @@ export async function exchangeMcpToken(
             claims[prefix + name],
           ]),
         ),
+        ...(sessionCreatedAt === undefined
+          ? {}
+          : {
+              [SAVIA_ACCESS_TOKEN_SESSION_CREATED_AT_CLAIM]: sessionCreatedAt,
+            }),
       },
     },
   });

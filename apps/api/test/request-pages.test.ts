@@ -32,7 +32,10 @@ const document = {
                 properties: {
                   input: {
                     type: "object",
-                    properties: { plate: { type: "string", title: "Placa" } },
+                    properties: {
+                      plate: { type: "string", title: "Placa" },
+                      reference: { type: "string", title: "Reference" },
+                    },
                   },
                 },
               },
@@ -87,7 +90,7 @@ const input = () => ({
   pageName: "generated",
   actionId: "test-request",
   mode: "mock",
-  values: { plate: "TESTCAR" },
+  values: { plate: "TESTCAR", reference: "TEST" },
 });
 const post = (app: ReturnType<typeof appFor>, body: unknown) =>
   app.request("/v1/request-pages/runs", {
@@ -167,16 +170,62 @@ describe("generated request pages", () => {
       provider.mock.calls.filter(([r]) => r.method === "POST"),
     ).toHaveLength(1);
     expect(
-      (await post(app, { ...body, values: { plate: "CHANGED" } })).status,
+      (
+        await post(app, {
+          ...body,
+          values: { ...body.values, plate: "CHANGED" },
+        })
+      ).status,
     ).toBe(409);
   });
+  it("reuses a saved execution when the same values arrive in another key order", async () => {
+    const app = appFor();
+    const body = input();
+    provider.mockClear();
+    const created = await post(app, body);
+    expect(created.status, await created.text()).toBe(200);
+    const replay = await post(app, {
+      ...body,
+      values: { reference: "TEST", plate: "TESTCAR" },
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      id: body.id,
+      status: "complete",
+    });
+    expect(
+      provider.mock.calls.filter(([request]) => request.method === "POST"),
+    ).toHaveLength(1);
+  });
+
+  it("reuses one execution for simultaneous submissions with reordered values", async () => {
+    const app = appFor();
+    const body = input();
+    provider.mockClear();
+    const responses = await Promise.all([
+      post(app, body),
+      post(app, { ...body, values: { reference: "TEST", plate: "TESTCAR" } }),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    for (const response of responses)
+      expect(await response.json()).toMatchObject({ id: body.id });
+    expect(
+      provider.mock.calls.filter(([request]) => request.method === "POST"),
+    ).toHaveLength(1);
+  });
+
   it("rejects undeclared actions and invalid forms before contacting providers", async () => {
     provider.mockClear();
     expect(
       (await post(appFor(), { ...input(), actionId: "arbitrary-flow" })).status,
     ).toBe(404);
     expect(
-      (await post(appFor(), { ...input(), values: { plate: "" } })).status,
+      (
+        await post(appFor(), {
+          ...input(),
+          values: { plate: "", reference: "TEST" },
+        })
+      ).status,
     ).toBe(400);
     expect(
       provider.mock.calls.filter(([r]) => r.method === "POST"),
@@ -204,9 +253,10 @@ describe("generated request pages", () => {
         provider.mockClear();
         const response = await post(appFor(), {
           ...input(),
-          values: { plate: '{"year":"invalid"}' },
+          values: { plate: '{"year":"invalid"}', reference: "TEST" },
         });
-        expect(response.status, await response.text()).toBe(400);
+        expect(response.status).toBe(400);
+        expect(await response.text()).toContain("contrato vigente de plate");
         expect(
           provider.mock.calls.filter(([r]) => r.method === "POST"),
         ).toHaveLength(0);

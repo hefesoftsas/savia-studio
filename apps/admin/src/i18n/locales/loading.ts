@@ -12,5 +12,10 @@ export const loadingMessages = {
     "Você pode tentar novamente ou entrar outra vez.",
   ],
   retry: ["Reintentar", "Retry", "Tentar novamente"],
+  sessionExpired: [
+    "Tu sesión ha caducado.",
+    "Your session has expired.",
+    "Sua sessão expirou.",
+  ],
   signInAgain: ["Volver a iniciar sesión", "Sign in again", "Entrar novamente"],
 } as const satisfies MessageCatalog;

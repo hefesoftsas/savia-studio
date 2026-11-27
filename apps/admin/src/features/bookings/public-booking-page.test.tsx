@@ -98,6 +98,52 @@ it("retries a temporarily unavailable booking link in place", async () => {
   expect(catalogReads).toBe(2);
 });
 
+it.each([false, true])("honors Retry-After (stalled: %s)", async (stalled) => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+  const load = vi.fn(async (input: string) => {
+    if (input.includes("/availability?")) return availabilityResponse();
+    return Response.json({
+      data: { ...catalog, captcha: { captchaProvider: "disabled" } },
+    });
+  });
+  const limited = new Response(null, {
+    status: 429,
+    headers: { "Retry-After": "30" },
+  });
+  if (stalled) {
+    vi.spyOn(limited, "json").mockImplementation(() => new Promise(() => {}));
+  }
+  load.mockResolvedValueOnce(limited);
+  vi.stubGlobal("fetch", load);
+
+  await act(async () => {
+    mountPage();
+  });
+  const elapsed = stalled ? REQUEST_TIMEOUT_MS : 0;
+  await act(() => vi.advanceTimersByTimeAsync(elapsed));
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Too many booking requests. Try again after",
+  );
+  const retry = screen.getByRole("button", { name: "Retry" });
+  expect(retry).toBeDisabled();
+  act(() => vi.advanceTimersByTime(29_999 - elapsed));
+  fireEvent.click(retry);
+  expect(load).toHaveBeenCalledTimes(1);
+  act(() => vi.advanceTimersByTime(1));
+  expect(retry).toBeEnabled();
+  expect(load).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    fireEvent.click(retry);
+  });
+  expect(screen.getByRole("button", { name: "9:00 AM" })).toBeEnabled();
+  expect(load.mock.calls.map(([path]) => path)).toEqual([
+    `/api/public/bookings/${token}`,
+    `/api/public/bookings/${token}`,
+    expect.stringContaining("/availability?"),
+  ]);
+});
+
 it.each(["headers", "body"])(
   "retries the booking link after a timeout waiting for %s",
   async (stage) => {
@@ -485,46 +531,97 @@ it.each(["unavailable", "updated"])(
   },
 );
 
-it("shows when the daily booking limit resets without clearing contact details", async () => {
-  vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
-  const retryAt = new Date("2026-10-04T00:00:00Z");
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
-      const path = new URL(String(input), "https://savia.test").pathname;
-      if (path.endsWith("/availability")) return availabilityResponse();
-      if (path.endsWith("/reservations"))
-        return Response.json(
-          { error: { code: "BOOKING_DAILY_LIMIT" } },
-          { status: 429, headers: { "Retry-After": retryAt.toUTCString() } },
-        );
-      return Response.json({
-        data: { ...catalog, captcha: { captchaProvider: "disabled" } },
-      });
-    }),
-  );
-  mountPage();
-  await chooseAvailability();
-  fireEvent.change(screen.getByLabelText("Your name"), {
-    target: { value: "Casey" },
-  });
-  fireEvent.change(screen.getByLabelText("Email"), {
-    target: { value: "casey@example.test" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Book appointment" }));
-  const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("The daily booking limit was reached.");
-  expect(alert).toHaveTextContent(
-    new Intl.DateTimeFormat("en-US", {
-      dateStyle: "short",
-      timeStyle: "medium",
-    }).format(retryAt),
-  );
-  expect(screen.getByLabelText("Email")).toHaveValue("casey@example.test");
-});
+it.each([
+  {
+    code: "BOOKING_DAILY_LIMIT",
+    delay: 43_200_000,
+    message: "The daily booking limit was reached.",
+  },
+  {
+    code: "BOOKING_RATE_LIMIT",
+    delay: 30_000,
+    message: "Too many booking requests.",
+  },
+])(
+  "keeps the booking pending until the $code deadline",
+  async ({ code, delay, message }) => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+    const retryAt = new Date(Date.now() + delay);
+    const posts: Array<{ key: string | null; body: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input), "https://savia.test").pathname;
+        if (path.endsWith("/availability")) return availabilityResponse();
+        if (path.endsWith("/reservations")) {
+          posts.push({
+            key: new Headers(init?.headers).get("Idempotency-Key"),
+            body: String(init?.body),
+          });
+          if (posts.length === 1)
+            return Response.json(
+              { error: { code } },
+              {
+                status: 429,
+                headers: { "Retry-After": retryAt.toUTCString() },
+              },
+            );
+          return Response.json({
+            data: {
+              reservation: { ...slot, status: "confirmed" },
+              managementUrl: "https://savia.test/manage/private-token",
+            },
+          });
+        }
+        return Response.json({
+          data: { ...catalog, captcha: { captchaProvider: "disabled" } },
+        });
+      }),
+    );
+    await act(async () => {
+      mountPage();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "9:00 AM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("Your name"), {
+      target: { value: "Casey" },
+    });
+    fireEvent.change(screen.getByLabelText("Email"), {
+      target: { value: "casey@example.test" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Book appointment" }));
+    });
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(message);
+    expect(alert).toHaveTextContent(
+      new Intl.DateTimeFormat("en-US", {
+        dateStyle: "short",
+        timeStyle: "medium",
+      }).format(retryAt),
+    );
+    expect(screen.getByLabelText("Email")).toHaveValue("casey@example.test");
+    const retry = screen.getByRole("button", { name: "Retry booking" });
+    expect(retry).toBeDisabled();
+    act(() => vi.advanceTimersByTime(delay - 1));
+    fireEvent.submit(retry.closest("form")!);
+    expect(posts).toHaveLength(1);
+    act(() => vi.advanceTimersByTime(1));
+    expect(retry).toBeEnabled();
+    expect(posts).toHaveLength(1);
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+    expect(
+      screen.getByRole("heading", { name: "Appointment confirmed" }),
+    ).toBeVisible();
+    expect(posts).toHaveLength(2);
+    expect(posts[1]).toEqual(posts[0]);
+  },
+);
 
-it("retrieves the original reservation after going back to an occupied time", async () => {
+it("recovers the original reservation after a rate-limited retry from the calendar", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
   const posts: Array<{ key: string | null; body: string }> = [];
@@ -543,6 +640,11 @@ it("retrieves the original reservation after going back to an occupied time", as
           body: String(init?.body),
         });
         if (posts.length === 1) return new Response(null, { status: 503 });
+        if (posts.length === 2)
+          return new Response(null, {
+            status: 429,
+            headers: { "Retry-After": "30" },
+          });
         return Response.json({
           data: {
             reservation: { ...slot, status: "confirmed" },
@@ -569,14 +671,188 @@ it("retrieves the original reservation after going back to an occupied time", as
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
   await screen.findByText("No availability in this month.");
   expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+  vi.useRealTimers();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+  const retry = screen.getByRole("button", { name: "Retry previous booking" });
+  await act(async () => {
+    fireEvent.click(retry);
+  });
+  expect(
+    screen.getByRole("button", { name: "Retry previous booking" }),
+  ).toBeDisabled();
+  act(() => vi.advanceTimersByTime(30_000));
+  expect(posts).toHaveLength(2);
+  await act(async () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry previous booking" }),
+    );
+  });
+  expect(
+    screen.getByRole("heading", { name: "Appointment confirmed" }),
+  ).toBeVisible();
+  expect(posts).toEqual([posts[0], posts[0], posts[0]]);
+});
+
+it("renews verification for the original request when retrying from a calendar with no slots", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+  const proofs: Array<(proof: string) => void> = [];
+  window.turnstile = {
+    render: vi.fn((_element, options) => {
+      proofs.push(options.callback);
+      return `widget-${proofs.length}`;
+    }),
+    remove: vi.fn(),
+    reset: vi.fn(),
+  };
+  const posts: Array<{ key: string | null; body: Record<string, unknown> }> =
+    [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), "https://savia.test").pathname;
+      if (path.endsWith("/availability")) {
+        return posts.length
+          ? Response.json({ data: { days: [] } })
+          : availabilityResponse();
+      }
+      if (path.endsWith("/reservations")) {
+        posts.push({
+          key: new Headers(init?.headers).get("Idempotency-Key"),
+          body: JSON.parse(String(init?.body)),
+        });
+        if (posts.length === 1) return new Response(null, { status: 503 });
+        if (posts.length === 2) return new Response(null, { status: 403 });
+        return Response.json({
+          data: {
+            reservation: { ...slot, status: "confirmed" },
+            managementUrl: "https://savia.test/manage/private-token",
+          },
+        });
+      }
+      return Response.json({
+        data: {
+          ...catalog,
+          captcha: { captchaProvider: "turnstile", siteKey: "site-key" },
+        },
+      });
+    }),
+  );
+
+  mountPage();
+  await chooseAvailability();
+  fireEvent.change(screen.getByLabelText("Your name"), {
+    target: { value: "Casey" },
+  });
+  fireEvent.change(screen.getByLabelText("Email"), {
+    target: { value: "casey@example.test" },
+  });
+  await waitFor(() => expect(proofs).toHaveLength(1));
+  act(() => proofs[0]("first-proof"));
+  fireEvent.click(screen.getByRole("button", { name: "Book appointment" }));
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await screen.findByText("No availability in this month.");
   fireEvent.click(
     screen.getByRole("button", { name: "Retry previous booking" }),
   );
-  expect(
-    await screen.findByRole("heading", { name: "Appointment confirmed" }),
-  ).toBeVisible();
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Complete verification again to retry your booking.",
+  );
+  const retry = screen.getByRole("button", { name: "Retry previous booking" });
+  expect(retry).toBeDisabled();
+  const previousWidgetCount = proofs.length;
+  expect(previousWidgetCount).toBeGreaterThan(1);
+  fireEvent.click(retry);
   expect(posts).toHaveLength(2);
-  expect(posts[1]).toEqual(posts[0]);
+  act(() => proofs.at(-1)!("fresh-proof"));
+  fireEvent.click(retry);
+
+  expect(await screen.findByText("Appointment confirmed")).toBeVisible();
+  expect(posts[0].key).toBeTruthy();
+  expect(posts).toEqual([
+    posts[0],
+    posts[0],
+    {
+      key: posts[0].key,
+      body: { ...posts[0].body, captchaToken: "fresh-proof" },
+    },
+  ]);
+});
+
+it("defers reloading stale booking options while the calendar read limit is active", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+  let attempts = 0;
+  let catalogReads = 0;
+  let respondToAvailability!: (response: Response) => void;
+  let respondToRetry!: (response: Response) => void;
+  const pendingAvailability = new Promise<Response>((resolve) => {
+    respondToAvailability = resolve;
+  });
+  const pendingRetry = new Promise<Response>((resolve) => {
+    respondToRetry = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string) => {
+      const path = new URL(input, "https://savia.test").pathname;
+      if (path.endsWith("/availability"))
+        return attempts === 1 ? pendingAvailability : availabilityResponse();
+      if (path.endsWith("/reservations"))
+        return ++attempts === 1
+          ? new Response(null, { status: 503 })
+          : pendingRetry;
+      catalogReads += 1;
+      return Response.json({
+        data: { ...catalog, captcha: { captchaProvider: "disabled" } },
+      });
+    }),
+  );
+
+  await act(async () => {
+    mountPage();
+  });
+  fireEvent.click(screen.getByRole("button", { name: "9:00 AM" }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  fireEvent.change(screen.getByLabelText("Your name"), {
+    target: { value: "Casey" },
+  });
+  fireEvent.change(screen.getByLabelText("Email"), {
+    target: { value: "casey@example.test" },
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Book appointment" }));
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Retry previous booking" }),
+  );
+  await act(async () => {
+    respondToAvailability(
+      new Response(null, { status: 429, headers: { "Retry-After": "30" } }),
+    );
+  });
+  await act(async () => {
+    respondToRetry(new Response(null, { status: 404 }));
+  });
+  expect(catalogReads).toBe(1);
+  const retry = screen.getByRole("button", { name: "Retry" });
+  expect(retry).toBeDisabled();
+  act(() => vi.advanceTimersByTime(30_000));
+  expect(retry).toBeEnabled();
+  expect(catalogReads).toBe(1);
+  await act(async () => {
+    fireEvent.click(retry);
+  });
+  fireEvent.click(screen.getByRole("button", { name: "9:00 AM" }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  expect(screen.getByLabelText("Your name")).toHaveValue("Casey");
+  expect(screen.getByLabelText("Email")).toHaveValue("casey@example.test");
+  expect(catalogReads).toBe(2);
+  expect(attempts).toBe(2);
 });
 
 it("shows no confirmation from a booking request made on a different public link", async () => {

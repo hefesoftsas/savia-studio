@@ -39,6 +39,149 @@ afterEach(() => {
   setStudioRuntime({ embedded: false });
 });
 describe("generated request page runtime", () => {
+  it.each([
+    { interrupted: true, error: "Quote response was lost" },
+    {
+      interrupted: false,
+      error: "La respuesta no confirmó la ejecución solicitada.",
+    },
+  ])(
+    "recovers a committed quote after $error without repeating the provider call",
+    async ({ interrupted, error }) => {
+      const user = userEvent.setup();
+      const runs = new Map<string, Record<string, unknown>>();
+      const submitted: string[] = [];
+      const transport = vi.fn(async (_path: string, init?: RequestInit) => {
+        if (init?.method !== "POST") {
+          if (submitted.length === 1) throw new Error("History is offline");
+          return Response.json({ data: [...runs.values()].reverse() });
+        }
+        const body = JSON.parse(String(init.body));
+        submitted.push(body.id);
+        if (!runs.has(body.id))
+          runs.set(body.id, {
+            ...body,
+            label: "Cotización guardada",
+            status: "complete",
+            result: null,
+            error: null,
+            createdAt: new Date().toISOString(),
+          });
+        if (submitted.length === 1) {
+          if (interrupted) throw new Error(error);
+          return Response.json({ id: "unrelated-receipt", status: "complete" });
+        }
+        return Response.json(runs.get(body.id));
+      });
+      setStudioRuntime({
+        embedded: true,
+        tenantId: 0,
+        requestTransport: transport,
+      });
+      render(<RequestPage object={object} />);
+      await user.selectOptions(
+        screen.getByRole("combobox", { name: "Modo de ejecución" }),
+        "mock",
+      );
+      await user.type(
+        screen.getByRole("textbox", { name: /Placa/ }),
+        "TESTCAR",
+      );
+      const submit = () => screen.getByRole("button", { name: "Ejecutar" });
+      await user.click(submit());
+      await screen.findByText(error);
+      await waitFor(() => expect(submit()).toBeEnabled());
+
+      await user.click(submit());
+      await screen.findByText("Cotización guardada");
+      expect(submitted).toHaveLength(2);
+      expect(submitted[1]).toBe(submitted[0]);
+      expect(runs.size).toBe(1);
+
+      await waitFor(() => expect(submit()).toBeEnabled());
+      await user.click(submit());
+      await waitFor(() => expect(submitted).toHaveLength(3));
+      expect(submitted[2]).not.toBe(submitted[0]);
+      expect(runs.size).toBe(2);
+    },
+  );
+
+  it("retries only the unresolved operation in a multi-operation quote", async () => {
+    const user = userEvent.setup();
+    const page = structuredClone(object);
+    const actions = page.config.studio!.requestPage!.actions;
+    actions.push({
+      ...actions[0],
+      id: "second",
+      operationId: "execute_second",
+      label: "Segunda operación",
+    });
+    const executions = new Map<string, Record<string, unknown>>();
+    const posts: Array<{ actionId: string; id: string }> = [];
+    let historyOffline = false;
+    const transport = vi.fn(async (_path: string, init?: RequestInit) => {
+      if (init?.method !== "POST") {
+        if (historyOffline) throw new Error("History is offline");
+        return Response.json({ data: [...executions.values()] });
+      }
+      const body = JSON.parse(String(init.body));
+      const persisted = executions.get(body.id);
+      posts.push({ actionId: body.actionId, id: body.id });
+      if (persisted) {
+        historyOffline = false;
+        return Response.json(persisted);
+      }
+      const saved = {
+        ...body,
+        label:
+          body.actionId === "second"
+            ? "Resultado de segunda operación"
+            : "Resultado confirmado",
+        status: "complete",
+        result: null,
+        error: null,
+        createdAt: new Date().toISOString(),
+      };
+      executions.set(body.id, saved);
+      if (body.actionId === "second") {
+        historyOffline = true;
+        throw new Error("Second response was lost");
+      }
+      return Response.json(saved);
+    });
+    setStudioRuntime({
+      embedded: true,
+      tenantId: 0,
+      requestTransport: transport,
+    });
+    render(<RequestPage object={page} />);
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Modo de ejecución" }),
+      "mock",
+    );
+    await user.type(screen.getByRole("textbox", { name: /Placa/ }), "TESTCAR");
+    await user.click(
+      screen.getByText("Cotizar con", { selector: "summary span" }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: "Segunda operación" }),
+    );
+    const submit = () => screen.getByRole("button", { name: "Ejecutar" });
+    await user.click(submit());
+    await screen.findByText("Second response was lost");
+    await waitFor(() => expect(submit()).toBeEnabled());
+
+    await user.click(submit());
+    await screen.findByText("Resultado de segunda operación");
+    expect(posts.map(({ actionId }) => actionId)).toEqual([
+      "quote",
+      "second",
+      "second",
+    ]);
+    expect(posts[2].id).toBe(posts[1].id);
+    expect(executions.size).toBe(2);
+  });
+
   it("executes the selected request with the form values and restores results without repeating it", async () => {
     const user = userEvent.setup();
     let runs: any[] = [];
@@ -144,7 +287,13 @@ describe("generated request page runtime", () => {
     await user.type(screen.getByRole("textbox", { name: /Placa/ }), "TESTALT");
     resolveRun(
       Response.json({
-        id: "lookup-run",
+        id: JSON.parse(
+          String(
+            transport.mock.calls.find(
+              ([, init]) => init?.method === "POST",
+            )?.[1]?.body,
+          ),
+        ).id,
         actionId: "lookup",
         label: "Consulta",
         mode: "mock",
@@ -184,7 +333,7 @@ describe("generated request page runtime", () => {
     expect(JSON.parse(String(posts[1][1]?.body)).actionId).toBe("quote");
     resolveRun(
       Response.json({
-        id: "quote-run",
+        id: JSON.parse(String(posts[1][1]?.body)).id,
         actionId: "quote",
         label: "Proveedor",
         mode: "mock",

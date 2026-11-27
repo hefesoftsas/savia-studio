@@ -16,7 +16,7 @@ const requireAdmin = createRequire(
   new URL("../apps/admin/package.json", import.meta.url),
 );
 
-test("the Preview Worker serves extension downloads without the navigation fallback", async () => {
+test("the Preview gateway starts from its actual entry and serves extension downloads", async () => {
   const directory = await mkdtemp(join(tmpdir(), "savia-vscode-download-"));
   const filename = "savia-plugin-authoring-0.1.0.vsix";
   const bytes = Uint8Array.of(0x50, 0x4b, 0x03, 0x04);
@@ -47,10 +47,7 @@ test("the Preview Worker serves extension downloads without the navigation fallb
       `${hash}  ${filename}\n`,
     );
     const { outputFiles } = await requireAdmin("esbuild").build({
-      stdin: {
-        contents: 'export { default } from "./apps/admin/src/edge-gateway.ts";',
-        resolveDir: root,
-      },
+      entryPoints: [join(root, "apps/admin", config.main)],
       bundle: true,
       format: "esm",
       platform: "browser",
@@ -62,6 +59,7 @@ test("the Preview Worker serves extension downloads without the navigation fallb
         modules: true,
         script: outputFiles[0].text,
         compatibilityDate: config.compatibility_date,
+        compatibilityFlags: config.compatibility_flags,
         bindings: config.vars,
         assets: {
           directory: assets,
@@ -71,12 +69,20 @@ test("the Preview Worker serves extension downloads without the navigation fallb
           assetConfig: { not_found_handling: config.assets.not_found_handling },
         },
         serviceBindings: {
-          API: () => new Response("Unexpected API request", { status: 500 }),
+          API: (request) =>
+            Response.json({
+              tenant: request.headers.get("x-savia-tenant-slug"),
+            }),
         },
       }),
     );
 
     const origin = "https://savia-preview.hefesoft.com";
+    const tenantApi = await runtime.dispatchFetch(
+      "https://demo.savia-preview.hefesoft.com/v1/identity/me",
+    );
+    assert.equal(tenantApi.status, 200);
+    assert.deepEqual(await tenantApi.json(), { tenant: "demo" });
     const url = `${origin}/downloads/${filename}`;
     const download = await runtime.dispatchFetch(url);
     assert.equal(download.status, 200);

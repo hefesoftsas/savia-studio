@@ -277,11 +277,17 @@ it.each([
   "status lookup offline",
   "status lookup unavailable",
   "status lookup stalled",
+  "status lookup rate limited",
+  "status lookup rate limited without Retry-After",
 ])(
   "keeps CAPTCHA and normalized values at the final step (%s)",
   async (outcome) => {
     let statusReads = 0;
     let stalledSignal: AbortSignal | null | undefined;
+    const rateLimited =
+      outcome === "status lookup rate limited" ||
+      outcome === "status lookup rate limited without Retry-After";
+    const hasRetryAfter = outcome === "status lookup rate limited";
     if (outcome === "submit response") {
       fetchMock.mockResolvedValueOnce(
         Response.json({
@@ -316,6 +322,11 @@ it.each([
             throw new TypeError("Connection still unavailable");
           if (outcome === "status lookup unavailable")
             return new Response(null, { status: 503 });
+          if (rateLimited)
+            return new Response(null, {
+              status: 429,
+              headers: hasRetryAfter ? { "Retry-After": "30" } : undefined,
+            });
           if (outcome === "status lookup stalled") {
             stalledSignal = init?.signal;
             return new Promise<Response>(() => {});
@@ -403,7 +414,19 @@ it.each([
     });
     expect(submitButton).toBeDisabled();
     await solve();
-    if (outcome === "status lookup stalled") {
+    if (rateLimited) {
+      vi.useFakeTimers();
+      await act(async () => fireEvent.click(submitButton));
+      expect(statusReads).toBe(1);
+      const delay = hasRetryAfter ? 30_000 : 15_000;
+      await act(async () => vi.advanceTimersByTimeAsync(delay - 1));
+      expect(statusReads).toBe(1);
+      await act(async () => window.dispatchEvent(new Event("focus")));
+      expect(statusReads).toBe(1);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(statusReads).toBe(2);
+      vi.useRealTimers();
+    } else if (outcome === "status lookup stalled") {
       vi.useFakeTimers();
       await act(async () => fireEvent.click(submitButton));
       expect(statusReads).toBe(1);

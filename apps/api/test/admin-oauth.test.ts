@@ -843,6 +843,21 @@ describe("admin OAuth bridge", () => {
       });
     });
 
+    it("retains a same-origin Bookings organization through the local OAuth callback", async () => {
+      const localOrigin = "http://127.0.0.1:5173";
+      const f = fixture(localOrigin);
+      const search = new URLSearchParams({
+        resume: "bookings",
+        booking_query: "tab=availability&date=2026-11-25&tenantId=42&ignored=1",
+      });
+      const callback = await f.signIn(localOrigin, "", `?${search}`);
+      expect(callback.status).toBe(200);
+      expect(await callback.json()).toMatchObject({
+        returnRoute: "bookings",
+        returnBookingQuery: "tab=availability&date=2026-11-25&tenantId=42",
+      });
+    });
+
     it("returns the Bookings destination when authorization stops before a code is issued", async () => {
       const f = fixture();
       const search = new URLSearchParams({
@@ -897,6 +912,71 @@ describe("admin OAuth bridge", () => {
             new URL(request.url).pathname === "/api/auth/oauth2/token",
         ),
       ).toBe(false);
+    });
+
+    it("recovers the same Bookings destination when the issued login expires", async () => {
+      const f = fixture();
+      const search = new URLSearchParams({
+        resume: "bookings",
+        return_to: tenantOrigin,
+        booking_query: "tab=reservations&date=2026-11-25",
+      });
+      const authorize = await f.app.request(
+        `${canonicalOrigin}/api/auth/admin/authorize?${search}`,
+      );
+      expect(authorize.status).toBe(302);
+      const state = new URL(
+        authorize.headers.get("location")!,
+      ).searchParams.get("state");
+      await env.DB.prepare(
+        "UPDATE admin_oauth_transactions SET expires_at = ? WHERE state = ?",
+      )
+        .bind(new Date(Date.now() - 1_000).toISOString(), state)
+        .run();
+
+      // Starting another login must not overwrite the expired tab's destination.
+      const other = "https://other.savia-preview.hefesoft.com";
+      expect(
+        (await f.app.request(`${other}/api/auth/admin/authorize`)).status,
+      ).toBe(302);
+      const callback = () =>
+        f.app.request(`${canonicalOrigin}/api/auth/admin/callback`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: canonicalOrigin,
+            cookie: `savia.return_origin=${encodeURIComponent(other)}`,
+          },
+          body: JSON.stringify({ code: "authorization-code", state }),
+        });
+      const expired = await callback();
+      expect(expired.status).toBe(400);
+      expect(await expired.json()).toMatchObject({
+        error: { code: "INVALID_OAUTH_STATE" },
+        returnOrigin: tenantOrigin,
+        returnRoute: "bookings",
+        returnBookingQuery: "tab=reservations&date=2026-11-25",
+      });
+      const replay = await callback();
+      expect(replay.status).toBe(400);
+      expect(await replay.json()).not.toHaveProperty("returnRoute");
+      expect(
+        f.authFetch.mock.calls.some(
+          ([request]) =>
+            new URL(request.url).pathname === "/api/auth/oauth2/token",
+        ),
+      ).toBe(false);
+
+      const recovered = await f.signIn(canonicalOrigin, "", `?${search}`);
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toMatchObject({
+        returnOrigin: tenantOrigin,
+        returnRoute: "bookings",
+        returnBookingQuery: "tab=reservations&date=2026-11-25",
+      });
+      expect(
+        (await f.refresh(tenantOrigin, f.cookieFrom(recovered))).status,
+      ).toBe(200);
     });
 
     it.each([canonicalOrigin, "http://127.0.0.1:5173"])(

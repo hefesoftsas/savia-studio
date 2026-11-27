@@ -1,6 +1,7 @@
 import type { IFieldConfig, IFormConfig } from "@form-eng/core";
 import {
   identifier,
+  reservedRecordFields,
   supportedTypes,
   type StudioObject,
   type RecordSurface,
@@ -8,6 +9,8 @@ import {
   type ScreenNavigationSection,
   type StudioConfig,
 } from "./metadata";
+import { calculateFormulaValue } from "./rules";
+import { protectedAccessFields } from "./access-control";
 
 export type InferredFormula = {
   op: "sum" | "difference" | "product" | "ratio";
@@ -97,29 +100,45 @@ const BOOLEAN_REGEX = /^(true|false|si|sí|no|1|0)$/i;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const URL_REGEX = /^https?:\/\/[^\s]+$/i;
 const PHONE_REGEX = /^\+?[\d\s().-]{7,25}$/;
-const CURRENCY_SYMBOLS = /[$€£¥]|COP|USD|EUR|MXN|CLP/i;
+const currencyMark = "[$€£¥]|COP|USD|EUR|MXN|CLP|GBP|JPY";
+const leadingCurrency = new RegExp(`^([+-]?)\\s*(${currencyMark})\\s*`, "i");
+const trailingCurrency = new RegExp(`(${currencyMark})$`, "i");
+const currencySymbols: Record<string, string> = {
+  "€": "EUR",
+  "£": "GBP",
+  "¥": "JPY",
+};
 
-function isCurrencyString(str: string): boolean {
-  return CURRENCY_SYMBOLS.test(str) && /\d/.test(str);
+function parseCurrencyText(value: string) {
+  const text = value.trim();
+  const prefix = leadingCurrency.exec(text);
+  const suffix = prefix ? null : trailingCurrency.exec(text);
+  const marker = prefix?.[2] ?? suffix?.[1];
+  const amount = prefix
+    ? prefix[1] + text.slice(prefix[0].length)
+    : text.slice(0, suffix?.index ?? text.length).trimEnd();
+  // A single separator followed by three digits can change the magnitude.
+  if (marker && /^[+-]?\d{1,3}[.,]\d{3}$/.test(amount)) return null;
+  const number = parseNumberValue(amount);
+  if (number === null) return null;
+  const currency =
+    marker && marker !== "$"
+      ? (currencySymbols[marker] ?? marker.toUpperCase())
+      : undefined;
+  return { amount: number, marker, currency };
 }
 
-function parseCurrencyAmount(str: string): number | null {
-  const cleaned = str
-    .replace(/[$€£¥]/g, "")
-    .replace(/COP|USD|EUR|MXN|CLP/gi, "")
-    .trim()
-    .replace(/\s+/g, "");
-
-  if (/^\d{1,3}(,\d{3})*(\.\d+)?$/.test(cleaned)) {
-    const num = Number(cleaned.replace(/,/g, ""));
-    return Number.isFinite(num) ? num : null;
-  }
-  if (/^\d{1,3}(\.\d{3})*(,\d+)?$/.test(cleaned)) {
-    const num = Number(cleaned.replace(/\./g, "").replace(",", "."));
-    return Number.isFinite(num) ? num : null;
-  }
-  const direct = Number(cleaned);
-  return Number.isFinite(direct) ? direct : null;
+export function parseCurrencyValue(value: unknown, expectedCurrency?: string) {
+  if (typeof value !== "string") return parseNumberValue(value);
+  const parsed = parseCurrencyText(value);
+  if (
+    !parsed ||
+    (parsed.currency &&
+      expectedCurrency &&
+      parsed.currency !== expectedCurrency.toUpperCase())
+  )
+    return null;
+  return parsed.amount;
 }
 
 function isDateValue(val: unknown): boolean {
@@ -139,14 +158,24 @@ function isDateValue(val: unknown): boolean {
 
 export function parseNumberValue(val: unknown): number | null {
   if (typeof val === "number" && Number.isFinite(val)) return val;
-  if (typeof val === "string") {
-    const parsedCurr = parseCurrencyAmount(val);
-    if (parsedCurr !== null) return parsedCurr;
-    const trimmed = val.replace(/\s+/g, "").replace(/,/g, ".");
-    const num = Number(trimmed);
-    if (Number.isFinite(num) && trimmed !== "") return num;
-  }
-  return null;
+  if (typeof val !== "string") return null;
+  const text = val.trim();
+  if (!text || /^[+-]?\d{1,3},\d{3}$/.test(text)) return null;
+  const direct = Number(text);
+  if (Number.isFinite(direct)) return direct;
+
+  let normalized: string;
+  if (/^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(text))
+    normalized = text.replace(/,/g, "");
+  else if (/^[+-]?\d{1,3}(\.\d{3})+(,\d+)?$/.test(text))
+    normalized = text.replace(/\./g, "").replace(",", ".");
+  else if (/^[+-]?\d{1,3}([ \u00a0\u202f]\d{3})+([.,]\d+)?$/.test(text))
+    normalized = text.replace(/[ \u00a0\u202f]/g, "").replace(",", ".");
+  else if (/^[+-]?\d+,\d+$/.test(text)) normalized = text.replace(",", ".");
+  else return null;
+
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : null;
 }
 
 /**
@@ -160,6 +189,7 @@ export function detectColumnType(
   config?: Record<string, unknown>;
   options?: { value: string; label: string }[];
 } {
+  if (headerName.trim().toLowerCase() === "id") return { type: "Textbox" };
   const values = rawValues
     .map((v) => (v instanceof Date ? v : typeof v === "string" ? v.trim() : v))
     .filter((v) => v !== null && v !== undefined && v !== "");
@@ -185,26 +215,17 @@ export function detectColumnType(
   }
 
   // 3. Check for Currency
-  const currencyMatches = values.filter(
-    (v) => typeof v === "string" && isCurrencyString(v),
-  ).length;
-  if (currencyMatches / values.length >= 0.6) {
-    let detectedCurr = "COP";
-    for (const v of values) {
-      if (typeof v === "string") {
-        if (v.includes("€") || /EUR/i.test(v)) {
-          detectedCurr = "EUR";
-          break;
-        }
-        if (v.includes("$") || /USD/i.test(v)) {
-          detectedCurr = "USD";
-          break;
-        }
-      }
-    }
+  const currencyMatches = values
+    .map((value) =>
+      typeof value === "string" ? parseCurrencyText(value) : null,
+    )
+    .filter((value) => value?.marker);
+  if (currencyMatches.length / values.length >= 0.6) {
+    const detectedCurrency =
+      currencyMatches.find((value) => value?.currency)?.currency ?? "USD";
     return {
       type: "Currency",
-      config: { currency: detectedCurr, decimals: 2 },
+      config: { currency: detectedCurrency, decimals: 2 },
     };
   }
 
@@ -241,24 +262,14 @@ export function detectColumnType(
   }
 
   // 7. Check for Numbers (integers / decimals)
-  const allNumbers = values.every((v) => {
-    if (typeof v === "number" && Number.isFinite(v)) return true;
-    if (typeof v === "string") {
-      if (v.trim().startsWith("+")) return false;
-      const trimmed = v.replace(/\s+/g, "").replace(/,/g, ".");
-      return !isNaN(Number(trimmed)) && trimmed !== "";
-    }
-    return false;
-  });
+  const numbers = values.map((value) =>
+    typeof value === "string" && value.startsWith("+")
+      ? null
+      : parseNumberValue(value),
+  );
 
-  if (allNumbers) {
-    const allIntegers = values.every((v) => {
-      const n =
-        typeof v === "number"
-          ? v
-          : Number(String(v).replace(/\s+/g, "").replace(/,/g, "."));
-      return Number.isInteger(n);
-    });
+  if (numbers.every((value) => value !== null)) {
+    const allIntegers = numbers.every((value) => Number.isInteger(value));
 
     const lowerHeader = headerName.toLowerCase();
     if (
@@ -316,87 +327,69 @@ export function detectColumnType(
 }
 
 /**
- * Detects mathematical relationships between numeric columns (product, sum, difference, ratio).
+ * Detects products, sums, and ordered differences between numeric columns.
  */
 export function detectFormulas(
   columns: InferredColumn[],
   rows: unknown[][],
 ): void {
-  const numericIndices: { colIndex: number; column: InferredColumn }[] = [];
-  columns.forEach((column, colIndex) => {
-    if (column.type === "Number" || column.type === "Currency") {
-      numericIndices.push({ colIndex, column });
-    }
-  });
+  const numericColumns = columns.flatMap((column, index) =>
+    column.type === "Number" || column.type === "Currency"
+      ? [{ column, index }]
+      : [],
+  );
+  if (numericColumns.length < 3 || rows.length < 2) return;
 
-  if (numericIndices.length < 3 || rows.length < 2) return;
-
-  const sampleRows = rows.slice(0, 50);
-
-  // Check each numeric column as a potential formula result C
-  for (const { colIndex: cIdx, column: targetCol } of numericIndices) {
-    // Check candidate pairs (A, B)
-    for (const { colIndex: aIdx, column: colA } of numericIndices) {
-      if (aIdx === cIdx) continue;
-      for (const { colIndex: bIdx, column: colB } of numericIndices) {
-        if (bIdx === cIdx || bIdx <= aIdx) continue;
-
-        let productMatches = 0;
-        let sumMatches = 0;
-        let diffMatches = 0;
-        let validRows = 0;
-
-        for (const row of sampleRows) {
-          const valA = parseNumberValue(row[aIdx]);
-          const valB = parseNumberValue(row[bIdx]);
-          const valC = parseNumberValue(row[cIdx]);
-
-          if (valA === null || valB === null || valC === null) continue;
-          validRows++;
-
-          const tolerance = Math.max(Math.abs(valC) * 0.05, 0.5);
-
-          // Product check (e.g. Total = Cantidad * Precio)
-          if (Math.abs(valC - valA * valB) <= tolerance) productMatches++;
-          // Sum check (e.g. Total = Subtotal + IVA)
-          if (Math.abs(valC - (valA + valB)) <= tolerance) sumMatches++;
-          // Difference check (e.g. Saldo = Total - Abono)
-          if (
-            Math.abs(valC - (valA - valB)) <= tolerance ||
-            Math.abs(valC - (valB - valA)) <= tolerance
+  const readRow = (row: unknown[]) =>
+    numericColumns.map(({ column, index }) =>
+      column.type === "Currency"
+        ? parseCurrencyValue(
+            row[index],
+            String(column.config?.currency || "COP"),
           )
-            diffMatches++;
-        }
+        : parseNumberValue(row[index]),
+    );
+  const sample = rows.slice(0, 50).map(readRow);
+  let remainingRows: (number | null)[][] | undefined;
 
-        if (validRows >= 2) {
-          const threshold = 0.85;
-          if (productMatches / validRows >= threshold) {
-            targetCol.formula = { op: "product", fields: [colA.key, colB.key] };
-            targetCol.config = {
-              ...targetCol.config,
-              formula: targetCol.formula,
-            };
-            return;
-          }
-          if (sumMatches / validRows >= threshold) {
-            targetCol.formula = { op: "sum", fields: [colA.key, colB.key] };
-            targetCol.config = {
-              ...targetCol.config,
-              formula: targetCol.formula,
-            };
-            return;
-          }
-          if (diffMatches / validRows >= threshold) {
-            targetCol.formula = {
-              op: "difference",
-              fields: [colA.key, colB.key],
-            };
-            targetCol.config = {
-              ...targetCol.config,
-              formula: targetCol.formula,
-            };
-            return;
-          }
+  for (const [target, { column }] of numericColumns.entries()) {
+    for (let a = 0; a < numericColumns.length; a++) {
+      if (a === target) continue;
+      for (let b = a + 1; b < numericColumns.length; b++) {
+        if (b === target) continue;
+        const candidates = [
+          ["product", a, b],
+          ["sum", a, b],
+          ["difference", a, b],
+          ["difference", b, a],
+        ] as const;
+        for (const [op, left, right] of candidates) {
+          let completeRows = 0;
+          const matches = (values: (number | null)[]) => {
+            const first = values[left];
+            const second = values[right];
+            const calculated =
+              first !== null && second !== null
+                ? calculateFormulaValue(op, [first, second])
+                : null;
+            if (calculated !== values[target]) return false;
+            if (calculated !== null) completeRows++;
+            return true;
+          };
+          if (!sample.every(matches) || completeRows < 2) continue;
+          remainingRows ??= rows.slice(sample.length).map(readRow);
+          if (!remainingRows.every(matches)) continue;
+
+          const formula = {
+            op,
+            fields: [
+              numericColumns[left].column.key,
+              numericColumns[right].column.key,
+            ],
+          };
+          column.formula = formula;
+          column.config = { ...column.config, formula };
+          return;
         }
       }
     }
@@ -434,6 +427,7 @@ export function detectRelations(
     });
 
     if (matched) {
+      column.type = "Dropdown";
       column.relation = {
         targetObject: matched.name,
         label: matched.label,
@@ -545,7 +539,10 @@ export function inferSpreadsheetSchema(input: {
   const { label: collectionLabel, name: collectionName } =
     deriveLabelFromFilename(baseLabel || "Colección");
 
-  const existingKeys = new Set<string>();
+  const existingKeys = new Set([
+    ...reservedRecordFields,
+    ...protectedAccessFields,
+  ]);
   const columns: InferredColumn[] = [];
   const fields: Record<string, IFieldConfig> = {};
   const fieldOrder: string[] = [];
@@ -579,13 +576,11 @@ export function inferSpreadsheetSchema(input: {
     columns.push(column);
   });
 
-  // 1. Detect Formulas between numeric columns
+  // Detect relations first so they are not used as numeric operands.
+  detectRelations(columns, knownCollections);
   detectFormulas(columns, rows);
 
-  // 2. Detect Foreign Key Relations to known collections
-  detectRelations(columns, knownCollections);
-
-  // 3. Generate Sections if more than 6 columns
+  // Group fields into sections on wider spreadsheets.
   let activeSections: { id: string; label: string }[] | undefined;
   if (enableSections && columns.length > 6) {
     activeSections = generateFormSections(columns);
@@ -610,6 +605,7 @@ export function inferSpreadsheetSchema(input: {
   const stageCol = columns.find(
     (c) =>
       c.type === "Dropdown" &&
+      !c.relation &&
       /estado|etapa|fase|status|stage/.test(c.key.toLowerCase()),
   );
   if (stageCol) {

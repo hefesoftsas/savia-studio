@@ -1,6 +1,7 @@
 import { pagesReadCache } from "./read-cache";
 import { publishPageChange } from "./page-events";
 import type { ApiClient } from "@/api/api-client";
+import { readResponseBodyWithInactivityTimeout } from "@/api/response-body-timeout";
 import type { Value } from "platejs";
 import type {
   PageSummary,
@@ -243,11 +244,19 @@ export class PagesClient {
       )
     ).data;
   }
-  async file(id: string, fileId: string) {
+  async file(id: string, fileId: string, signal?: AbortSignal): Promise<Blob> {
     const response = await this.api.requestResponse(
       `${this.path(id)}/files/${encodeURIComponent(fileId)}`,
+      { signal },
     );
-    if (!response.ok) throw new Error("File unavailable");
-    return response.blob();
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error("File unavailable");
+    }
+    return readResponseBodyWithInactivityTimeout(
+      response,
+      (input) => input.blob(),
+      signal,
+    );
   }
 }

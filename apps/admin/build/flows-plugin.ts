@@ -4,6 +4,10 @@ import { spawn } from "node:child_process";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
+import {
+  FLOWS_UI_MANIFEST_PATH,
+  FLOWS_UI_PATH,
+} from "../src/embedded-flows-paths.ts";
 
 const root = fileURLToPath(new URL("../../flows/app", import.meta.url));
 const distribution = resolve(root, "dist");
@@ -113,7 +117,7 @@ export function flowsPlugin(): Plugin {
     },
     configureServer(server) {
       const disabled = flowsDisabled("serve");
-      server.middlewares.use("/flows-ui", async (request, response, next) => {
+      server.middlewares.use(FLOWS_UI_PATH, async (request, response, next) => {
         if (request.method !== "GET" && request.method !== "HEAD")
           return next();
         if (disabled) {
@@ -190,7 +194,7 @@ export function flowsPlugin(): Plugin {
             );
           else
             output.push({
-              fileName: "flows-ui/" + name,
+              fileName: FLOWS_UI_PATH.slice(1) + "/" + name,
               source: await readFile(resolve(directory, entry.name)),
             });
         }
@@ -198,6 +202,11 @@ export function flowsPlugin(): Plugin {
       }
       for (const asset of await collect(distribution))
         this.emitFile({ type: "asset", ...asset });
+      this.emitFile({
+        type: "asset",
+        fileName: FLOWS_UI_MANIFEST_PATH.slice(1),
+        source: JSON.stringify({ shell: `${FLOWS_UI_PATH}/` }),
+      });
     },
   };
 }

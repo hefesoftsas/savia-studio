@@ -707,17 +707,19 @@ function R2FileField(p: IFieldProps) {
   if (!object || !p.fieldName) return null;
   return (
     <R2AttachmentField
-      disabled={p.readOnly || Boolean(queue.uploadingFile)}
+      disabled={p.readOnly || queue.saving || queue.uploadingFiles.length > 0}
       field={p.fieldName}
+      failures={queue.failures}
       inputId={p.fieldName}
       object={object.name}
       onPendingChange={queue.setFiles}
+      onRetryUpload={queue.retry}
       pending={queue.files}
       policy={r2AttachmentPolicy(p.config as Record<string, unknown>)}
       recordId={recordId}
       refreshVersion={queue.version}
       uploadedFiles={queue.uploadedFiles}
-      uploadingFile={queue.uploadingFile}
+      uploadingFiles={queue.uploadingFiles}
     />
   );
 }

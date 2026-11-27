@@ -4,6 +4,8 @@ import { seedTenantAgency } from "./tenant-fixtures";
 import { env } from "cloudflare:workers";
 import { beforeAll, expect, it } from "vitest";
 import { createRecordBundlesApp } from "../src/studio/record-bundles";
+import { createStudioApp } from "@savia/studio-server";
+import { accessDatabase } from "@savia/studio-server/access-authorization";
 const migrations = Object.entries(
   import.meta.glob<string>("../../../packages/db/migrations/*.sql", {
     eager: true,
@@ -98,6 +100,86 @@ it("atomically creates, replays and unlinks without deleting children", async ()
       .bind(tenant)
       .first(),
   ).toEqual({ count: 1 });
+});
+
+it("associates a creator's attachment using the matching bundle receipt", async () => {
+  const scope = "tenant:99005";
+  await fixture("one-to-many", scope);
+  await env.DB.prepare(
+    "INSERT INTO access_revisions(scope,revision) VALUES (?,1)",
+  )
+    .bind(scope)
+    .run();
+  await env.DB.prepare(
+    `UPDATE studio_objects SET config=json_set(config,'$.fields.contract',json('{"type":"R2Attachment","label":"Contract"}')) WHERE tenant_id=? AND name='parents'`,
+  )
+    .bind(scope)
+    .run();
+  const revision = await env.DB.prepare(
+    "SELECT revision FROM access_revisions WHERE scope=?",
+  )
+    .bind(scope)
+    .first<number>("revision");
+  const policy = {
+    scope,
+    principalId: "bundle-author",
+    revision: revision!,
+    grants: (["create", "read"] as const).map((action) => ({
+      id: action,
+      roleId: "creator",
+      resource: "collection:parents" as const,
+      action,
+      predicate: { all: true as const },
+      fields: ["name", "contract"],
+    })),
+  } as const;
+  const accessPolicy = { ...policy, grants: [...policy.grants] };
+  const db = accessDatabase(env.DB, accessPolicy);
+  const app = createStudioApp(scope, {
+    principalId: policy.principalId,
+    accessPolicy,
+  });
+  const bindings = { DB: db, FILES: env.DOCUMENTS };
+  const key = crypto.randomUUID();
+  const form = new FormData();
+  form.set("field", "contract");
+  form.set("createRequestKey", key);
+  form.set(
+    "file",
+    new File(["test"], "contract.pdf", { type: "application/pdf" }),
+  );
+  const upload = await app.request(
+    "/api/file-drafts/parents",
+    { method: "POST", body: form },
+    bindings,
+  );
+  expect(upload.status, await upload.clone().text()).toBe(201);
+  const { data: draft } = (await upload.json()) as {
+    data: { id: string; version: number };
+  };
+  const saved = await createRecordBundlesApp({ db, tenant: scope }).request(
+    "/api/record-bundles/parents",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": key },
+      body: JSON.stringify({
+        record: { data: { name: "Parent with attachment" } },
+        relations: [],
+      }),
+    },
+  );
+  expect(saved.status, await saved.clone().text()).toBe(200);
+  const { data: record } = (await saved.json()) as { data: { id: string } };
+  const attached = await app.request(
+    `/api/file-drafts/${draft.id}/attach`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ recordId: record.id, version: draft.version }),
+    },
+    bindings,
+  );
+  expect(attached.status, await attached.text()).toBe(200);
 });
 it("invalid children roll back the parent and all earlier child writes", async () => {
   const { tenant, relationId, call } = await fixture();

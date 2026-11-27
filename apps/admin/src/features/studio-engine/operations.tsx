@@ -1,5 +1,8 @@
 import { useMessages, useAppLocale, intlLocale } from "@/i18n/core";
 import { automationMessages } from "@/i18n/locales/automation";
+import { recordsMessages } from "@/i18n/locales/records";
+import { formatRetryTime, retryDeadlineFromError } from "@/api/retry-after";
+import { retryIsBlocked, useRetryBlocked } from "@/hooks/use-retry-blocked";
 import {
   supportsLocalRecordTools,
   collectionCapabilities,
@@ -411,8 +414,16 @@ type ImportResult = {
   importId: string;
   summary: { ready: number; created: number; skipped: number; errors: number };
 };
+type ImportOperationKind = "read" | "preview" | "commit";
+type ImportOperation = {
+  kind: ImportOperationKind;
+  controller: AbortController;
+};
+
 function ImportExport({ objects }: { objects: StudioObject[] }) {
   const t = useMessages(automationMessages);
+  const recordsText = useMessages(recordsMessages);
+  const locale = useAppLocale();
 
   const [objectName, setObjectName] = useState(objects[0]?.name ?? ""),
     [csv, setCsv] = useState(""),
@@ -422,11 +433,23 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
     [policy, setPolicy] = useState("skip"),
     [result, setResult] = useState<ImportResult | null>(null),
     [committed, setCommitted] = useState(false),
-    [pending, setPending] = useState(false),
+    [pending, setPending] = useState<ImportOperationKind>(),
     [error, setError] = useState(""),
     [page, setPage] = useState(1);
   const [exportingCsv, setExportingCsv] = useState(false);
-  const exportInProgress = useRef(false);
+  const exportController = useRef<AbortController | null>(null);
+  const activeImport = useRef<ImportOperation | null>(null);
+  const [exportDeadlines, setExportDeadlines] = useState(
+    () => new Map<string, number>(),
+  );
+  const exportDeadline = exportDeadlines.get(objectName);
+  const exportBlocked = useRetryBlocked(exportDeadline);
+  const retryTime = exportBlocked
+    ? formatRetryTime(
+        { status: 429, retryAt: exportDeadline },
+        intlLocale(locale),
+      )
+    : undefined;
   const object = objects.find((o) => o.name === objectName);
   const managedCustomer =
     object?.config.studio?.business === "managed-customer";
@@ -437,17 +460,48 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
     object?.config.studio?.business ?? "",
   );
   const queryClient = useQueryClient();
+  const committing = pending === "commit";
+  function beginImport(kind: ImportOperationKind) {
+    const operation = { kind, controller: new AbortController() };
+    activeImport.current = operation;
+    setPending(kind);
+    return operation;
+  }
+  function finishImport(operation: ImportOperation) {
+    if (activeImport.current !== operation) return;
+    activeImport.current = null;
+    setPending(undefined);
+  }
   const invalidatePreview = () => {
+    const operation = activeImport.current;
+    if (operation?.kind === "commit") return false;
+    if (operation) {
+      operation.controller.abort();
+      finishImport(operation);
+    }
+    setError("");
     setResult(null);
     setCommitted(false);
     setPage(1);
+    return true;
   };
+  useEffect(
+    () => () => {
+      const operation = activeImport.current;
+      if (!operation || operation.kind === "commit") return;
+      activeImport.current = null;
+      operation.controller.abort();
+    },
+    [],
+  );
   useEffect(() => {
     if (!objectName && objects.length) setObjectName(objects[0].name);
   }, [objects, objectName]);
   async function exportCsv(name: string) {
-    if (exportInProgress.current) return;
-    exportInProgress.current = true;
+    if (exportController.current || retryIsBlocked(exportDeadlines.get(name)))
+      return;
+    const controller = new AbortController();
+    exportController.current = controller;
     setExportingCsv(true);
     try {
       await downloadCrm(
@@ -455,23 +509,38 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
         `${name}.csv`,
         "text/csv",
         // The full export can stream more records than a table export.
-        { useBodyDeadline: false },
+        { useBodyDeadline: false, signal: controller.signal },
       );
     } catch (error) {
+      const retryAt = retryDeadlineFromError(error);
+      if (retryAt !== undefined)
+        setExportDeadlines((previous) => new Map(previous).set(name, retryAt));
       toast.error(message(error));
     } finally {
-      exportInProgress.current = false;
-      setExportingCsv(false);
+      if (exportController.current === controller) {
+        exportController.current = null;
+        setExportingCsv(false);
+      }
     }
   }
+  function cancelCsvExport() {
+    const controller = exportController.current;
+    if (!controller) return;
+    exportController.current = null;
+    controller.abort();
+    setExportingCsv(false);
+  }
   async function read(file?: File) {
-    if (!file) return;
-    setError("");
-    invalidatePreview();
+    if (!file || !invalidatePreview()) return;
+    setCsv("");
+    setHeaders([]);
+    setMapping({});
+    const operation = beginImport("read");
     try {
       if (file.size > 1024 * 1024) throw new Error(t("Máximo 1 MB por CSV."));
-      const text = await file.text(),
-        parsed = parseCsv(text);
+      const text = await file.text();
+      if (activeImport.current !== operation) return;
+      const parsed = parseCsv(text);
       setCsv(text);
       setHeaders(parsed.headers);
       setMapping(
@@ -483,17 +552,24 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
         ),
       );
     } catch (e) {
-      setError(message(e));
-      setCsv("");
-      setHeaders([]);
+      if (activeImport.current === operation) setError(message(e));
+    } finally {
+      finishImport(operation);
     }
   }
   async function run(commit: boolean) {
-    setPending(true);
+    if (
+      activeImport.current ||
+      !object ||
+      !csv ||
+      (commit && (!result?.importId || !result.summary.ready || committed))
+    )
+      return;
+    const operation = beginImport(commit ? "commit" : "preview");
     setError("");
     try {
       const data = await api<ImportResult>(
-        `/import/${objectName}/${commit ? "commit" : "preview"}`,
+        `/import/${encodeURIComponent(object.name)}/${commit ? "commit" : "preview"}`,
         "POST",
         {
           csv,
@@ -502,7 +578,9 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
           duplicatePolicy: policy,
           ...(commit ? { importId: result?.importId } : {}),
         },
+        { signal: operation.controller.signal },
       );
+      if (activeImport.current !== operation) return;
       setResult(data);
       setPage(1);
       setCommitted(commit);
@@ -516,9 +594,9 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
         );
       }
     } catch (e) {
-      setError(message(e));
+      if (activeImport.current === operation) setError(message(e));
     } finally {
-      setPending(false);
+      finishImport(operation);
     }
   }
   const statusLabel: Record<string, string> = {
@@ -549,13 +627,14 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
           id="csv-object"
           className="op-select"
           value={objectName}
+          disabled={committing}
           onChange={(e) => {
+            if (!invalidatePreview()) return;
             setObjectName(e.target.value);
             setDuplicateField("");
             setCsv("");
             setHeaders([]);
             setMapping({});
-            invalidatePreview();
           }}
         >
           {objects.map((o) => (
@@ -570,15 +649,37 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
             variant="outline"
             size="icon"
             aria-label={exportLabel}
+            aria-describedby={retryTime ? "csv-export-retry" : undefined}
             title={exportLabel}
             aria-busy={exportingCsv}
-            disabled={exportingCsv}
+            disabled={exportingCsv || exportBlocked}
             onClick={() => void exportCsv(object.name)}
           >
             <MicrosoftExcel aria-hidden className="size-4" />
           </Button>
         )}
+        {exportingCsv && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={cancelCsvExport}
+          >
+            {t("Cancelar descarga")}
+          </Button>
+        )}
       </div>
+      {retryTime && (
+        <p
+          id="csv-export-retry"
+          role="status"
+          className="text-sm text-muted-foreground"
+        >
+          {recordsText("Puedes reintentar a partir de %{p0}.", {
+            p0: retryTime,
+          })}
+        </p>
+      )}
       {object &&
         supportsLocalRecordTools(object) &&
         collectionCapabilities(object).create && (
@@ -597,7 +698,7 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
                   type="file"
                   accept=".csv,text/csv"
                   key={objectName}
-                  disabled={pending}
+                  disabled={committing}
                   onChange={(e) => read(e.target.files?.[0])}
                 />
               </div>
@@ -619,9 +720,13 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
                         id={`map-${header}`}
                         className="op-select"
                         value={mapping[header] ?? ""}
+                        disabled={committing}
                         onChange={(e) => {
-                          setMapping({ ...mapping, [header]: e.target.value });
-                          invalidatePreview();
+                          if (invalidatePreview())
+                            setMapping({
+                              ...mapping,
+                              [header]: e.target.value,
+                            });
                         }}
                       >
                         <option value="">{t("Omitir columna")}</option>
@@ -643,9 +748,10 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
                     id="csv-duplicates"
                     className="op-select"
                     value={duplicateField}
+                    disabled={committing}
                     onChange={(e) => {
-                      setDuplicateField(e.target.value);
-                      invalidatePreview();
+                      if (invalidatePreview())
+                        setDuplicateField(e.target.value);
                     }}
                   >
                     <option value="">
@@ -661,9 +767,9 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
                     aria-label={t("Política de duplicados")}
                     className="op-select"
                     value={policy}
+                    disabled={committing}
                     onChange={(e) => {
-                      setPolicy(e.target.value);
-                      invalidatePreview();
+                      if (invalidatePreview()) setPolicy(e.target.value);
                     }}
                   >
                     <option value="skip">{t("Omitir duplicados")}</option>
@@ -672,7 +778,7 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
                     </option>
                   </select>
                   <Button
-                    disabled={pending}
+                    disabled={Boolean(pending)}
                     variant="outline"
                     onClick={() => run(false)}
                   >
@@ -754,7 +860,7 @@ function ImportExport({ objects }: { objects: StudioObject[] }) {
                 />
                 {!committed && (
                   <Button
-                    disabled={pending || !result.summary.ready}
+                    disabled={Boolean(pending) || !result.summary.ready}
                     onClick={() => run(true)}
                   >
                     {t("Importar")} {result.summary.ready} {t("filas válidas")}

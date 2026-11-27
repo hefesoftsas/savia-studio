@@ -21,11 +21,16 @@ function isBannerDismissed(): boolean {
 }
 
 /**
- * Single automatic PWA entry point. Fixed bottom banner shown when the
- * app is not installed. The user-menu item remains as a manual fallback;
- * both share `usePwaInstallAction` and both self-hide when installed.
+ * Automatic install prompt in the workspace footer. The user-menu item
+ * remains available while the footer is reserved for cookie consent.
  */
-export function PwaInstallBanner({ className }: { className?: string }) {
+export function PwaInstallBanner({
+  className,
+  deferred = false,
+}: {
+  className?: string;
+  deferred?: boolean;
+}) {
   const translate = useTranslate();
   const { isInstalled, isInstallable } = usePwaInstall();
   const { platform, dialogOpen, setDialogOpen, handleInstall } =
@@ -41,8 +46,7 @@ export function PwaInstallBanner({ className }: { className?: string }) {
     setDismissed(true);
   }, []);
 
-  // Never render once installed (or dismissed recently).
-  if (isInstalled || !isInstallable || dismissed) {
+  if (deferred || isInstalled || !isInstallable || dismissed) {
     return null;
   }
 
@@ -64,22 +68,21 @@ export function PwaInstallBanner({ className }: { className?: string }) {
       <div
         role="region"
         aria-label={title}
+        data-slot="workspace-notice"
         className={cn(
-          "fixed inset-x-3 bottom-3 z-50 sm:inset-x-auto sm:right-6 sm:bottom-6 sm:w-96",
+          "max-h-[45svh] shrink-0 overflow-y-auto border-t bg-popover px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-4 print:hidden",
           className,
         )}
       >
-        <div className="flex items-center gap-3 rounded-2xl border border-border/70 bg-popover/95 p-3 shadow-xl shadow-black/10 backdrop-blur-md">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
-            <Download className="size-5" aria-hidden="true" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold text-foreground">
-              {title}
-            </p>
-            <p className="line-clamp-2 text-xs text-muted-foreground">
-              {subtitle}
-            </p>
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-2">
+          <div className="flex min-w-0 flex-1 basis-64 items-center gap-3">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <Download className="size-5" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-foreground">{title}</p>
+              <p className="text-xs text-muted-foreground">{subtitle}</p>
+            </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <Button type="button" size="sm" onClick={handleInstall}>

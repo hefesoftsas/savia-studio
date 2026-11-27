@@ -4,17 +4,23 @@ import { useMessages, useAppLocale, intlLocale } from "@/i18n/core";
 import { defaultAppLocale, isAppLocale } from "@/i18n/app-locale";
 import { automationMessages } from "@/i18n/locales/automation";
 import { studioMessages } from "@/i18n/locales/studio";
+import { notifyStudioTenantsChanged } from "@/api/tenant-workspaces-client";
+import { getSessionReadsPaused } from "@/auth/logout-progress";
+import { getSessionGeneration } from "@/auth/session-scope";
 import {
   isHubspotCollection,
   isTenantApiBasePath,
+  STUDIO_NAVIGATION_MESSAGE,
   studioCollectionCount,
 } from "@/features/studio/studio-navigation";
+import { isReadAccessDenied } from "@/queries/read-state";
 import {
   canDuplicateRecord,
   duplicateRecordValues,
 } from "./record-duplication";
 import { saveRelatedRecords } from "./save-related-records";
 import { reconcileLocalQueries } from "./local-query-sync";
+import type { RecordListTotal } from "./retained-list-results";
 import {
   createStudioQueryClient,
   getStudioQueryOwner,
@@ -23,10 +29,7 @@ import {
   markStudioBootstrapFailed,
 } from "./studio-query-cache";
 import { RecordOriginLinks } from "./record-origin-links";
-import {
-  collectionCapabilities,
-  supportsLocalRecordTools,
-} from "./collection-capabilities";
+import { collectionCapabilities } from "./collection-capabilities";
 import { isHubspotArchive } from "./crm-provider";
 import React, {
   Fragment,
@@ -34,6 +37,7 @@ import React, {
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -52,6 +56,7 @@ import { ListPagination } from "@/components/admin/list-pagination";
 import { ScreenListSkeleton } from "@/components/admin/page-skeletons";
 import { i18nProvider } from "@/lib/i18nProvider";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Tooltip,
   TooltipContent,
@@ -112,8 +117,8 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import { CollectionImportWizard } from "./collection-import-wizard";
-import { api, pluginApi, dataProvider } from "./api";
-import { recordPath } from "./record-path";
+import { api, createStudioRequest, pluginApi, dataProvider } from "./api";
+import { recordDeletionPath, recordPath } from "./record-path";
 import {
   attachTemporaryR2Attachments,
   deleteTemporaryR2Attachments,
@@ -129,6 +134,7 @@ import {
   recordSurface,
   isDrawerSurface,
   stageOptions,
+  usesNativeRecordStorage,
   type StudioObject,
   type StudioRecord,
 } from "@savia/studio-shared/metadata";
@@ -162,6 +168,42 @@ import { CustomPluginFrame } from "./custom-plugin-frame";
 import { StudioHelpTooltip } from "./studio-help-tooltip";
 import "./screen-manager.css";
 const studioAppMessages = { ...automationMessages, ...studioMessages };
+const workspaceStudioViews = new Set([
+  "audit",
+  "collection-sources",
+  "import-spreadsheet",
+  "integrations",
+  "new-object",
+  "operations",
+  "relations",
+  "request-page-generator",
+  "screens",
+  "service-credentials",
+]);
+
+type RecordEditorState = {
+  writeKey: string;
+  record?: StudioRecord | "new";
+  copyValues?: Record<string, unknown>;
+};
+
+function createRecordEditor(
+  record?: RecordEditorState["record"],
+  copyValues?: RecordEditorState["copyValues"],
+): RecordEditorState {
+  return { writeKey: crypto.randomUUID(), record, copyValues };
+}
+
+function sameRecordEditorRoute(
+  current: URLSearchParams,
+  next: URLSearchParams,
+): boolean {
+  return (
+    current.get("object") === next.get("object") &&
+    (current.get("view") ?? "records") === (next.get("view") ?? "records") &&
+    current.get("record") === next.get("record")
+  );
+}
 const PublicLinkManager = lazy(() =>
   import("../public-forms/public-link-manager").then((module) => ({
     default: module.PublicLinkManager,
@@ -397,30 +439,41 @@ function App({
   const objectsQuery = useListObjects({
     query: { enabled: ready, staleTime: 5 * 60_000 },
   });
+  const objectAccessDenied = isReadAccessDenied(objectsQuery.error);
   const objectsResponse = objectsQuery.data as unknown as {
     data?: StudioObject[];
     menuLayout?: ScreenMenuLayout | null;
   };
   const objects = objectsResponse?.data ?? [];
   const menuLayout = objectsResponse?.menuLayout ?? null;
-  const [location, setLocation] = useState(
-    () => new URLSearchParams(search ?? window.location.search),
+  const [{ location, editor }, setNavigation] = useState(() => ({
+    location: new URLSearchParams(search ?? window.location.search),
+    editor: createRecordEditor(),
+  }));
+  const setLocation = useCallback(
+    (params: URLSearchParams, nextEditor?: RecordEditorState) => {
+      const freshEditor = nextEditor ?? createRecordEditor();
+      setNavigation((previous) => ({
+        location: params,
+        editor:
+          !nextEditor && sameRecordEditorRoute(previous.location, params)
+            ? previous.editor
+            : freshEditor,
+      }));
+    },
+    [],
   );
-  const selected =
-      location.get("object") ?? (embedded ? "clientes" : "opportunity"),
+  const { writeKey } = editor;
+  const collectionName = location.get("object");
+  const selected = collectionName ?? (embedded ? "clientes" : "opportunity"),
     view = location.get("view") ?? "records";
   const [mobile, setMobile] = useState(false),
-    [newObjectState, setNewObject] = useState(false),
-    [editingState, setEditing] = useState<StudioRecord | "new" | null>(null);
+    [newObjectState, setNewObject] = useState(false);
   const screensTab = screenManagementTab(location);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (search == null) return;
-    const params = new URLSearchParams(search);
-    setLocation(params);
-    const nextView = params.get("view");
-    if (nextView === "screens" || nextView === "remove-screen")
-      setEditing(null);
-  }, [search]);
+    setLocation(new URLSearchParams(search));
+  }, [search, setLocation]);
   const extensionsQuery = useQuery({
     queryKey: ["extension-client-screens", getStudioRuntime().tenantId],
     queryFn: () =>
@@ -491,59 +544,47 @@ function App({
     view === "remove-screen"
       ? objects.find((item) => item.name === selected)
       : undefined;
-  const [duplicate, setDuplicate] = useState<{
-    object: string;
-    values: Record<string, unknown>;
-  } | null>(null);
-  const [writeKey, setWriteKey] = useState(() => crypto.randomUUID());
   const recordId = location.get("record");
   const requestedObject = objects.find((item) => item.name === selected);
   const recordObject =
     requestedObject ??
-    (recordId && embedded && runtime.tenantId === 0 && selected === "clientes"
+    (recordId &&
+    embedded &&
+    runtime.tenantId === 0 &&
+    collectionName === "clientes"
       ? objects.find((item) => item.name === "agency_profiles")
       : undefined);
+  const requiresRecord =
+    view === "edit" || (view === "records" && location.has("record"));
+  const workspaceView =
+    workspaceStudioViews.has(view) ||
+    (view.startsWith("admin") && view !== "admin-screen");
+  const requiresCollection =
+    !workspaceView &&
+    (collectionName !== null || (view !== "records" && view !== "designer"));
+  const linkedObject = collectionName ? recordObject : undefined;
+  const linkedCapabilities =
+    linkedObject && collectionCapabilities(linkedObject);
   const unavailableRecordLink =
-    !!recordId &&
-    (view === "records" || view === "edit") &&
-    (!recordObject || !collectionCapabilities(recordObject).read);
+    requiresRecord &&
+    (!recordId ||
+      !linkedCapabilities?.read ||
+      (view === "edit" && !linkedCapabilities.update));
+  const unavailableCollectionLink = requiresCollection && !linkedObject;
   const object =
-    recordObject ??
-    (view === "designer" ? designerObjects[0] : visibleObjects[0]) ??
-    objects[0];
+    unavailableRecordLink || unavailableCollectionLink
+      ? undefined
+      : (recordObject ??
+        (view === "designer" ? designerObjects[0] : visibleObjects[0]) ??
+        objects[0]);
   const resolvedObjectName = object?.name ?? selected;
   const hubspot = isHubspotCollection(object?.config.studio?.collection);
-  const hubspotSummary = useQuery({
-    queryKey: ["summary", resolvedObjectName, "hubspot-total"],
-    queryFn: ({ signal }) =>
-      api<{ total: number }>(
-        `/records/${encodeURIComponent(resolvedObjectName)}/summary`,
-        "GET",
-        undefined,
-        { signal },
-      ),
-    enabled:
-      ready &&
-      !unavailableRecordLink &&
-      !!object &&
-      hubspot &&
-      collectionCapabilities(object).read &&
-      view === "records",
-  });
-  const remoteTotal = hubspotSummary.data?.total;
-  const hubspotTotal =
+  const canReadHubspotTotal =
+    ready &&
+    !unavailableRecordLink &&
+    !!object &&
     hubspot &&
-    !hubspotSummary.isError &&
-    typeof remoteTotal === "number" &&
-    Number.isSafeInteger(remoteTotal) &&
-    remoteTotal >= 0
-      ? remoteTotal
-      : undefined;
-  const objectCount = studioCollectionCount(
-    object?.config.studio,
-    object?.count,
-    hubspotTotal,
-  );
+    collectionCapabilities(object).read;
   const contribution = extensionScreenFor(resolvedObjectName, view);
   const storeScreen = storeScreenFor(
     resolvedObjectName,
@@ -556,6 +597,78 @@ function App({
   )
     ? contribution.Screen
     : null;
+  const rendersRecordsTable =
+    !!object &&
+    collectionCapabilities(object).list &&
+    !object.config.studio?.requestPage &&
+    !storeScreen &&
+    !ExtensionScreen;
+  const totalScope = JSON.stringify([
+    runtime.localWorkspace?.scope,
+    runtime.tenantId,
+    runtime.apiBasePath,
+    resolvedObjectName,
+  ]);
+  const [listTotal, setListTotal] = useState<{
+    scope: string;
+    total: number | undefined;
+    status: RecordListTotal["status"];
+  }>();
+  const reportListTotal = useCallback(
+    (result: RecordListTotal) => {
+      setListTotal((previous) => {
+        const current = previous?.scope === totalScope ? previous : undefined;
+        const total =
+          result.status === "verified"
+            ? result.total
+            : result.status === "revoked"
+              ? undefined
+              : current?.total;
+        return current?.status === result.status && current.total === total
+          ? current
+          : { scope: totalScope, total, status: result.status };
+      });
+    },
+    [totalScope],
+  );
+  const observedList =
+    rendersRecordsTable && listTotal?.scope === totalScope
+      ? listTotal
+      : undefined;
+  const needsHubspotSummary =
+    !rendersRecordsTable ||
+    (!!observedList &&
+      observedList.total === undefined &&
+      observedList.status !== "rate-limited" &&
+      observedList.status !== "revoked");
+  const hubspotSummary = useQuery({
+    queryKey: ["summary", resolvedObjectName, "hubspot-total"],
+    queryFn: ({ signal }) =>
+      api<{ total: number }>(
+        `/records/${encodeURIComponent(resolvedObjectName)}/summary`,
+        "GET",
+        undefined,
+        { signal },
+      ),
+    enabled: canReadHubspotTotal && view === "records" && needsHubspotSummary,
+  });
+  const remoteTotal = hubspotSummary.data?.total;
+  const summaryTotal =
+    !hubspotSummary.isError &&
+    typeof remoteTotal === "number" &&
+    Number.isSafeInteger(remoteTotal) &&
+    remoteTotal >= 0
+      ? remoteTotal
+      : undefined;
+  const hubspotTotal =
+    canReadHubspotTotal && observedList?.status !== "revoked"
+      ? (observedList?.total ?? summaryTotal)
+      : undefined;
+  const objectCount = studioCollectionCount(
+    object?.config.studio,
+    object?.count,
+    hubspotTotal,
+  );
   const extensionApi = useMemo(
     () =>
       contribution
@@ -568,16 +681,18 @@ function App({
     [contribution?.extensionId],
   );
   useEffect(() => {
-    if (!ready || !object || selected === object.name || unavailableRecordLink)
-      return;
+    if (!ready || !object || selected === object.name) return;
     const normalized = new URLSearchParams(location);
     normalized.set("object", object.name);
     updateLocation(normalized, true);
     setLocation(normalized);
-  }, [location, object, ready, selected, unavailableRecordLink]);
+  }, [location, object, ready, selected, setLocation]);
   const detailQuery = useQuery({
     queryKey: ["open-record", recordObject?.name, recordId],
-    queryFn: () => api(recordPath(resolvedObjectName, recordId!)),
+    queryFn: ({ signal }) =>
+      api(recordPath(resolvedObjectName, recordId!), "GET", undefined, {
+        signal,
+      }),
     enabled:
       ready &&
       !!recordId &&
@@ -586,12 +701,43 @@ function App({
       collectionCapabilities(object).read &&
       (view === "records" || view === "edit"),
   });
+  const detailStatus = (detailQuery.error as { status?: number } | null)
+    ?.status;
+  const detailUnavailable =
+    isReadAccessDenied(detailQuery.error) ||
+    detailStatus === 404 ||
+    detailStatus === 410;
   const editing =
     view === "create"
       ? "new"
-      : view === "edit"
-        ? (detailQuery.data?.data ?? editingState)
-        : editingState;
+      : detailUnavailable
+        ? undefined
+        : view === "edit"
+          ? detailQuery.data?.data
+          : editor.record;
+  const editorAvailable = Boolean(
+    ready &&
+    editing &&
+    object &&
+    (editing === "new"
+      ? collectionCapabilities(object).create
+      : collectionCapabilities(object).update),
+  );
+  const activeEditor = useRef<string | undefined>(undefined);
+  const attachmentCreateKey = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    activeEditor.current = editorAvailable ? writeKey : undefined;
+    return () => {
+      activeEditor.current = undefined;
+    };
+  }, [editorAvailable, writeKey]);
+  const sameWorkspace = () =>
+    runtime === getStudioRuntime() &&
+    !getSessionReadsPaused() &&
+    (runtime.sessionGeneration === undefined ||
+      runtime.sessionGeneration === getSessionGeneration());
+  const currentEditor = () =>
+    sameWorkspace() && activeEditor.current === writeKey;
   const openRecord = (record: StudioRecord) => {
     const params = new URLSearchParams({
       object: resolvedObjectName,
@@ -610,16 +756,19 @@ function App({
     setLocation(params);
   };
   const navigate = (
-    name: string,
+    name: string | undefined,
     next = "records",
     extra?: Record<string, string>,
+    nextEditor = createRecordEditor(),
   ) => {
-    const params = new URLSearchParams({ object: name, view: next, ...extra });
+    const params = new URLSearchParams({
+      ...(name ? { object: name } : {}),
+      view: next,
+      ...extra,
+    });
     updateLocation(params);
-    setLocation(params);
+    setLocation(params, nextEditor);
     setMobile(false);
-    setEditing(null);
-    setDuplicate(null);
   };
   const selectTab = (tab: string) => {
     const params = new URLSearchParams(location);
@@ -627,7 +776,10 @@ function App({
     updateLocation(params);
     setLocation(params);
   };
-  const editRecord = (record: StudioRecord | "new") => {
+  const editRecord = (
+    record: StudioRecord | "new",
+    copyValues?: Record<string, unknown>,
+  ) => {
     if (
       !object ||
       !(record === "new"
@@ -635,46 +787,35 @@ function App({
         : collectionCapabilities(object).update)
     )
       return;
-    setDuplicate(null);
-    setWriteKey(crypto.randomUUID());
+    const nextEditor = createRecordEditor(record, copyValues);
     const surface = recordSurface(object, record === "new" ? "create" : "edit");
     if (surface === "page") {
-      if (record === "new") navigate(object.name, "create");
-      else {
-        const params = new URLSearchParams({
-          object: object.name,
-          view: "edit",
-          record: record.id,
-        });
-        updateLocation(params);
-        setLocation(params);
-        setMobile(false);
-        setEditing(record);
-      }
+      if (record === "new")
+        navigate(object.name, "create", undefined, nextEditor);
+      else navigate(object.name, "edit", { record: record.id }, nextEditor);
       return;
     }
-    setEditing(record);
+    setNavigation((previous) => ({ ...previous, editor: nextEditor }));
   };
   const duplicateRecord = (record: StudioRecord) => {
     if (!object || !canDuplicateRecord(object)) return;
-    const values = duplicateRecordValues(object, record);
-    editRecord("new");
-    setDuplicate({ object: object.name, values });
+    editRecord("new", duplicateRecordValues(object, record));
   };
   useEffect(() => {
     if (embedded) return;
     const pop = () => {
-      setLocation(new URLSearchParams(window.location.search));
-      setEditing(null);
-      setDuplicate(null);
-      setWriteKey(crypto.randomUUID());
+      setLocation(
+        new URLSearchParams(window.location.search),
+        createRecordEditor(),
+      );
     };
     window.addEventListener("popstate", pop);
     return () => window.removeEventListener("popstate", pop);
-  }, [embedded]);
+  }, [embedded, setLocation]);
   useEffect(() => {
     if (
       view === "designer" &&
+      !unavailableCollectionLink &&
       designerObjects.length &&
       !designerObjects.some((o) => o.name === selected)
     ) {
@@ -684,15 +825,34 @@ function App({
       });
       updateLocation(params, true);
       setLocation(params);
-      setEditing(null);
     }
-  }, [view, selected, designerObjects]);
+  }, [view, selected, designerObjects, unavailableCollectionLink, setLocation]);
   useEffect(() => {
-    if (!ready || objectsQuery.isPending) return;
+    if (!ready || !objectAccessDenied) return;
     window.postMessage(
       {
-        type: "savia-studio-navigation",
-        tenantId: getStudioRuntime().tenantId,
+        type: STUDIO_NAVIGATION_MESSAGE,
+        tenantId: runtime.tenantId,
+        sessionGeneration: runtime.sessionGeneration,
+        accessDenied: true,
+        objects: [],
+      },
+      window.location.origin,
+    );
+  }, [
+    ready,
+    objectAccessDenied,
+    objectsQuery.errorUpdatedAt,
+    runtime.tenantId,
+    runtime.sessionGeneration,
+  ]);
+  useEffect(() => {
+    if (!ready || !objectsQuery.isSuccess) return;
+    window.postMessage(
+      {
+        type: STUDIO_NAVIGATION_MESSAGE,
+        tenantId: runtime.tenantId,
+        sessionGeneration: runtime.sessionGeneration,
         hubspotCount:
           hubspotTotal === undefined
             ? undefined
@@ -721,10 +881,12 @@ function App({
     );
   }, [
     objects,
-    objectsQuery.isPending,
+    objectsQuery.isSuccess,
     ready,
     resolvedObjectName,
     hubspotTotal,
+    runtime.tenantId,
+    runtime.sessionGeneration,
   ]);
   const refresh = () => activeQueryClient.invalidateQueries();
   const updateScreenVisibility = async (
@@ -897,16 +1059,40 @@ function App({
         </Button>
       </div>
     );
-  if (ready && objectsQuery.isSuccess && unavailableRecordLink)
+  if (ready && objectsQuery.isSuccess && unavailableRecordLink) {
+    const returnToList = () => {
+      const target = linkedCapabilities?.list
+        ? linkedObject
+        : visibleObjects.find((item) => collectionCapabilities(item).list);
+      if (target) navigate(target.name);
+      else navigate(undefined, "screens");
+    };
     return (
       <Modal
         title={t("Registro no disponible")}
-        description={t("La colección del enlace ya no está disponible.")}
-        onClose={closeRecord}
+        description={
+          collectionName && recordId && !linkedObject
+            ? t("La colección del enlace ya no está disponible.")
+            : t("No se pudo abrir el registro de este enlace.")
+        }
+        onClose={returnToList}
       >
-        <Button onClick={closeRecord}>{t("Volver a la lista")}</Button>
+        <Button onClick={returnToList}>{t("Volver a la lista")}</Button>
       </Modal>
     );
+  }
+  if (ready && objectsQuery.isSuccess && unavailableCollectionLink) {
+    const showScreens = () => navigate(undefined, "screens");
+    return (
+      <Modal
+        title={t("Colección no disponible")}
+        description={t("La colección del enlace ya no está disponible.")}
+        onClose={showScreens}
+      >
+        <Button onClick={showScreens}>{t("Gestionar pantallas")}</Button>
+      </Modal>
+    );
+  }
   const domainContent =
     view === "integrations" ? (
       <Suspense fallback={<Loading />}>
@@ -937,7 +1123,20 @@ function App({
     ) : null;
   if (!object)
     return objectsQuery.error ? (
-      <div role="alert">{(objectsQuery.error as Error).message}</div>
+      <Alert>
+        <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+          <span>{(objectsQuery.error as Error).message}</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={objectsQuery.isFetching}
+            onClick={() => void objectsQuery.refetch()}
+          >
+            {t("Reintentar")}
+          </Button>
+        </AlertDescription>
+      </Alert>
     ) : !ready || objectsQuery.isPending ? (
       <Loading />
     ) : (
@@ -1038,18 +1237,18 @@ function App({
     );
   const capabilities = collectionCapabilities(object);
   const closeEditor = () => {
-    setEditing(null);
-    setDuplicate(null);
+    if (!currentEditor()) return;
     if (view === "create" || view === "edit") navigate(object.name);
+    else setLocation(location, createRecordEditor());
   };
   const editorSurface = recordSurface(
     object,
     editing === "new" || view === "create" ? "create" : "edit",
   );
-  const copying = editing === "new" && duplicate?.object === object.name;
+  const copying = editing === "new" && editor.copyValues !== undefined;
+  const attachmentRequest = createStudioRequest(runtime);
   const recordEditor =
-    editing &&
-    (editing === "new" ? capabilities.create : capabilities.update) ? (
+    editing && editorAvailable ? (
       <Modal
         page={editorSurface === "page"}
         drawer={isDrawerSurface(editorSurface)}
@@ -1079,11 +1278,14 @@ function App({
           key={writeKey}
           ephemeralDraft={copying}
           object={object}
-          values={
-            editing === "new" ? (copying ? duplicate.values : {}) : editing
-          }
+          values={editing === "new" ? (editor.copyValues ?? {}) : editing}
           onCancel={editorSurface === "page" ? undefined : closeEditor}
           onSave={async (data, previous, relations, saveOptions) => {
+            if (
+              !currentEditor() ||
+              (editing !== "new" && previous && previous.id !== editing.id)
+            )
+              throw new Error(t("El formulario ya no está abierto."));
             if (object.config.studio?.collection)
               data = Object.fromEntries(
                 Object.entries(data).filter(
@@ -1101,7 +1303,26 @@ function App({
                 relations,
                 saveOptions?.idempotencyKey ?? writeKey,
               );
-            const result = await api<{ data: StudioRecord }>(
+            if (
+              creating &&
+              saveOptions?.hasTemporaryAttachments &&
+              runtime.localWorkspace
+            )
+              attachmentCreateKey.current = writeKey;
+            // Keep retries on the same server request if its result was lost.
+            const requiresBackend = attachmentCreateKey.current === writeKey;
+            if (requiresBackend && !runtime.pluginTransport)
+              throw new Error(t("No se pudo conectar con Savia. Reintenta."));
+            const request = requiresBackend
+              ? createStudioRequest({
+                  ...runtime,
+                  transport: runtime.pluginTransport,
+                })
+              : api;
+            const result = await request<{
+              data: StudioRecord;
+              local?: boolean;
+            }>(
               creating
                 ? `/records/${encodeURIComponent(object.name)}`
                 : recordPath(object.name, target.id),
@@ -1109,33 +1330,72 @@ function App({
               creating ? data : { ...data, _version: target._version },
               creating ? { headers: { "Idempotency-Key": writeKey } } : {},
             );
-            return result.data;
+            if (requiresBackend)
+              void runtime.localWorkspace
+                ?.syncNow(object.name, true)
+                .catch(() => undefined);
+            return result.local === true
+              ? { ...result.data, _localPending: true }
+              : result.data;
           }}
-          onDiscardTemporaryAttachments={deleteTemporaryR2Attachments}
-          onPersistTemporaryAttachments={(record, attachments) =>
-            attachTemporaryR2Attachments(record.id, attachments)
+          onDiscardTemporaryAttachments={(attachments) =>
+            deleteTemporaryR2Attachments(attachments, attachmentRequest)
           }
-          onUploadTemporaryAttachment={(field, file) =>
-            uploadTemporaryR2Attachment(object.name, field, file)
+          onPersistTemporaryAttachments={async (record, attachments) => {
+            const workspace = runtime.localWorkspace;
+            if (record._localPending && workspace) {
+              const pendingBundle = () =>
+                workspace.store.getPendingBundle(object.name, record.id);
+              if (await pendingBundle()) {
+                await workspace.syncNow(object.name, true);
+                const pending = await pendingBundle();
+                if (pending)
+                  throw new Error(
+                    pending.error ??
+                      t(
+                        "Sincroniza el registro antes de asociar sus archivos.",
+                      ),
+                  );
+              }
+            }
+            await attachTemporaryR2Attachments(
+              record.id,
+              attachments,
+              attachmentRequest,
+            );
+          }}
+          onUploadTemporaryAttachment={(field, file, recordId, creationKey) =>
+            uploadTemporaryR2Attachment(
+              object.name,
+              field,
+              file,
+              recordId
+                ? { recordId }
+                : { createRequestKey: creationKey ?? writeKey },
+              attachmentRequest,
+            )
           }
           onSaved={(saved) => {
-            toast.success(
-              saved && saved._localPending
-                ? t("Guardado en este dispositivo · sincronización pendiente")
-                : editing === "new"
-                  ? t("Registro creado")
-                  : t("Cambios guardados"),
-            );
-            closeEditor();
+            if (!sameWorkspace()) return;
+            if (currentEditor()) {
+              toast.success(
+                saved && saved._localPending
+                  ? t("Guardado en este dispositivo · sincronización pendiente")
+                  : editing === "new"
+                    ? t("Registro creado")
+                    : t("Cambios guardados"),
+              );
+              closeEditor();
+            }
             refresh();
             if (
-              getStudioRuntime().tenantId === 0 &&
+              runtime.tenantId === 0 &&
               (object.name === "agencias" ||
                 object.name === "tenants" ||
                 object.name === "organizations" ||
                 object.name === "organizaciones")
             )
-              window.dispatchEvent(new Event("savia-studio-tenants-changed"));
+              notifyStudioTenantsChanged();
           }}
         />
         {editing !== "new" && (
@@ -1143,8 +1403,11 @@ function App({
             object={object}
             record={editing}
             onDeleted={() => {
-              closeEditor();
-              closeRecord();
+              if (!sameWorkspace()) return;
+              if (currentEditor()) {
+                closeEditor();
+                closeRecord();
+              }
               refresh();
             }}
           />
@@ -1654,6 +1917,11 @@ function App({
                     key={object.name}
                     object={object}
                     onOpen={openRecord}
+                    onCollectionTotal={
+                      canReadHubspotTotal && view === "records"
+                        ? reportListTotal
+                        : undefined
+                    }
                     initialConfigTab={
                       location.get("configure") === "form" ? "form" : undefined
                     }
@@ -1814,23 +2082,29 @@ function App({
           }}
         />
       )}
-      {recordId && capabilities.read && !editing && detailQuery.data && (
-        <Suspense fallback={<Loading />}>
-          <RecordDetail
-            key={`${object.name}:${recordId}`}
-            object={object}
-            record={detailQuery.data.data}
-            onEdit={editRecord}
-            onDuplicate={duplicateRecord}
-            onNavigate={(name, id) => navigate(name, "records", { record: id })}
-            onQuotation={(record) =>
-              navigate("cotizaciones", "records", { record: record.id })
-            }
-            onClose={closeRecord}
-            onRefresh={refresh}
-          />
-        </Suspense>
-      )}
+      {recordId &&
+        capabilities.read &&
+        !editing &&
+        !detailUnavailable &&
+        detailQuery.data && (
+          <Suspense fallback={<Loading />}>
+            <RecordDetail
+              key={`${object.name}:${recordId}`}
+              object={object}
+              record={detailQuery.data.data}
+              onEdit={editRecord}
+              onDuplicate={duplicateRecord}
+              onNavigate={(name, id) =>
+                navigate(name, "records", { record: id })
+              }
+              onQuotation={(record) =>
+                navigate("cotizaciones", "records", { record: record.id })
+              }
+              onClose={closeRecord}
+              onRefresh={refresh}
+            />
+          </Suspense>
+        )}
       {recordId && !editing && detailQuery.error && (
         <Modal
           title={t("Registro no disponible")}
@@ -1864,7 +2138,7 @@ function DeleteRecord({
     object.config.studio?.collection?.sourceId,
     object.config.studio?.collection?.kind,
   );
-  const permanent = !supportsLocalRecordTools(object);
+  const permanent = !usesNativeRecordStorage(object);
   const [confirm, setConfirm] = useState(false),
     [busy, setBusy] = useState(false);
   if (!collectionCapabilities(object).delete) return null;
@@ -1890,16 +2164,20 @@ function DeleteRecord({
             onClick={async () => {
               setBusy(true);
               try {
-                await api(
-                  `${recordPath(object.name, record.id)}?version=${record._version}`,
+                const result = await api<{ local?: boolean } | undefined>(
+                  recordDeletionPath(object.name, record.id, record._version),
                   "DELETE",
                 );
                 toast.success(
-                  hubspotArchive
-                    ? t("Registro archivado en HubSpot")
-                    : permanent
-                      ? t("Registro eliminado")
-                      : t("Registro movido a la papelera"),
+                  result?.local === true
+                    ? t(
+                        "Movido a la papelera en este dispositivo · sincronización pendiente",
+                      )
+                    : hubspotArchive
+                      ? t("Registro archivado en HubSpot")
+                      : permanent
+                        ? t("Registro eliminado")
+                        : t("Registro movido a la papelera"),
                 );
                 onDeleted();
               } catch (e) {

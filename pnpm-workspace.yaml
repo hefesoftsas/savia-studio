@@ -33,6 +33,10 @@ minimumReleaseAgeExclude:
   - "@tauri-apps/cli-win32-x64-msvc@2.12.1"
   - "@tauri-apps/cli@2.12.1"
 patchedDependencies:
+  "@better-auth/oauth-provider@1.7.6": patches/@better-auth__oauth-provider@1.7.6.patch
   "@cloudflare/vitest-pool-workers@0.19.1": patches/@cloudflare__vitest-pool-workers@0.19.1.patch
+  better-auth@1.7.6: patches/better-auth@1.7.6.patch
   monaco-editor@0.52.2: patches/monaco-editor@0.52.2.patch
   ra-core@5.15.2: patches/ra-core@5.15.2.patch
+  # Keep focus events out of the timer delay until https://github.com/vercel/swr/issues/4342 is fixed upstream.
+  swr@2.5.1: patches/swr@2.5.1.patch

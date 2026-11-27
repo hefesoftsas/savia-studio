@@ -1,6 +1,11 @@
+import { getMigrations, matchType } from "better-auth/db/migration";
 import { env } from "cloudflare:workers";
 import { expect, it, vi } from "vitest";
-import authWorker, { createAuthHandler } from "../src/index";
+import authWorker, {
+  createAuthHandler,
+  createBetterAuth,
+  initializeAuthSchema,
+} from "../src/index";
 
 const origin = "http://127.0.0.1:8787";
 const deploymentRevision = "0123456789abcdef0123456789abcdef01234567";
@@ -557,4 +562,26 @@ it("drops a cached handler after a transient context initialization failure", as
   } finally {
     prepare.mockRestore();
   }
+});
+
+it("recognizes existing SQLite OAuth array columns during Auth startup", async () => {
+  await initializeAuthSchema(env);
+  const auth = createBetterAuth(
+    env,
+    {},
+    {
+      seedOAuthResources: false,
+      validateSchema: false,
+    },
+  );
+  await auth.$context;
+  const log = vi.fn();
+  const migrations = await getMigrations({ ...auth.options, logger: { log } });
+
+  expect(migrations.toBeAdded).toEqual([]);
+  expect(migrations.toBeCreated).toEqual([]);
+  expect(log.mock.calls.filter(([level]) => level === "warn")).toEqual([]);
+  expect(matchType("TEXT", "number[]", "sqlite")).toBe(true);
+  expect(matchType("INTEGER", "number[]", "sqlite")).toBe(false);
+  expect(matchType("TEXT", "string[]", "postgres")).toBe(false);
 });

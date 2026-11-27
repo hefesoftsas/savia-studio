@@ -1,6 +1,20 @@
 import { spawn } from "node:child_process";
 import { workerConfig as buildWorkerConfig } from "./branch-preview-worker-config.mjs";
 
+export function requireBranchBootstrapPassword(env) {
+  const password = env.BETTER_AUTH_BOOTSTRAP_PASSWORD;
+  if (
+    typeof password !== "string" ||
+    !password.trim() ||
+    password.length < 12 ||
+    password.length > 128
+  )
+    throw new Error(
+      "Branch Preview Auth bootstrap requires BETTER_AUTH_BOOTSTRAP_PASSWORD with 12 to 128 characters",
+    );
+  return password;
+}
+
 export function workerConfig(
   kind,
   names,

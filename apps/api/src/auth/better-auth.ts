@@ -2,7 +2,10 @@ import { PersonalApiKeys } from "./personal-api-keys";
 import { authorizePersonalApiKeyRequest } from "./personal-api-key-policy";
 import {
   ensureBootstrapAdministrator,
+  findPrincipalBySubject,
   loadActor,
+  readIdentityDirectoryRevision,
+  refreshAuthenticatedPrincipal,
   upsertPrincipal,
 } from "./identity-repository";
 import {
@@ -142,6 +145,7 @@ type AuthServiceSession = {
     role: string | null;
     twoFactorEnabled: boolean;
   } | null;
+  sessionCreatedAt?: number;
 };
 
 type AuthServiceUser = {
@@ -255,24 +259,110 @@ function bearerJwt(request: Request): boolean {
   return parts.length === 3 && parts.every(Boolean);
 }
 
-async function actorForIdentity(
-  d1: D1Database,
-  identity: OAuthAuthenticatedIdentity,
-): Promise<AppActor> {
-  if (hasAdministratorRole(identity.roles) && !identity.twoFactorEnabled) {
+function activeAccountRequired(): AuthenticationError {
+  return new AuthenticationError(
+    "AUTHENTICATION_REQUIRED",
+    "An active account is required",
+  );
+}
+
+function requireAdministratorMfa(twoFactorEnabled: boolean): void {
+  if (!twoFactorEnabled) {
     throw new AuthenticationError(
       "MFA_ENROLLMENT_REQUIRED",
       "Platform administrators must enroll TOTP multi-factor authentication",
     );
   }
-  const principal = await upsertPrincipal(d1, {
-    issuer: ISSUER,
-    subject: identity.subject,
-    email: identity.email,
-    displayName: identity.displayName,
-  });
+}
+
+async function requireCurrentAuthAccount(
+  service: AuthService,
+  bridgeKey: string,
+  identity: OAuthAuthenticatedIdentity,
+): Promise<OAuthAuthenticatedIdentity> {
+  try {
+    const response = await service.fetch(
+      new Request(
+        `https://savia-auth.internal/_internal/users/${encodeURIComponent(identity.subject)}`,
+        {
+          headers: { "x-savia-bridge-key": bridgeKey },
+          signal: AbortSignal.timeout(5_000),
+        },
+      ),
+    );
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => undefined);
+      throw activeAccountRequired();
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error("Auth directory lookup failed");
+    }
+    const { user } = (await response.json()) as AuthServiceUser;
+    if (user?.isBanned === true) throw activeAccountRequired();
+    if (
+      user?.id !== identity.subject ||
+      typeof user.email !== "string" ||
+      typeof user.name !== "string" ||
+      typeof user.isBanned !== "boolean" ||
+      typeof user.twoFactorEnabled !== "boolean" ||
+      (user.role !== null && typeof user.role !== "string")
+    )
+      throw new Error("Auth directory returned an invalid account");
+    return {
+      ...identity,
+      email: user.email,
+      displayName: user.name,
+      roles: userRoleIncludesAdministrator(user.role) ? identity.roles : [],
+      twoFactorEnabled: identity.twoFactorEnabled && user.twoFactorEnabled,
+    };
+  } catch (error) {
+    if (error instanceof AuthenticationError) throw error;
+    throw new AuthenticationError(
+      "AUTHENTICATION_UNAVAILABLE",
+      "Authentication service is unavailable",
+    );
+  }
+}
+
+async function actorForIdentity(
+  d1: D1Database,
+  identity: OAuthAuthenticatedIdentity,
+  verifyAccount?: (
+    identity: OAuthAuthenticatedIdentity,
+  ) => Promise<OAuthAuthenticatedIdentity>,
+): Promise<AppActor> {
+  const existing = await findPrincipalBySubject(d1, ISSUER, identity.subject);
+  let principal;
+  if (existing) {
+    // Check the role's session cutoff before reporting an MFA enrollment error.
+    principal =
+      hasAdministratorRole(identity.roles) && !identity.twoFactorEnabled
+        ? existing
+        : await refreshAuthenticatedPrincipal(d1, existing, identity);
+  } else {
+    // The directory revision binds a new principal to a current Auth response.
+    const revision = await readIdentityDirectoryRevision(d1);
+    if (verifyAccount) identity = await verifyAccount(identity);
+    if (hasAdministratorRole(identity.roles))
+      requireAdministratorMfa(identity.twoFactorEnabled);
+    principal = await upsertPrincipal(
+      d1,
+      { ...identity, issuer: ISSUER },
+      revision,
+    );
+  }
+  if (!principal) throw activeAccountRequired();
+  if (!principal.isActive) {
+    throw new AuthenticationError(
+      "AUTHORIZATION_FORBIDDEN",
+      "This user is inactive",
+    );
+  }
   let actor = await loadActor(d1, principal);
   if (
+    !principal.platformAdminRevoked &&
+    identity.twoFactorEnabled &&
     hasAdministratorRole(identity.roles) &&
     (!actor.globalRoles.includes("platform_admin") ||
       !actor.memberships.some(
@@ -282,15 +372,38 @@ async function actorForIdentity(
           entry.isActive,
       ))
   ) {
-    await ensureBootstrapAdministrator(d1, principal.id);
+    // Restoring a missing role on a known principal needs current Auth proof.
+    const current =
+      existing && verifyAccount ? await verifyAccount(identity) : identity;
+    if (hasAdministratorRole(current.roles)) {
+      requireAdministratorMfa(current.twoFactorEnabled);
+      await ensureBootstrapAdministrator(d1, principal.id);
+    }
     actor = await loadActor(d1, principal);
   }
-  if (!actor.principal.isActive) {
+  if (
+    actor.platformAdminSessionAfter !== undefined &&
+    (!hasAdministratorRole(identity.roles) ||
+      !Number.isSafeInteger(identity.sessionCreatedAt) ||
+      !(
+        (identity.sessionCreatedAt ?? 0) >
+        Date.parse(actor.platformAdminSessionAfter)
+      ))
+  ) {
     throw new AuthenticationError(
-      "AUTHORIZATION_FORBIDDEN",
-      "This user is inactive",
+      "AUTHENTICATION_REQUIRED",
+      "Sign in again to use platform administration",
     );
   }
+  if (
+    hasAdministratorRole(identity.roles) ||
+    actor.globalRoles.includes("platform_admin") ||
+    actor.memberships.some(
+      (entry) =>
+        entry.tenantId === 0 && entry.role === "tenant_admin" && entry.isActive,
+    )
+  )
+    requireAdministratorMfa(identity.twoFactorEnabled);
   return actor;
 }
 
@@ -298,9 +411,15 @@ export function betterAuthAuthenticator(
   service?: AuthService,
   oauthResource?: OAuthResourceAuthenticator,
   personalKeys?: PersonalApiKeys,
+  identityBridgeKey?: string,
 ): Authenticator {
   if (!service && !oauthResource && !personalKeys)
     return rejectingAuthenticator;
+  const verifyAccount =
+    service && identityBridgeKey
+      ? (identity: OAuthAuthenticatedIdentity) =>
+          requireCurrentAuthAccount(service, identityBridgeKey, identity)
+      : undefined;
   return {
     async recordSuccessfulUse(actor) {
       if (actor.credential?.kind === "personal-api-key")
@@ -338,7 +457,7 @@ export function betterAuthAuthenticator(
         }
         const identity = await oauthResource.authenticate(request);
         requireOAuthScope(identity, request);
-        const actor = await actorForIdentity(d1, identity);
+        const actor = await actorForIdentity(d1, identity, verifyAccount);
         return {
           ...actor,
           credential: { kind: "oauth", scopes: [...identity.scopes] },
@@ -383,16 +502,21 @@ export function betterAuthAuthenticator(
           "An active session is required",
         );
       }
-      return actorForIdentity(d1, {
-        subject: session.user.id,
-        email: session.user.email,
-        displayName: session.user.name,
-        roles: userRoleIncludesAdministrator(session.user.role)
-          ? ["admin"]
-          : [],
-        twoFactorEnabled: session.user.twoFactorEnabled,
-        scopes: new Set(),
-      });
+      return actorForIdentity(
+        d1,
+        {
+          subject: session.user.id,
+          email: session.user.email,
+          displayName: session.user.name,
+          roles: userRoleIncludesAdministrator(session.user.role)
+            ? ["admin"]
+            : [],
+          twoFactorEnabled: session.user.twoFactorEnabled,
+          sessionCreatedAt: session.sessionCreatedAt,
+          scopes: new Set(),
+        },
+        verifyAccount,
+      );
     },
   };
 }

@@ -19,6 +19,10 @@ Open `http://localhost:8080`, sign in with the configured email and generated pa
 
 The first image build downloads dependencies and checksum-verified Office WASM assets. Subsequent execution serves these assets locally. No frontend development server runs in the container. The app runs as a non-root user. Compose initialization creates authenticated S3 credentials, the bucket and browser CORS rules before starting Savia. Schema migrations run before traffic is accepted; changed or missing already-applied migration files fail startup. New files are applied once in filename order even when a merged branch introduces an earlier name.
 
+Savia validates the authentication schema after its migrations and before
+initializing the bootstrap administrator and OAuth clients. An incompatible
+authentication schema stops startup.
+
 The default ports bind to localhost. A different configuration file can be selected with `SAVIA_ENV_FILE=/absolute/path/to/config.env`. Port bindings can be changed with `SAVIA_PORT`, `SAVIA_S3_PORT`, `SAVIA_BIND` and `SAVIA_S3_BIND` in the environment of the Compose command; update the public origins to match.
 
 ## Runtime components

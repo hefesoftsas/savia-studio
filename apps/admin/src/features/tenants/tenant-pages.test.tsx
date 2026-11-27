@@ -935,6 +935,43 @@ describe("generic tenant pages", () => {
     );
   });
 
+  it("offers a new-tab tenant list while keeping the draft after an unconfirmed creation", async () => {
+    open("/tenants/create");
+    const appServices = services();
+    vi.mocked(appServices.dataProvider.create).mockRejectedValueOnce(
+      new TypeError("Failed to fetch"),
+    );
+    const user = userEvent.setup();
+    await renderApp(appServices);
+    for (const [label, value] of [
+      ["Nombre del tenant", "Tenant de prueba"],
+      ["Correo del primer administrador", "tenant-owner@example.test"],
+      ["Nombres del primer administrador", "Demo"],
+      ["Apellidos del primer administrador", "Admin"],
+      ["Contraseña temporal", "Temporary-Test-123!"],
+    ]) {
+      await user.type(
+        await screen.findByLabelText(label, { exact: false }),
+        value,
+      );
+    }
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "No se pudo confirmar la creación del tenant",
+    );
+    const link = within(alert).getByRole("link", {
+      name: "Ver tenants en otra pestaña",
+    });
+    expect(link).toHaveAttribute("href", "#/tenants");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(screen.getByLabelText("Contraseña temporal")).toHaveValue(
+      "Temporary-Test-123!",
+    );
+    expect(window.location.hash).toBe("#/tenants/create");
+    expect(appServices.dataProvider.create).toHaveBeenCalledOnce();
+  });
+
   it("shows how to recover from unavailable password setup email", async () => {
     open("/tenants/create");
     const appServices = services();
@@ -1316,6 +1353,20 @@ describe("generic tenant pages", () => {
     {
       error: new ApiClientError(
         409,
+        "TENANT_PURGE_IN_PROGRESS",
+        "Another tenant operation is in progress.",
+      ),
+      message:
+        "Hay una operación en curso para este tenant. Espera a que termine antes de reintentar.",
+    },
+    {
+      error: new ApiClientError(409, "HTTP_409", "Conflict"),
+      message:
+        "Un conflicto interrumpió la eliminación. Actualiza el tenant y vuelve a intentarlo.",
+    },
+    {
+      error: new ApiClientError(
+        409,
         "TENANT_BRANDING_UPLOAD_IN_PROGRESS",
         "Upload in progress.",
       ),
@@ -1330,6 +1381,15 @@ describe("generic tenant pages", () => {
       ),
       message:
         "Algunos servicios de limpieza no están disponibles. Actualiza el tenant e intenta eliminarlo de nuevo.",
+    },
+    {
+      error: new ApiClientError(
+        503,
+        "TENANT_REQUEST_CLEANUP_UNAVAILABLE",
+        "Savia Request cleanup unavailable.",
+      ),
+      message:
+        "No se pudo completar la limpieza de Savia Request. El tenant quedó inactivo. Intenta eliminarlo de nuevo.",
     },
     {
       error: new ApiClientError(0, "REQUEST_TIMEOUT", "Request timed out."),

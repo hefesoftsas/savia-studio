@@ -30,6 +30,7 @@ export type UserRecord = {
   lastName: string;
   platformAdmin: boolean;
   isActive: boolean;
+  deletionPending?: boolean;
   isBanned: boolean;
   twoFactorEnabled: boolean;
   emailVerified?: boolean;
@@ -76,9 +77,10 @@ export function toUserRecord(user: ManagedIdentityUser): UserRecord {
     lastName,
     platformAdmin: user.attributes.globalRoles.includes("platform_admin"),
     isActive: user.attributes.isActive,
-    isBanned: user.attributes.account.isBanned,
-    twoFactorEnabled: user.attributes.account.twoFactorEnabled,
-    emailVerified: user.attributes.account.emailVerified === true,
+    ...(user.attributes.deletionPending ? { deletionPending: true } : {}),
+    isBanned: user.attributes.account?.isBanned ?? false,
+    twoFactorEnabled: user.attributes.account?.twoFactorEnabled ?? false,
+    emailVerified: user.attributes.account?.emailVerified === true,
     memberships: user.relationships.memberships.map((membership) => ({
       id: membership.id,
       tenantId: Number(

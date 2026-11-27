@@ -10,9 +10,12 @@ type Profile = {
   permissions: AuthPermissions;
   expiresAt: number;
 };
+type ProfileRecord =
+  | (Profile & { revocationId?: string })
+  | { environment: string; revocationId: string };
 type Metadata = { key: string; value: unknown };
 class SessionDb extends Dexie {
-  profiles!: Table<Profile, string>;
+  profiles!: Table<ProfileRecord, string>;
   metadata!: Table<Metadata, string>;
   constructor() {
     super("savia-workspaces");
@@ -21,14 +24,72 @@ class SessionDb extends Dexie {
 }
 let database: SessionDb | undefined;
 const db = () => (database ??= new SessionDb());
-export async function clearSessionCache(environment: string) {
+export async function clearSessionCache(
+  environment: string,
+  expectedRevision?: string | null,
+) {
   if (typeof indexedDB === "undefined") return;
+  const update = async (marker?: ProfileRecord) => {
+    const storage = db();
+    await storage.transaction("rw", storage.profiles, async () => {
+      // A rejected check can revoke only the state it originally read.
+      if (expectedRevision !== undefined) {
+        const current = await storage.profiles.get(environment);
+        if ((current?.revocationId ?? null) !== expectedRevision) return;
+      }
+      if (marker) await storage.profiles.put(marker);
+      else await storage.profiles.delete(environment);
+    });
+  };
   try {
-    await db().profiles.delete(environment);
+    // Replace the cached identity with a marker that other tabs can detect.
+    await update({ environment, revocationId: crypto.randomUUID() });
   } catch {
-    /* Cache availability must not block logout. */
+    try {
+      await update();
+    } catch {
+      /* Cache availability must not block logout. */
+    }
   }
 }
+
+async function readProfileRecord(environment: string) {
+  if (typeof indexedDB === "undefined") return undefined;
+  try {
+    return (await db().profiles.get(environment)) ?? null;
+  } catch {
+    return undefined;
+  }
+}
+
+class StaleLeaseError extends Error {
+  constructor() {
+    super("The authenticated session changed during the offline lease check.");
+  }
+}
+
+type LeaseSnapshot = {
+  started: number;
+  // null represents an empty store and undefined means it could not be read.
+  record: ProfileRecord | null | undefined;
+};
+
+function revisionOf(record: LeaseSnapshot["record"]) {
+  return record === undefined ? undefined : (record?.revocationId ?? null);
+}
+
+function wasRevoked(
+  previous: LeaseSnapshot["record"],
+  current: LeaseSnapshot["record"],
+): boolean {
+  return (
+    previous !== undefined &&
+    current !== undefined &&
+    ((previous !== null && current === null) ||
+      revisionOf(previous) !== revisionOf(current))
+  );
+}
+
 export async function readWorkspaceMetadata<T>(
   key: string,
 ): Promise<T | undefined> {
@@ -90,76 +151,109 @@ export function createLocalSession(
   verifyRemote: () => Promise<void> = () => remote.checkSession(),
 ): AuthSession {
   let cached: Profile | undefined;
-  const read = async () => {
-    let profile = cached;
-    if (typeof indexedDB !== "undefined") {
-      try {
-        profile = await db().profiles.get(environment);
-      } catch {
-        /* A previously verified in-memory lease survives temporary storage failure. */
-      }
-    }
-    if (!profile || profile.expiresAt <= Date.now())
+  let generation = 0;
+  const assertCurrent = (started: number) => {
+    if (started !== generation) throw new StaleLeaseError();
+  };
+  const snapshot = async (): Promise<LeaseSnapshot> => {
+    const started = generation;
+    const record = await readProfileRecord(environment);
+    assertCurrent(started);
+    return { started, record };
+  };
+  const read = ({ started, record }: LeaseSnapshot) => {
+    assertCurrent(started);
+    // A missing record or revocation marker takes precedence over memory.
+    if (record !== undefined)
+      cached = record && "identity" in record ? record : undefined;
+    if (!cached || cached.expiresAt <= Date.now())
       throw new Error(
         "Conecta para verificar tu acceso al espacio de trabajo.",
       );
-    return profile;
+    return cached;
   };
-  let leasePromise: Promise<void> | null = null;
-  const invalidate = async () => {
+  let renewal: {
+    revision: string | null | undefined;
+    promise: Promise<void>;
+  } | null = null;
+  const invalidate = async (expectedRevision?: string | null) => {
+    generation++;
     cached = undefined;
-    leasePromise = null;
-    await clearSessionCache(environment);
+    renewal = null;
+    await clearSessionCache(environment, expectedRevision);
   };
-  const capture = async () => {
+  const capture = async ({ started, record }: LeaseSnapshot) => {
     const [identity, permissions] = await Promise.all([
       remote.getIdentity(),
       remote.getPermissions(),
     ]);
-    const profile = {
+    assertCurrent(started);
+    const profile: Profile = {
       environment,
       identity,
       permissions,
       expiresAt: Date.now() + LEASE_MS,
     };
-    if (typeof indexedDB !== "undefined")
+    if (record !== undefined)
       try {
-        await db().profiles.put(profile);
-      } catch {
+        const storage = db();
+        await storage.transaction("rw", storage.profiles, async () => {
+          const current = await storage.profiles.get(environment);
+          if (wasRevoked(record, current ?? null)) throw new StaleLeaseError();
+          await storage.profiles.put({
+            ...profile,
+            revocationId: current?.revocationId,
+          });
+        });
+      } catch (error) {
+        if (error instanceof StaleLeaseError) throw error;
         /* Online authentication still succeeds without persistence. */
       }
+    assertCurrent(started);
     cached = profile;
   };
-  const renewLease = async () => {
-    if (!leasePromise) {
-      leasePromise = (async () => {
+  const renewLease = async (scope: LeaseSnapshot) => {
+    assertCurrent(scope.started);
+    const revision = revisionOf(scope.record);
+    if (!renewal || renewal.revision !== revision) {
+      const pending = (async () => {
         await verifyRemote();
-        await capture();
+        assertCurrent(scope.started);
+        await capture(scope);
       })().finally(() => {
-        leasePromise = null;
+        if (renewal?.promise === pending) renewal = null;
       });
+      renewal = { revision, promise: pending };
     }
-    await leasePromise;
+    await renewal.promise;
+    assertCurrent(scope.started);
   };
-  const ensureLease = async () => {
+  const ensureLease = async (scope: LeaseSnapshot) => {
     try {
-      await read();
+      read(scope);
     } catch {
-      await renewLease();
+      await renewLease(scope);
     }
   };
   const fallback = async <T>(
-    action: () => Promise<T>,
+    action: (scope: LeaseSnapshot) => Promise<T>,
     pick: (profile: Profile) => T,
   ): Promise<T> => {
+    const scope = await snapshot();
     try {
-      return await action();
+      const result = await action(scope);
+      assertCurrent(scope.started);
+      return result;
     } catch (error) {
+      if (scope.started !== generation || error instanceof StaleLeaseError)
+        throw error;
       if (!isOfflineError(error)) {
-        await invalidate();
+        await invalidate(revisionOf(scope.record));
         throw error;
       }
-      return pick(await read());
+      const record = await readProfileRecord(environment);
+      if (wasRevoked(scope.record, record)) throw new StaleLeaseError();
+      return pick(read({ started: scope.started, record }));
     }
   };
   return {
@@ -167,31 +261,32 @@ export function createLocalSession(
     getAuthorizeUrl: () => remote.getAuthorizeUrl(),
     getAccessToken: () => remote.getAccessToken(),
     handleCallback: async () => {
+      const scope = await snapshot();
       const result = await remote.handleCallback();
-      await renewLease();
+      await renewLease(scope);
       return result;
     },
     checkSession: async () => {
       await fallback(
-        async () => {
+        async (scope) => {
           await remote.checkSession();
-          await renewLease();
+          await renewLease(scope);
         },
         () => undefined,
       );
     },
     getIdentity: () =>
       fallback(
-        async () => {
-          await ensureLease();
+        async (scope) => {
+          await ensureLease(scope);
           return remote.getIdentity();
         },
         (p) => p.identity,
       ),
     getPermissions: () =>
       fallback(
-        async () => {
-          await ensureLease();
+        async (scope) => {
+          await ensureLease(scope);
           return remote.getPermissions();
         },
         (p) => p.permissions,

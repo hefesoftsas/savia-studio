@@ -58,8 +58,8 @@ branding display name does not rename the tenant's legal/administrative name or 
 Changes are saved explicitly; a version conflict requires reloading the saved version
 before overwriting another administrator's changes.
 Uploading a logo, cover, or animation stages it for preview. **Save changes**
-publishes it for the app and login. If the upload confirmation times out, the editor
-keeps your draft and lets you select the file again.
+publishes it for the app and login. If the upload confirmation stalls, Savia releases
+the editor and keeps your unsaved changes. Select the file again to retry.
 
 The tenant hostname resolves the public identity. The canonical platform host keeps
 Savia's identity, except authentication pages initiated from a tenant hostname: those

@@ -15,7 +15,11 @@ const object = {
   config: makeConfig({
     nombre: { type: "Textbox", label: "Nombre" },
     activo: { type: "Toggle", label: "Activo" },
-    etiquetas: { type: "Textbox", label: "Etiquetas", config: { multiple: true } },
+    etiquetas: {
+      type: "Textbox",
+      label: "Etiquetas",
+      config: { multiple: true },
+    },
   }),
 };
 
@@ -35,6 +39,18 @@ describe("records CSV export", () => {
       [{ id: "1", nombre: 'Uno, dos\n"Tres"' }],
     );
     expect(parseCsv(csv).rows).toEqual([['Uno, dos\n"Tres"']]);
+  });
+
+  it("escapes leading formula characters in downloaded CSV files", () => {
+    const csv = buildRecordsCsv(
+      ["nombre"],
+      ["Nombre"],
+      [
+        { id: "1", nombre: "+57 300 123 4567" },
+        { id: "2", nombre: "=1+1" },
+      ],
+    );
+    expect(parseCsv(csv).rows).toEqual([["'+57 300 123 4567"], ["'=1+1"]]);
   });
 
   it("validates visible export columns against the object schema", () => {

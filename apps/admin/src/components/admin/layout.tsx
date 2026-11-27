@@ -3,11 +3,15 @@ import { LogoutTransition } from "./logout-transition";
 import { TenantScopeBoundary } from "@/features/tenants/tenant-scope-boundary";
 import { useCurrentTenant } from "@/features/tenants/use-current-tenant";
 import { BrandingRealtimeSync } from "@/realtime/branding-realtime";
+import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
+import { notifyStudioTenantsChanged } from "@/api/tenant-workspaces-client";
 import { PwaInstallBanner } from "@/pwa";
 import { CookieConsentBanner } from "@/consent/cookie-consent-banner";
+import { hasCookieConsent } from "@/consent/cookie-consent-storage";
 import type { ErrorInfo } from "react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { bookingOrganizationPickerHref } from "@/features/bookings/booking-organization-link";
+import { BookingSignInRecovery } from "@/features/bookings/booking-sign-in-recovery";
 import { isSaviaFlowsDisabled } from "@/features/savia-flows/availability";
 import { cn } from "@/lib/utils";
 import type { CoreLayoutProps } from "ra-core";
@@ -21,6 +25,7 @@ import {
   useNavigationType,
 } from "react-router-dom";
 import { useRegisterScreenContext } from "@/features/assistant/active-screen-context";
+import { useOptionalAppServices } from "@/features/assistant/assistant-context";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { Notification } from "@/components/admin/notification";
@@ -245,12 +250,27 @@ export const Layout = (props: CoreLayoutProps) => {
     !isSaviaFlowsDisabled() &&
     (pathname === "/savia-flows" || pathname.startsWith("/savia-flows/"));
   const closingSession = useLogoutPending();
+  const queryClient = useOptionalAppServices()?.queryClient;
+  useRealtimeRefresh({
+    topics: ["account"],
+    enabled: !closingSession,
+    accepts: (event) => event.collection === "security",
+    refresh: () => {
+      notifyStudioTenantsChanged();
+      return queryClient?.invalidateQueries({
+        queryKey: ["auth", "canAccess"],
+      });
+    },
+  });
   const tenant = useCurrentTenant();
+  const viewingBookings = matchPath("/bookings", pathname) !== null;
   const organizationPickerHref =
-    tenant.scopeStatus === "error" && matchPath("/bookings", pathname)
+    tenant.scopeStatus === "error" && viewingBookings
       ? bookingOrganizationPickerHref(window.location.hostname, search)
       : undefined;
   const [errorInfo, setErrorInfo] = useState<ErrorInfo | undefined>(undefined);
+  const [cookieConsentDecided, setCookieConsentDecided] =
+    useState(hasCookieConsent);
   const handleError = (_: unknown, info: ErrorInfo) => {
     setErrorInfo(info);
   };
@@ -267,7 +287,7 @@ export const Layout = (props: CoreLayoutProps) => {
           {!hasModuleNavigation && <AppSidebar />}
           <main
             className={cn(
-              "ml-auto min-w-0 w-full max-w-full overflow-x-hidden",
+              "group/workspace ml-auto min-w-0 w-full max-w-full overflow-x-hidden",
               !hasModuleNavigation && [
                 "md:peer-data-[state=collapsed]:w-[calc(100%-var(--sidebar-width-icon)-1rem)]",
                 "md:peer-data-[state=expanded]:w-[calc(100%-var(--sidebar-width))]",
@@ -314,21 +334,27 @@ export const Layout = (props: CoreLayoutProps) => {
                     !hasModuleNavigation && "px-3 pb-6 sm:px-4",
                   )}
                 >
-                  <TenantScopeBoundary
-                    status={tenant.scopeStatus}
-                    retry={tenant.retry}
-                    organizationPickerHref={organizationPickerHref}
-                  >
-                    {props.children}
-                  </TenantScopeBoundary>
+                  {viewingBookings && tenant.requiresSignIn ? (
+                    <BookingSignInRecovery className="p-6" />
+                  ) : (
+                    <TenantScopeBoundary
+                      status={tenant.scopeStatus}
+                      retry={tenant.retry}
+                      organizationPickerHref={organizationPickerHref}
+                    >
+                      {props.children}
+                    </TenantScopeBoundary>
+                  )}
                 </div>
               </Suspense>
             </ErrorBoundary>
+            <CookieConsentBanner
+              onDecision={() => setCookieConsentDecided(true)}
+            />
+            <PwaInstallBanner deferred={!cookieConsentDecided} />
           </main>
         </SaviaRequestProvider>
         <Notification />
-        <PwaInstallBanner />
-        <CookieConsentBanner />
       </SidebarProvider>
       {closingSession && <LogoutTransition />}
     </>

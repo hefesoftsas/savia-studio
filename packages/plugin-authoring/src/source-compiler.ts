@@ -1,4 +1,4 @@
-import type { AuthoringBundles } from "./bundles";
+import { resolveAuthoringBundle, type AuthoringBundleSources } from "./bundles";
 import { parsePluginOriginalSourceFiles } from "@savia/studio-shared/plugin-projects";
 import { validatePluginEntrySource } from "@savia/studio-shared/plugin-store";
 
@@ -66,10 +66,10 @@ export function findMissingPluginSourceAssets(archive: string): string[] {
   return [...missing];
 }
 
-/** Build only retained modules and shipped dependencies; never fetch or evaluate code. */
+/** Build retained modules against shipped dependencies without evaluating plugin code. */
 export async function compilePluginSourceArchive(
   archive: string,
-  bundles: AuthoringBundles,
+  bundles: AuthoringBundleSources,
 ): Promise<string> {
   const files = parsePluginOriginalSourceFiles(archive);
   const entry = pluginSourceEntry(files);
@@ -187,8 +187,11 @@ export async function compilePluginSourceArchive(
     modules.set(name, code);
   }
   visit(entry);
-  const dependencies = [...vendors].flatMap((name) =>
+  const dependencySources = [...vendors].flatMap((name) =>
     bundles.vendorBundles[name] ? [bundles.vendorBundles[name]] : [],
+  );
+  const [runtimeBundle, ...dependencies] = await Promise.all(
+    [bundles.runtimeBundle, ...dependencySources].map(resolveAuthoringBundle),
   );
   const registry: Record<string, string> = {
     react: "SaviaPluginReact.React",
@@ -197,7 +200,7 @@ export async function compilePluginSourceArchive(
     "pdf-lib": "SaviaPluginPdf",
   };
   const entryJs = [
-    bundles.runtimeBundle,
+    runtimeBundle,
     ...dependencies,
     "const React = SaviaPluginReact.React;",
     `const __saviaVendors = {${[...vendors].map((name) => `${javascriptLiteral(name)}: ${registry[name]}`).join(",")}};`,

@@ -4,6 +4,7 @@ import { useMessages } from "@/i18n/core";
 import { recordsMessages } from "@/i18n/locales/records";
 import { RelatedRecordEditor } from "./related-record-editor";
 import type { RelatedRecordChanges } from "@savia/studio-shared/related-records";
+import { canonicalJson } from "@savia/studio-shared/solution-package";
 import { DateTimeField } from "./date-time-field";
 import { CollectionOptionField } from "./collection-option-field";
 import {
@@ -25,7 +26,12 @@ import {
   type IFieldProps,
 } from "@form-eng/core";
 import ConversationWizard from "./conversation-wizard";
-import { AttachmentQueueProvider } from "./attachment-queue";
+import {
+  AttachmentQueueProvider,
+  releaseUnavailableAttachmentUploads,
+  updateUploadingFiles,
+  type AttachmentUploadFailure,
+} from "./attachment-queue";
 import { registry } from "./fields";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -46,7 +52,12 @@ import {
   isSectionVisible,
   prepareRecord,
 } from "@savia/studio-shared/rules";
-import type { TemporaryR2Attachment } from "./r2-attachment-upload";
+import {
+  discardTemporaryAttachmentsInBackground,
+  expiredAttachmentIds,
+  TemporaryAttachmentUnavailableError,
+  type TemporaryR2Attachment,
+} from "./r2-attachment-upload";
 import "./designer-enhancements.css";
 import "./wizard.css";
 const EMPTY_VALUES: Record<string, unknown> = {};
@@ -226,7 +237,7 @@ export type DynamicFormProps = {
     data: Record<string, unknown>,
     previous?: StudioRecord,
     relations?: RelatedRecordChanges[],
-    options?: { idempotencyKey: string },
+    options?: { idempotencyKey?: string; hasTemporaryAttachments?: boolean },
   ) => Promise<StudioRecord | void>;
   onPersistAttachments?: (
     record: StudioRecord,
@@ -236,6 +247,8 @@ export type DynamicFormProps = {
   onUploadTemporaryAttachment?: (
     field: string,
     file: File,
+    recordId?: string,
+    createRequestKey?: string,
   ) => Promise<TemporaryR2Attachment>;
   onPersistTemporaryAttachments?: (
     record: StudioRecord,
@@ -289,21 +302,13 @@ function StepForm({
 }: {
   object: StudioObject;
   values?: Record<string, unknown>;
-  onSave: (
-    data: Record<string, unknown>,
-    previous?: StudioRecord,
-    relations?: RelatedRecordChanges[],
-    options?: { idempotencyKey: string },
-  ) => Promise<StudioRecord | void>;
+  onSave: DynamicFormProps["onSave"];
   onPersistAttachments?: (
     record: StudioRecord,
     attachments: PendingAttachment[],
     onStatus: (status: AttachmentUploadStatus) => void,
   ) => Promise<void>;
-  onUploadTemporaryAttachment?: (
-    field: string,
-    file: File,
-  ) => Promise<TemporaryR2Attachment>;
+  onUploadTemporaryAttachment?: DynamicFormProps["onUploadTemporaryAttachment"];
   onPersistTemporaryAttachments?: (
     record: StudioRecord,
     attachments: TemporaryR2Attachment[],
@@ -339,8 +344,11 @@ function StepForm({
     Record<string, File[]>
   >({});
   const [uploadingAttachments, setUploadingAttachments] = useState<
-    Record<string, File | undefined>
+    Record<string, File[]>
   >({});
+  const [failedAttachments, setFailedAttachments] = useState<
+    AttachmentUploadFailure[]
+  >([]);
   const [temporaryAttachments, setTemporaryAttachments] = useState<
     { field: string; file: File; attachment: TemporaryR2Attachment }[]
   >([]);
@@ -348,7 +356,15 @@ function StepForm({
   const [savedRecordId, setSavedRecordId] = useState(() =>
     String(values.id ?? ""),
   );
-  const [savedRecord, setSavedRecord] = useState<StudioRecord | undefined>();
+  const confirmedWrite = useRef<
+    | {
+        record: StudioRecord;
+        payload: string;
+        fields?: Record<string, string | undefined>;
+        pendingAttachments: boolean;
+      }
+    | undefined
+  >(undefined);
   const steps = object.config.studio?.wizard?.enabled
     ? object.config.studio.wizard.steps
     : [];
@@ -362,6 +378,9 @@ function StepForm({
   const temporaryAttachmentsRef = useRef<
     { field: string; file: File; attachment: TemporaryR2Attachment }[]
   >([]);
+  const submittedAttachments = useRef<TemporaryR2Attachment[] | undefined>(
+    undefined,
+  );
   const handledAttachmentsRef = useRef(new Set<File>());
   const cancelledRef = useRef(false);
   const discardTemporaryAttachmentsRef = useRef(onDiscardTemporaryAttachments);
@@ -371,11 +390,15 @@ function StepForm({
   useEffect(
     () => () => {
       cancelledRef.current = true;
-      const attachments = temporaryAttachmentsRef.current.map(
-        ({ attachment }) => attachment,
+      const attachments = temporaryAttachmentsRef.current
+        .map(({ attachment }) => attachment)
+        .filter(
+          (attachment) => !submittedAttachments.current?.includes(attachment),
+        );
+      discardTemporaryAttachmentsInBackground(
+        discardTemporaryAttachmentsRef.current,
+        attachments,
       );
-      if (attachments.length)
-        void discardTemporaryAttachmentsRef.current?.(attachments);
     },
     [],
   );
@@ -388,10 +411,11 @@ function StepForm({
     cancelledRef.current = false;
     setQueuedAttachments({});
     setUploadingAttachments({});
+    setFailedAttachments([]);
     setTemporaryAttachments([]);
     setAttachmentVersion(0);
     setSavedRecordId(String(values.id ?? ""));
-    setSavedRecord(undefined);
+    confirmedWrite.current = undefined;
   }, [editorKey, values.id]);
   const replaceTemporaryAttachments = (
     next: { field: string; file: File; attachment: TemporaryR2Attachment }[],
@@ -399,10 +423,50 @@ function StepForm({
     temporaryAttachmentsRef.current = next;
     setTemporaryAttachments(next);
   };
+  const restartTemporaryUploads = (ids: string[]) => {
+    const previous = temporaryAttachmentsRef.current;
+    const retained = releaseUnavailableAttachmentUploads(
+      previous,
+      ids,
+      handledAttachmentsRef.current,
+    );
+    if (retained === previous) return false;
+    replaceTemporaryAttachments(retained);
+    setQueuedAttachments({ ...queuedAttachmentsRef.current });
+    setError(
+      t("Estamos volviendo a cargar un adjunto. Guarda cuando termine."),
+    );
+    return true;
+  };
   const setAttachmentFiles = (field: string, files: File[]) => {
+    if (submittedAttachments.current) return;
+    for (const previous of queuedAttachmentsRef.current[field] ?? [])
+      if (!files.includes(previous))
+        handledAttachmentsRef.current.delete(previous);
+    setFailedAttachments((previous) =>
+      previous.filter(
+        (failure) => failure.field !== field || files.includes(failure.file),
+      ),
+    );
     const next = { ...queuedAttachmentsRef.current, [field]: files };
     queuedAttachmentsRef.current = next;
     setQueuedAttachments(next);
+  };
+  const retryAttachment = (field: string, file: File) => {
+    if (
+      submittedAttachments.current ||
+      !failedAttachments.some(
+        (failure) => failure.field === field && failure.file === file,
+      )
+    )
+      return;
+    handledAttachmentsRef.current.delete(file);
+    setFailedAttachments((previous) =>
+      previous.filter(
+        (failure) => failure.field !== field || failure.file !== file,
+      ),
+    );
+    setQueuedAttachments({ ...queuedAttachmentsRef.current });
   };
   useEffect(() => {
     if (!onUploadTemporaryAttachment) return;
@@ -424,14 +488,23 @@ function StepForm({
       for (const file of files) {
         if (handledAttachmentsRef.current.has(file)) continue;
         handledAttachmentsRef.current.add(file);
-        setUploadingAttachments((previous) => ({ ...previous, [field]: file }));
-        void onUploadTemporaryAttachment(field, file)
-          .then(async (attachment) => {
+        setUploadingAttachments((previous) =>
+          updateUploadingFiles(previous, field, file, true),
+        );
+        void onUploadTemporaryAttachment(
+          field,
+          file,
+          savedRecordId || undefined,
+        )
+          .then((attachment) => {
             if (
               cancelledRef.current ||
               !queuedAttachmentsRef.current[field]?.includes(file)
             ) {
-              await onDiscardTemporaryAttachments?.([attachment]);
+              discardTemporaryAttachmentsInBackground(
+                onDiscardTemporaryAttachments,
+                [attachment],
+              );
               return;
             }
             replaceTemporaryAttachments([
@@ -440,18 +513,32 @@ function StepForm({
             ]);
             setAttachmentVersion((version) => version + 1);
           })
-          .catch((cause: Error) => setError(cause.message))
-          .finally(() =>
-            setUploadingAttachments((previous) => ({
+          .catch((cause: unknown) => {
+            if (
+              cancelledRef.current ||
+              !queuedAttachmentsRef.current[field]?.includes(file)
+            )
+              return;
+            setFailedAttachments((previous) => [
               ...previous,
-              [field]: undefined,
-            })),
+              {
+                field,
+                file,
+                message: cause instanceof Error ? cause.message : "",
+              },
+            ]);
+          })
+          .finally(() =>
+            setUploadingAttachments((previous) =>
+              updateUploadingFiles(previous, field, file, false),
+            ),
           );
       }
   }, [
     onDiscardTemporaryAttachments,
     onUploadTemporaryAttachment,
     queuedAttachments,
+    savedRecordId,
   ]);
   const uploadedAttachmentFiles = useMemo(
     () =>
@@ -461,8 +548,9 @@ function StepForm({
       }, {}),
     [temporaryAttachments],
   );
-  const hasPendingAttachmentUpload =
-    Object.values(uploadingAttachments).some(Boolean);
+  const hasPendingAttachmentUpload = Object.values(uploadingAttachments).some(
+    (files) => files.length > 0,
+  );
   const markAttachmentUploaded = (field: string, file: File) =>
     setQueuedAttachments((previous) => ({
       ...previous,
@@ -477,15 +565,10 @@ function StepForm({
     file,
     status,
   }: AttachmentUploadStatus) => {
-    if (status === "uploading") {
-      setUploadingAttachments((previous) => ({ ...previous, [field]: file }));
-      return;
-    }
-    setUploadingAttachments((previous) => ({
-      ...previous,
-      [field]: undefined,
-    }));
-    refreshAttachments(field, file);
+    setUploadingAttachments((previous) =>
+      updateUploadingFiles(previous, field, file, status === "uploading"),
+    );
+    if (status === "uploaded") refreshAttachments(field, file);
   };
   useEffect(() => {
     if (activeStep) {
@@ -502,21 +585,21 @@ function StepForm({
     setFieldErrors({});
     setFocusField("");
   };
-  const cancel = async () => {
+  const cancel = () => {
+    if (submittedAttachments.current) return;
     cancelledRef.current = true;
     queuedAttachmentsRef.current = {};
     setQueuedAttachments({});
+    setFailedAttachments([]);
     const attachments = temporaryAttachmentsRef.current.map(
       ({ attachment }) => attachment,
     );
-    try {
-      if (attachments.length && onDiscardTemporaryAttachments)
-        await onDiscardTemporaryAttachments(attachments);
-      replaceTemporaryAttachments([]);
-      onCancel?.();
-    } catch (cause) {
-      setError((cause as Error).message);
-    }
+    replaceTemporaryAttachments([]);
+    discardTemporaryAttachmentsInBackground(
+      onDiscardTemporaryAttachments,
+      attachments,
+    );
+    onCancel?.();
   };
   // Shared validation owns required/conditional checks; form-engine remains the live form runtime.
   // Remote relations use their own runtime type: Dropdown clears IDs absent from its
@@ -678,7 +761,10 @@ function StepForm({
             setFiles: setAttachmentFiles,
             uploading: uploadingAttachments,
             uploaded: uploadedAttachmentFiles,
+            failures: failedAttachments,
+            retry: retryAttachment,
             version: attachmentVersion,
+            saving: busy,
           }}
         >
           <RulesEngineProvider>
@@ -720,6 +806,7 @@ function StepForm({
                   ) : null
                 }
                 onSubmit={async (data) => {
+                  if (submittedAttachments.current) return;
                   setError("");
                   setFieldErrors({});
                   try {
@@ -760,15 +847,26 @@ function StepForm({
                           "Revisa los campos del registro relacionado antes de guardar.",
                         );
                     }
-                    const changedFields = managedEdit
-                      ? new Set(
-                          Object.keys(object.config.fields).filter(
-                            (name) =>
-                              JSON.stringify(data[name]) !==
-                              JSON.stringify(defaults[name]),
-                          ),
+                    const previousWrite = confirmedWrite.current;
+                    const fieldValues = managedEdit
+                      ? Object.fromEntries(
+                          Object.keys(object.config.fields).map((name) => [
+                            name,
+                            JSON.stringify(data[name]),
+                          ]),
                         )
                       : undefined;
+                    const changedFields =
+                      fieldValues &&
+                      new Set(
+                        Object.keys(fieldValues).filter((name) => {
+                          const previousFields = previousWrite?.fields;
+                          const previousValue = previousFields
+                            ? previousFields[name]
+                            : JSON.stringify(defaults[name]);
+                          return fieldValues[name] !== previousValue;
+                        }),
+                      );
                     const relevantErrors = Object.fromEntries(
                       Object.entries(result.errors).filter(
                         ([name]) =>
@@ -804,6 +902,25 @@ function StepForm({
                       }
                       return;
                     }
+                    const failed = failedAttachments.find(
+                      ({ field }) =>
+                        lastStep ||
+                        (object.config.fields[field]?.config?.step ??
+                          steps[0]?.id) === activeStep?.id,
+                    );
+                    if (failed) {
+                      if (activeStep && lastStep) {
+                        const step =
+                          object.config.fields[failed.field]?.config?.step ??
+                          steps[0]?.id;
+                        const destination = steps.findIndex(
+                          ({ id }) => id === step,
+                        );
+                        if (destination >= 0) setStepIndex(destination);
+                      }
+                      setFocusField(failed.field);
+                      return;
+                    }
                     if (activeStep && !lastStep) {
                       setStepIndex(activeIndex + 1);
                       setFocusField("");
@@ -833,6 +950,12 @@ function StepForm({
                       );
                       return;
                     }
+                    if (
+                      !confirmedWrite.current &&
+                      restartTemporaryUploads(expiredAttachmentIds(temporary))
+                    )
+                      return;
+                    submittedAttachments.current = temporary;
                     setBusy(true);
                     const attachments = fieldEntries(object).flatMap(
                       ([field, definition]) =>
@@ -848,11 +971,33 @@ function StepForm({
                           ),
                         )
                       : result.data;
-                    const saved = savedRecord
-                      ? await onSave(recordData, savedRecord)
-                      : await onSave(recordData);
+                    const payload = canonicalJson(recordData);
+                    const recordChanged = changedFields
+                      ? changedFields.size > 0
+                      : payload !== previousWrite?.payload;
+                    let saved: StudioRecord | void = previousWrite?.record;
+                    if (!previousWrite?.pendingAttachments || recordChanged) {
+                      saved = temporary.length
+                        ? await onSave(
+                            recordData,
+                            previousWrite?.record,
+                            undefined,
+                            {
+                              hasTemporaryAttachments: true,
+                            },
+                          )
+                        : previousWrite
+                          ? await onSave(recordData, previousWrite.record)
+                          : await onSave(recordData);
+                    }
                     if (saved) {
-                      setSavedRecord(saved);
+                      confirmedWrite.current = {
+                        record: saved,
+                        payload,
+                        fields: fieldValues,
+                        pendingAttachments:
+                          temporary.length > 0 || attachments.length > 0,
+                      };
                       setSavedRecordId(saved.id);
                     }
                     if (temporary.length) {
@@ -880,10 +1025,18 @@ function StepForm({
                         updateAttachmentStatus,
                       );
                     }
+                    if (confirmedWrite.current)
+                      confirmedWrite.current.pendingAttachments = false;
                     onSaved?.(saved);
                   } catch (e) {
-                    setError((e as Error).message);
+                    if (!(
+                      !cancelledRef.current &&
+                      e instanceof TemporaryAttachmentUnavailableError &&
+                      restartTemporaryUploads([e.attachmentId])
+                    ))
+                      setError((e as Error).message);
                   } finally {
+                    submittedAttachments.current = undefined;
                     setBusy(false);
                     setUploadingAttachments({});
                   }
@@ -902,7 +1055,7 @@ function StepForm({
                         variant="outline"
                         size="sm"
                         disabled={busy || isSubmitting}
-                        onClick={() => void cancel()}
+                        onClick={cancel}
                       >
                         {t("Cancelar")}
                       </Button>

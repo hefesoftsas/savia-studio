@@ -94,6 +94,27 @@ describe("normalizeSchema", () => {
       normalizeSchema("/v1/studio/0", response, "missing"),
     ).toBeUndefined();
   });
+
+  it.each([
+    "jsonapi",
+    "postgres",
+    "mysql",
+    "mssql",
+    "mongodb",
+    "mcp",
+    "domain",
+  ])("marks bound %s collections as list-only for widget summaries", (kind) => {
+    const metadata = {
+      data: [
+        { name: "contacts", config: { studio: { collection: { kind } } } },
+      ],
+    };
+    expect(
+      normalizeSchema("/v1/studio/14", metadata, "contacts"),
+    ).toMatchObject({
+      summarySupported: false,
+    });
+  });
 });
 
 describe("widgetDeepLink", () => {

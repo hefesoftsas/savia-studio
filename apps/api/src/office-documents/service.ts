@@ -1,4 +1,5 @@
 import type { AppActor } from "../auth/types";
+import { cleanDeletedAttachmentObjects } from "@savia/studio-server/attachment-deletions";
 import { activeTenant, activeTenantScope, PagesError } from "../pages/service";
 import {
   assertOfficeSuiteEnabled,
@@ -602,27 +603,11 @@ export class OfficeDocumentsService {
         "VERSION_CONFLICT",
         "A newer version exists; reload the document before deleting",
       );
-    const revisions = await this.db
-      .prepare(
-        `SELECT r.storage_key FROM office_document_revisions r
-        JOIN office_documents d ON d.id=r.document_id
-        WHERE d.id=? AND d.tenant_id=? AND d.owner_id=? AND d.version=? AND ${this.scope("d")} AND ${this.enabledScope("d.tenant_id")}`,
-      )
-      .bind(
-        id,
-        row.tenant_id,
-        this.actor.principal.id,
-        version,
-        this.actor.principal.id,
-        this.actor.principal.id,
-        this.actor.principal.id,
-        this.actor.principal.id,
-      )
-      .all<{ storage_key: string }>();
+    const cleanupTarget = { tenant: String(row.tenant_id), fileId: id };
     const guardId = randomId();
-    let results: D1Result[];
+    let deleted: D1Result | undefined;
     try {
-      results = await this.db.batch([
+      [, , deleted] = await this.db.batch([
         this.db
           .prepare(
             `INSERT INTO studio_write_guards(id,valid)
@@ -642,6 +627,24 @@ export class OfficeDocumentsService {
             this.actor.principal.id,
             this.actor.principal.id,
             this.actor.principal.id,
+          ),
+        this.db
+          .prepare(
+            `WITH document_keys AS (
+              SELECT storage_key FROM office_document_revisions WHERE document_id=?
+              UNION
+              SELECT storage_key FROM office_documents WHERE id=? AND tenant_id=?
+            )
+            INSERT INTO studio_file_deletions (storage_key,tenant_id,file_id)
+            SELECT storage_key,?,? FROM document_keys WHERE true
+            ON CONFLICT(storage_key) DO NOTHING`,
+          )
+          .bind(
+            id,
+            id,
+            row.tenant_id,
+            cleanupTarget.tenant,
+            cleanupTarget.fileId,
           ),
         this.db
           .prepare(
@@ -673,7 +676,7 @@ export class OfficeDocumentsService {
         );
       throw error;
     }
-    if (!results[1]?.meta.changes) {
+    if (!deleted?.meta.changes) {
       const current = await this.load(id);
       if (current.version !== version)
         throw new OfficeDocumentsError(
@@ -684,15 +687,9 @@ export class OfficeDocumentsService {
       throw notFound();
     }
     try {
-      await this.bucket.delete(
-        revisions.results.map((revision) => revision.storage_key),
-      );
-    } catch (error) {
-      // The D1 row is gone, so preserve delete success and leave only inaccessible R2 orphans.
-      console.error(
-        "Unable to delete removed office document revisions",
-        error,
-      );
+      await cleanDeletedAttachmentObjects(this.db, this.bucket, cleanupTarget);
+    } catch {
+      console.error("OFFICE_DOCUMENT_CLEANUP_FAILED");
     }
   }
 

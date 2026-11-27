@@ -16,6 +16,8 @@ A same-principal account/profile change emits `savia:identity-changed` for ident
 
 Connection callbacks distinguish `initial`, `subscription-change` and `recovered`. Deliberately changing a room's topic set does not require all existing read models to reload. Surviving listeners recovering after a real connection loss catch up; cached opening reads can explicitly request initial catch-up. The principal room subscribes to its authorized personal topic set once and filters events per listener.
 
+Explicit sign-out stops realtime room connections and cancels pending ticket requests. Notification reads and Studio sidebar metadata refreshes remain paused through cleanup and navigation to sign-in. A subsequent verified session can resume these reads.
+
 `useRealtimeQuery` invalidates exact scope-aware keys. Its scheduler coalesces hints for 200 ms across consumers of a QueryClient/key. A hint received during an active read waits for that read to finish and makes one authoritative follow-up, rather than joining an opening read that might predate the change. Removed/inactive views do not start additional reads. Specialized manual loaders can retain `useRealtimeRefresh`, which serializes same-scope refreshes and defers dirty drafts.
 
 Use domain-specific invalidation. Account hints invalidate permissions and identity display without invalidating every auth/session check. Realtime refresh only reads state; it must never send provider messages, authorize a connection, publish resources or repeat a mutation.

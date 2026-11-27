@@ -29,8 +29,17 @@ export function deriveReadState({
   return "initial";
 }
 
+function readErrorStatus(error: unknown) {
+  return error && typeof error === "object"
+    ? (error as { status?: unknown }).status
+    : undefined;
+}
+
+export function isReadAuthenticationRequired(error: unknown): boolean {
+  return readErrorStatus(error) === 401;
+}
+
 export function isReadAccessDenied(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const status = (error as { status?: unknown }).status;
+  const status = readErrorStatus(error);
   return status === 401 || status === 403;
 }

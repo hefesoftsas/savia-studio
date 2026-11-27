@@ -20,11 +20,11 @@ import {
 } from "./cookie-consent-storage";
 
 /**
- * Mandatory cookie-consent banner: it stays visible until the user makes an
- * explicit choice (accept, reject, or save preferences), so it is truly shown
- * once per user — never as a dismissible nag.
+ * Reserve space in the page until the user makes an explicit consent choice.
  */
-export function CookieConsentBanner() {
+export function CookieConsentBanner({
+  onDecision,
+}: { onDecision?: () => void } = {}) {
   const translate = useTranslate();
   const [decision, setDecision] = useState<CookieConsentPreferences | null>(
     getCookieConsent,
@@ -36,11 +36,11 @@ export function CookieConsentBanner() {
 
   const record = useCallback(
     (choices: Record<OptionalCookieCategory, boolean>) => {
-      setCookieConsent(choices);
-      setDecision(getCookieConsent());
+      setDecision(setCookieConsent(choices));
       setPreferencesOpen(false);
+      onDecision?.();
     },
-    [],
+    [onDecision],
   );
 
   if (decision) {
@@ -68,21 +68,22 @@ export function CookieConsentBanner() {
       <div
         role="region"
         aria-label={title}
-        className="fixed inset-x-3 bottom-3 z-50 sm:inset-x-6 lg:inset-x-auto lg:left-1/2 lg:w-[38rem] lg:-translate-x-1/2 print:hidden"
+        data-slot="workspace-notice"
+        className="max-h-[45svh] shrink-0 overflow-y-auto border-t bg-popover px-3 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-4 print:hidden"
       >
-        <div className="rounded-2xl border border-border/70 bg-popover/95 p-4 shadow-xl shadow-black/10 backdrop-blur-md">
-          <div className="flex items-start gap-3">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-3">
+          <div className="flex min-w-0 flex-1 basis-72 items-start gap-3">
             <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
               <Cookie className="size-5" aria-hidden="true" />
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-foreground">{title}</p>
-              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              <p className="mt-1 max-w-[68ch] text-sm leading-normal text-muted-foreground">
                 {message}
               </p>
             </div>
           </div>
-          <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+          <div className="flex max-w-full flex-wrap items-center gap-2">
             <Button
               type="button"
               variant="ghost"
@@ -118,7 +119,7 @@ export function CookieConsentBanner() {
             <DialogTitle>{preferencesLabel}</DialogTitle>
             <DialogDescription>
               {translate("savia.consent.preferencesHint", {
-                _: "Elige qué cookies no esenciales permites. Puedes cambiarlo más tarde desde Ajustes.",
+                _: "Elige qué cookies no esenciales permites.",
               })}
             </DialogDescription>
           </DialogHeader>

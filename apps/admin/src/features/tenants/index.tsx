@@ -85,14 +85,20 @@ function tenantCascadeDeleteErrorMessage(
 
   if (code === "TENANT_CLEANUP_UNAVAILABLE")
     return "Some cleanup services are unavailable. Refresh the tenant and retry the deletion.";
+  if (code === "TENANT_REQUEST_CLEANUP_UNAVAILABLE")
+    return "Savia Request cleanup failed. The tenant is inactive. Retry the deletion.";
   if (code === "TENANT_FILE_CLEANUP_UNAVAILABLE")
     return "Tenant file cleanup failed. The tenant is inactive. Retry the deletion.";
   if (code === "TENANT_AUTH_CLEANUP_UNAVAILABLE")
     return "Tenant authentication settings could not be removed. The tenant is inactive. Retry the deletion.";
   if (code === "TENANT_BRANDING_UPLOAD_IN_PROGRESS")
     return "A tenant image is still uploading. Wait for it to finish before retrying deletion.";
-  if (code === "TENANT_CONFIRMATION_REQUIRED" || candidate.status === 409)
+  if (code === "TENANT_PURGE_IN_PROGRESS")
+    return "An operation is in progress for this tenant. Wait for it to finish before retrying.";
+  if (code === "TENANT_CONFIRMATION_REQUIRED")
     return "The tenant name changed or did not match. Refresh the tenant and confirm using its current name.";
+  if (candidate.status === 409)
+    return "A conflict interrupted the deletion. Refresh the tenant and try again.";
   if (code === "TENANT_NOT_FOUND" || candidate.status === 404)
     return "This tenant no longer exists. Return to the tenant list and refresh it.";
   if (
@@ -124,6 +130,8 @@ function tenantMutationErrorCode(error: unknown): string | undefined {
 }
 
 const temporaryPasswordSource = "initialUser.temporaryPassword";
+const tenantCreationUnconfirmed =
+  "Savia could not confirm the tenant creation. Check the tenant list before trying again.";
 
 type TenantCreateSubmissionError = {
   message: keyof typeof tenantSettingsMessages;
@@ -147,6 +155,10 @@ function tenantCreateErrorMessage(
       return "Select the existing user to transfer.";
     case "TENANT_TEMPORARY_PASSWORD_INVALID":
       return "The temporary password must contain 12 to 128 characters.";
+    case "IDENTITY_ACCESS_CHANGE_IN_PROGRESS":
+      return "Another access change is in progress for this user. Wait for it to finish before trying again.";
+    case "TENANT_PURGE_IN_PROGRESS":
+      return "An operation is in progress for the user's current tenant. Wait for it to finish before trying again.";
     case "TENANT_CONFLICT": {
       const details =
         error instanceof ApiClientError
@@ -160,8 +172,16 @@ function tenantCreateErrorMessage(
       break;
     }
     case "REQUEST_TIMEOUT":
-      return "The request timed out. Check the tenant list before trying again.";
+    case "TENANT_CREATION_UNCONFIRMED":
+    case "UNEXPECTED_HTML_RESPONSE":
+      return tenantCreationUnconfirmed;
   }
+  const status = error instanceof ApiClientError ? error.status : undefined;
+  if (
+    code !== "AUTHENTICATION_UNAVAILABLE" &&
+    (status === undefined || status === 0 || status === 408 || status >= 500)
+  )
+    return tenantCreationUnconfirmed;
   return "Could not create the tenant. Review the information and try again.";
 }
 
@@ -226,6 +246,7 @@ function InitialTenantUserFields({
 }) {
   const translate = useTranslate();
   const t = useMessages(tenantSettingsMessages);
+  const createPath = useCreatePath();
   const { getValues, setError } = useFormContext();
   const memberMode = useWatch({ name: "memberMode" }) ?? "new";
 
@@ -309,7 +330,19 @@ function InitialTenantUserFields({
         (!submissionError.field || memberMode === "existing") && (
           <Alert variant="destructive">
             <CircleAlert aria-hidden="true" />
-            <AlertDescription>{t(submissionError.message)}</AlertDescription>
+            <AlertDescription>
+              <p>{t(submissionError.message)}</p>
+              {submissionError.message === tenantCreationUnconfirmed && (
+                <LinkBase
+                  to={createPath({ resource: "tenants", type: "list" })}
+                  target="_blank"
+                  rel="noopener"
+                  className="font-medium underline underline-offset-4"
+                >
+                  {t("View tenants in a new tab")}
+                </LinkBase>
+              )}
+            </AlertDescription>
           </Alert>
         )}
     </>
@@ -834,6 +867,7 @@ function TenantCascadeDelete() {
               : undefined;
           if (
             code === "TENANT_CLEANUP_UNAVAILABLE" ||
+            code === "TENANT_REQUEST_CLEANUP_UNAVAILABLE" ||
             code === "TENANT_FILE_CLEANUP_UNAVAILABLE" ||
             code === "TENANT_AUTH_CLEANUP_UNAVAILABLE" ||
             code === "TENANT_CONFIRMATION_REQUIRED" ||

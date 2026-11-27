@@ -44,6 +44,7 @@ const devApiTarget =
 const devChangeOrigin = false;
 
 export default defineConfig({
+  publicDir: process.env.SAVIA_ADMIN_PUBLIC_DIR || "public",
   envDir:
     process.env.SAVIA_ADMIN_IGNORE_ENV_FILES === "true" ? false : undefined,
   // The full-stack launcher sends browser requests through the local proxy.

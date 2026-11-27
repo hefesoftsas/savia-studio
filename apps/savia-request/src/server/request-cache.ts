@@ -1,3 +1,5 @@
+import { scopeTenant } from "./tenant";
+
 export type RequestCachePolicy = {
   enabled: boolean;
   ttlSeconds: number;
@@ -8,11 +10,17 @@ export type RequestCacheContext = {
   tenant: string;
   revision: string;
   connectionId?: string;
+  requestStartedAt?: number;
   validateResponse?: (response: Response) => boolean | Promise<boolean>;
 };
 
 type CacheEnvironment = { DB?: D1Database };
 type CacheFetcher = (request: Request<any, any>) => Promise<Response>;
+type CacheAddress = {
+  key: string;
+  purgeKey: string | null;
+  generation: string;
+};
 type CacheRow = {
   state: "loading" | "ready";
   response_status: number | null;
@@ -111,12 +119,23 @@ export async function cacheRequest(
   const database = env.DB;
   if (++cleanupCounter % 64 === 0)
     await cleanupExpired(database, new Date().toISOString()).catch(() => {});
-  let key: string;
+  let address: CacheAddress;
   try {
-    key = await requestCacheKey(request, policy, context);
+    const tenant =
+      policy.scope === "public" ? null : scopeTenant(context.tenant);
+    const purgeKey = tenant === null ? null : tenantPurgeKey(tenant);
+    const generation = await cacheGeneration(database, purgeKey);
+    if (isStaleGeneration(generation, context.requestStartedAt ?? startedAt))
+      return bypass();
+    address = {
+      key: await requestCacheKey(request, policy, context, tenant, generation),
+      purgeKey,
+      generation,
+    };
   } catch {
     return bypass();
   }
+  const { key } = address;
 
   try {
     const row = await readRow(database, key);
@@ -148,7 +167,7 @@ export async function cacheRequest(
         request,
         policy,
         context,
-        key,
+        address,
         fetcher,
       );
       return result.kind === "cached"
@@ -168,7 +187,7 @@ export async function cacheRequest(
     request,
     policy,
     context,
-    key,
+    address,
     fetcher,
   );
   flights.set(key, flight);
@@ -203,6 +222,8 @@ async function requestCacheKey(
   request: Request,
   policy: RequestCachePolicy,
   context: RequestCacheContext,
+  tenant: string | null,
+  generation: string,
 ) {
   const url = new URL(request.url);
   const query: Array<[string, string]> = [];
@@ -221,17 +242,64 @@ async function requestCacheKey(
     headers,
     revision: context.revision,
     scope: policy.scope,
-    tenant: policy.scope === "public" ? null : context.tenant,
+    tenant,
     connectionId: policy.scope === "connection" ? context.connectionId : null,
     ttlSeconds: policy.ttlSeconds,
+    ...(generation ? { generation } : {}),
   });
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(keyMaterial),
   );
-  return [...new Uint8Array(digest)]
+  const hash = [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");
+  return `${tenant ?? "public"}:${hash}`;
+}
+
+async function cacheGeneration(database: D1Database, purgeKey: string | null) {
+  if (!purgeKey) return "";
+  return (
+    (await database
+      .prepare("SELECT created_at FROM savia_request_cache WHERE cache_key=?")
+      .bind(purgeKey)
+      .first<string>("created_at")) ?? ""
+  );
+}
+
+function isStaleGeneration(generation: string, startedAt: number): boolean {
+  return generation !== "" && !(Date.parse(generation) < startedAt);
+}
+
+export function tenantPurgeKey(tenant: string): string {
+  return `purged:${tenant}`;
+}
+
+export async function tenantWasPurgedSince(
+  database: D1Database,
+  tenant: string,
+  startedAt: number,
+): Promise<boolean> {
+  const generation = await cacheGeneration(database, tenantPurgeKey(tenant));
+  return isStaleGeneration(generation, startedAt);
+}
+
+export function prepareTenantCachePurge(database: D1Database, tenant: string) {
+  return [
+    database
+      .prepare(
+        `INSERT INTO savia_request_cache(cache_key,state,created_at) VALUES(?,'ready',?)
+       ON CONFLICT(cache_key) DO UPDATE SET created_at=excluded.created_at
+       WHERE savia_request_cache.created_at<excluded.created_at`,
+      )
+      .bind(tenantPurgeKey(tenant), new Date().toISOString()),
+    // Earlier versions used opaque SHA-256 keys without recoverable ownership.
+    database
+      .prepare(
+        "DELETE FROM savia_request_cache WHERE cache_key LIKE ? OR length(cache_key)=64",
+      )
+      .bind(`${tenant}:%`),
+  ];
 }
 
 async function readRow(database: D1Database, key: string) {
@@ -288,46 +356,34 @@ async function fetchAndCache(
   request: Request,
   policy: RequestCachePolicy,
   context: RequestCacheContext,
-  key: string,
+  address: CacheAddress,
   fetcher: CacheFetcher,
 ): Promise<FetchResult> {
   const token = crypto.randomUUID();
-  const now = new Date().toISOString();
-  let ownsLease = false;
-  try {
-    ownsLease = await claimLease(database, key, token, now);
-  } catch {
-    return {
-      kind: "bypass",
-      response: await fetchWithoutCache(request, fetcher),
-    };
-  }
-
-  if (!ownsLease) {
-    let reclaimAttempts = 0;
-    while (!ownsLease) {
-      const snapshot = await waitForCache(database, key, request.signal);
-      if (snapshot) return { kind: "cached", snapshot, source: "coalesced" };
-      try {
-        ownsLease = await claimLease(
-          database,
-          key,
-          token,
-          new Date().toISOString(),
-        );
-      } catch {
-        return {
-          kind: "bypass",
-          response: await fetchWithoutCache(request, fetcher),
-        };
-      }
-      reclaimAttempts += 1;
-      if (!ownsLease && reclaimAttempts >= MAX_RECLAIM_ATTEMPTS)
-        throw new DOMException(
-          "Unable to safely claim this cache entry",
-          "TimeoutError",
-        );
+  const { key } = address;
+  for (let attempt = 0; ; attempt++) {
+    let cacheUnavailable: boolean;
+    try {
+      if (await claimLease(database, address, token, new Date().toISOString()))
+        break;
+      cacheUnavailable =
+        (await cacheGeneration(database, address.purgeKey)) !==
+        address.generation;
+    } catch {
+      cacheUnavailable = true;
     }
+    if (cacheUnavailable)
+      return {
+        kind: "bypass",
+        response: await fetchWithoutCache(request, fetcher),
+      };
+    if (attempt >= MAX_RECLAIM_ATTEMPTS)
+      throw new DOMException(
+        "Unable to safely claim this cache entry",
+        "TimeoutError",
+      );
+    const snapshot = await waitForCache(database, key, request.signal);
+    if (snapshot) return { kind: "cached", snapshot, source: "coalesced" };
   }
 
   let response: Response;
@@ -426,17 +482,23 @@ async function fetchWithoutCache(request: Request, fetcher: CacheFetcher) {
 
 async function claimLease(
   database: D1Database,
-  key: string,
+  address: CacheAddress,
   token: string,
   now: string,
 ) {
   const until = new Date(Date.now() + LEASE_MS).toISOString();
-  const updated = await database
-    .prepare(
-      `UPDATE savia_request_cache SET state='loading',response_status=NULL,response_status_text=NULL,
+  const { key, purgeKey, generation } = address;
+  const generationCheck = purgeKey
+    ? "COALESCE((SELECT created_at FROM savia_request_cache WHERE cache_key=?),'')=?"
+    : "1=1";
+  const generationBindings = purgeKey ? [purgeKey, generation] : [];
+  const [updated, inserted] = await database.batch([
+    database
+      .prepare(
+        `UPDATE savia_request_cache SET state='loading',response_status=NULL,response_status_text=NULL,
          response_headers=NULL,response_body=NULL,retrieved_at=NULL,expires_at=NULL,
          lease_token=?,lease_until=?,created_at=?
-       WHERE cache_key=? AND (
+       WHERE cache_key=? AND ${generationCheck} AND (
          (state='loading' AND lease_until<=?) OR
          (state='ready' AND (
            expires_at<=? OR expires_at IS NULL OR
@@ -445,18 +507,16 @@ async function claimLease(
            response_body IS NULL OR retrieved_at IS NULL
          ))
        )`,
-    )
-    .bind(token, until, now, key, now, now)
-    .run();
-  if (updated.meta.changes === 1) return true;
-  const inserted = await database
-    .prepare(
-      `INSERT INTO savia_request_cache(cache_key,state,created_at,lease_token,lease_until)
-       VALUES(?,'loading',?,?,?) ON CONFLICT(cache_key) DO NOTHING`,
-    )
-    .bind(key, now, token, until)
-    .run();
-  return inserted.meta.changes === 1;
+      )
+      .bind(token, until, now, key, ...generationBindings, now, now),
+    database
+      .prepare(
+        `INSERT INTO savia_request_cache(cache_key,state,created_at,lease_token,lease_until)
+       SELECT ?,'loading',?,?,? WHERE ${generationCheck} ON CONFLICT(cache_key) DO NOTHING`,
+      )
+      .bind(key, now, token, until, ...generationBindings),
+  ]);
+  return updated.meta.changes === 1 || inserted.meta.changes === 1;
 }
 
 async function waitForCache(

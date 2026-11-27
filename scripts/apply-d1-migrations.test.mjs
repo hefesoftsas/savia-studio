@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  copyFileSync,
   mkdtempSync,
   writeFileSync,
   rmSync,
@@ -38,6 +39,8 @@ if (process.env.STALL_D1_BODY === '1') {
 }
 globalThis.fetch=async (_url,options)=>{
   const {sql,batch}=JSON.parse(options.body);
+  if (process.env.D1_READ_ONLY === '1' && (batch || !sql?.startsWith('SELECT ')))
+    throw new Error('Migration status issued a write');
   const persistentOverload = process.env.D1_PERSISTENT_OVERLOAD === '1';
   if (sql?.startsWith('CREATE TABLE IF NOT EXISTS _savia_migrations') && process.env.D1_LEDGER_OVERLOAD && (!overloadReported || persistentOverload)) {
     overloadReported = true;
@@ -104,10 +107,10 @@ globalThis.fetch=async (_url,options)=>{
   return {
     file,
     close: () => rmSync(dir, { recursive: true, force: true }),
-    run: (extra = {}) =>
+    run: (extra = {}, args = []) =>
       spawnSync(
         process.execPath,
-        ["--import", shim, "scripts/apply-d1-migrations.mjs"],
+        ["--import", shim, "scripts/apply-d1-migrations.mjs", ...args],
         {
           encoding: "utf8",
           timeout: 10_000,
@@ -122,6 +125,88 @@ globalThis.fetch=async (_url,options)=>{
       ),
   };
 }
+
+test("checking D1 distinguishes pending migrations, a matching history, and a database ahead of the checkout without writing", () => {
+  const f = fixture();
+  const previous = mkdtempSync(join(tmpdir(), "savia-before-migration-"));
+  const files = readdirSync("packages/db/migrations")
+    .filter((file) => file.endsWith(".sql"))
+    .sort();
+  const latest = files.pop();
+  try {
+    for (const file of files)
+      copyFileSync(join("packages/db/migrations", file), join(previous, file));
+    const baseline = f.run({}, ["--migrations-dir", previous]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+
+    const check = () => f.run({ D1_READ_ONLY: "1" }, ["--check"]);
+    const pending = check();
+    assert.equal(pending.status, 1);
+    assert.match(pending.stderr, /D1 schema has pending Savia migrations/);
+    const compatible = f.run({ D1_READ_ONLY: "1" }, [
+      "--check",
+      "--allow-pending",
+    ]);
+    assert.equal(compatible.status, 0, compatible.stderr);
+    assert.match(
+      compatible.stdout,
+      /D1 schema has pending Savia migrations \(1\)/,
+    );
+    const db = new DatabaseSync(f.file, { readOnly: true });
+    try {
+      assert.equal(
+        db
+          .prepare(
+            "SELECT count(*) AS n FROM _savia_migrations WHERE filename=?",
+          )
+          .get(latest).n,
+        0,
+      );
+    } finally {
+      db.close();
+    }
+
+    const upgrade = f.run();
+    assert.equal(upgrade.status, 0, upgrade.stderr);
+    const current = check();
+    assert.equal(current.status, 0, current.stderr);
+    assert.match(current.stdout, /D1 schema is up to date/);
+
+    for (const options of [[], ["--allow-pending"]]) {
+      const ahead = f.run({ D1_READ_ONLY: "1" }, [
+        "--check",
+        ...options,
+        "--migrations-dir",
+        previous,
+      ]);
+      assert.equal(ahead.status, 1, ahead.stdout);
+      assert.match(
+        ahead.stderr,
+        /D1 migration history contains migrations missing from this checkout/,
+      );
+    }
+  } finally {
+    f.close();
+    rmSync(previous, { recursive: true, force: true });
+  }
+});
+
+test("checking an uninitialized D1 database leaves its migration history untouched", () => {
+  const f = fixture();
+  try {
+    const result = f.run({ D1_READ_ONLY: "1" }, ["--check", "--allow-pending"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /D1 schema has pending Savia migrations/);
+    const db = new DatabaseSync(f.file, { readOnly: true });
+    try {
+      assert.deepEqual(db.prepare("SELECT name FROM sqlite_schema").all(), []);
+    } finally {
+      db.close();
+    }
+  } finally {
+    f.close();
+  }
+});
 
 test("recognizes the pre-applied assistant model migration without replaying it", () => {
   const f = fixture();
@@ -285,7 +370,10 @@ test("retired history is rejected before changing application data", () => {
     db.close();
     const run = f.run();
     assert.notEqual(run.status, 0);
-    assert.match(run.stderr, /retired migration history/);
+    assert.match(
+      run.stderr,
+      /D1 migration history contains migrations missing from this checkout/,
+    );
     const after = new DatabaseSync(f.file);
     assert.equal(
       after.prepare("SELECT value FROM retained").get().value,

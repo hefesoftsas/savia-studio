@@ -1,3 +1,10 @@
+import { retryDeadline } from "@savia/studio-shared/retry-after";
+import { hasRecordFilters } from "@savia/studio-shared/record-filter-input";
+import {
+  RequestTimeoutError,
+  REQUEST_TIMEOUT_MS,
+  withRequestTimeout,
+} from "@savia/studio-shared/request-timeout";
 import {
   ServiceAssistantOperations,
   type ServiceExecutionOptions,
@@ -70,7 +77,29 @@ export type SaviaExtensionStatus = {
   installed: { version: string; enabled: boolean } | null;
 };
 
-type ErrorResponse = { error?: { code?: string; message?: string } };
+type ErrorResponse = { error?: string | { code?: string; message?: string } };
+
+function apiResponseError(
+  status: number,
+  retryAt: number | undefined,
+  payload?: ErrorResponse | null,
+): Error {
+  const error = payload?.error;
+  const code =
+    typeof error === "object" && typeof error?.code === "string"
+      ? error.code
+      : "API_ERROR";
+  const detail = typeof error === "string" ? error : error?.message;
+  const message =
+    typeof detail === "string" && detail.trim()
+      ? detail
+      : "Domain API request failed";
+  const retry =
+    retryAt === undefined
+      ? ""
+      : ` Retry after ${new Date(retryAt).toISOString()}.`;
+  return new Error(`${status} ${code}: ${message}${retry}`);
+}
 
 function encode(value: string): string {
   return encodeURIComponent(value);
@@ -424,6 +453,7 @@ export class SaviaApiClient {
       | {
           page?: number;
           perPage?: number;
+          cursor?: string;
           query?: string;
           sort?: string;
           order?: "ASC" | "DESC";
@@ -447,6 +477,7 @@ export class SaviaApiClient {
     let page = 1;
     let actualPerPage = perPage;
     let actualQuery = query;
+    let cursor: string | undefined;
     let sort: string | undefined;
     let order: "ASC" | "DESC" | undefined;
     let filters: unknown | undefined;
@@ -455,6 +486,7 @@ export class SaviaApiClient {
       page = pageOrOptions.page ?? 1;
       actualPerPage = pageOrOptions.perPage ?? 25;
       actualQuery = pageOrOptions.query;
+      cursor = pageOrOptions.cursor;
       sort = pageOrOptions.sort;
       order = pageOrOptions.order;
       filters = pageOrOptions.filters;
@@ -466,24 +498,39 @@ export class SaviaApiClient {
       page: String(page),
       perPage: String(actualPerPage),
     });
+    if (cursor !== undefined) params.set("cursor", cursor);
     if (actualQuery !== undefined) params.set("q", actualQuery);
     if (sort !== undefined) params.set("sort", sort);
     if (order !== undefined) params.set("order", order);
-    if (filters !== undefined) {
+    if (hasRecordFilters(filters)) {
       params.set(
         "filters",
         typeof filters === "string" ? filters : JSON.stringify(filters),
       );
     }
-    const response = await this.request<{ data?: unknown; total?: unknown }>(
-      `${path}?${params}`,
-    );
-    return Array.isArray(response?.data)
-      ? {
-          ...response,
-          total: collectionTotal(response.total, response.data.length),
-        }
-      : response;
+    return this.readStudioRecordPage(`${path}?${params}`);
+  }
+
+  private async readStudioRecordPage(path: string) {
+    const response = await this.request<{
+      data?: unknown;
+      total?: unknown;
+      nextCursor?: string | null;
+      hasNext?: boolean | null;
+      pageInfo?: { hasNextPage?: boolean };
+    } | null>(path);
+    if (!Array.isArray(response?.data)) {
+      throw new Error("Studio API did not return a record page");
+    }
+    const hasMoreRecords =
+      response.pageInfo?.hasNextPage === true ||
+      response.hasNext === true ||
+      Boolean(response.nextCursor);
+    const minimumTotal = response.data.length + (hasMoreRecords ? 1 : 0);
+    return {
+      ...response,
+      total: collectionTotal(response.total, minimumTotal),
+    };
   }
 
   async lookupDaneCity(city: string, department?: string) {
@@ -536,8 +583,9 @@ export class SaviaApiClient {
     );
     const path = this.studioPath(tenantId, `records/${encode(object)}`);
     const hubspot = collection.sourceId === "hubspot";
+    const filtered = hasRecordFilters(options.filters);
     if (hubspot) {
-      if (options.filters !== undefined)
+      if (filtered)
         throw new Error(
           "HubSpot collection aggregates do not support structured filters.",
         );
@@ -552,7 +600,7 @@ export class SaviaApiClient {
       throw new Error("groupBy is required to sum a field in this collection.");
     if (!options.groupBy && options.amountField === undefined) {
       const params = new URLSearchParams({ page: "1", perPage: "1" });
-      if (options.filters !== undefined) {
+      if (filtered) {
         params.set(
           "filters",
           typeof options.filters === "string"
@@ -560,17 +608,15 @@ export class SaviaApiClient {
             : JSON.stringify(options.filters),
         );
       }
-      const response = await this.request<{ total: number }>(
-        `${path}?${params}`,
-      );
-      return { total: collectionTotal(response.total) };
+      const { total } = await this.readStudioRecordPage(`${path}?${params}`);
+      return { total };
     }
     const params = new URLSearchParams();
     if (options.groupBy) params.set("group", options.groupBy);
     if (options.amountField !== undefined) {
       params.set("amountField", options.amountField);
     }
-    if (options.filters !== undefined) {
+    if (filtered) {
       params.set(
         "filters",
         typeof options.filters === "string"
@@ -615,32 +661,19 @@ export class SaviaApiClient {
     allowAny = false,
   ): Promise<unknown> {
     const tenantId = await this.resolveStudioTenantId();
+    const path = await this.crmPath(tenantId, object, "records", id, allowAny);
     const payload = { ...data };
     if (
       payload._version === undefined ||
       !Number.isInteger(payload._version) ||
       Number(payload._version) < 1
-    ) {
-      try {
-        const existing = (await this.request(
-          await this.crmPath(tenantId, object, "records", id, allowAny),
-        )) as {
-          data?: { _version?: number };
-          _version?: number;
-        };
-        payload._version = existing?.data?._version ?? existing?._version ?? 1;
-      } catch {
-        payload._version = 1;
-      }
-    }
-    return this.request(
-      await this.crmPath(tenantId, object, "records", id, allowAny),
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      },
-    );
+    )
+      payload._version = await this.readRecordVersion(path, id);
+    return this.request(path, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
   }
 
   async deleteStudioRecord(
@@ -650,31 +683,44 @@ export class SaviaApiClient {
     allowAny = false,
   ): Promise<unknown> {
     const tenantId = await this.resolveStudioTenantId();
+    const path = await this.crmPath(tenantId, object, "records", id, allowAny);
     let resolvedVersion = version;
     if (
       resolvedVersion === undefined ||
       !Number.isInteger(resolvedVersion) ||
       resolvedVersion < 1
-    ) {
-      try {
-        const existing = (await this.request(
-          await this.crmPath(tenantId, object, "records", id, allowAny),
-        )) as {
-          data?: { _version?: number };
-          _version?: number;
-        };
-        resolvedVersion = existing?.data?._version ?? existing?._version ?? 1;
-      } catch {
-        resolvedVersion = 1;
-      }
-    }
+    )
+      resolvedVersion = await this.readRecordVersion(path, id);
     const query = `?version=${encodeURIComponent(resolvedVersion)}`;
-    return this.request(
-      (await this.crmPath(tenantId, object, "records", id, allowAny)) + query,
-      {
-        method: "DELETE",
-      },
-    );
+    return this.request(path + query, { method: "DELETE" });
+  }
+
+  private async readRecordVersion(path: string, id: string): Promise<number> {
+    type RecordMetadata = { id?: unknown; _version?: unknown };
+    const response = await this.request<
+      (RecordMetadata & { data?: RecordMetadata | null }) | null
+    >(path);
+    const record = response?.id === undefined ? response?.data : response;
+    const recordId =
+      typeof record?.id === "number" && Number.isSafeInteger(record.id)
+        ? String(record.id)
+        : record?.id;
+    if (!record || recordId !== id) {
+      throw new Error(
+        "Studio record response did not match the requested record",
+      );
+    }
+    const version =
+      record._version === undefined ? response?._version : record._version;
+    if (version === undefined) return 1; // Live sources can omit local revisions.
+    if (
+      typeof version !== "number" ||
+      !Number.isSafeInteger(version) ||
+      version < 1
+    ) {
+      throw new Error("Studio record response contained an invalid revision");
+    }
+    return version;
   }
 
   async getStudioRecordLinks(
@@ -693,16 +739,33 @@ export class SaviaApiClient {
     if (this.accessToken && !headers.has("authorization")) {
       headers.set("authorization", `Bearer ${this.accessToken}`);
     }
-    const response = await this.fetcher(`${this.baseUrl}${path}`, {
-      ...init,
-      headers,
-    });
-    if (response.ok) return (await response.json()) as T;
+    let failure: { status: number; retryAt: number | undefined } | undefined;
+    const send = async (signal: AbortSignal | null | undefined): Promise<T> => {
+      const response = await this.fetcher(`${this.baseUrl}${path}`, {
+        ...init,
+        headers,
+        signal,
+      });
+      if (response.ok) return (await response.json()) as T;
 
-    const error = (await response.json().catch(() => ({}))) as ErrorResponse;
-    const code = error.error?.code ?? "API_ERROR";
-    const message = error.error?.message ?? "Domain API request failed";
-    throw new Error(`${response.status} ${code}: ${message}`);
+      const retryAt = retryDeadline(response);
+      failure = { status: response.status, retryAt };
+      const payload = (await response
+        .json()
+        .catch(() => null)) as ErrorResponse | null;
+      throw apiResponseError(response.status, retryAt, payload);
+    };
+
+    if ((init?.method?.toUpperCase() ?? "GET") !== "GET")
+      return send(init?.signal);
+    try {
+      return await withRequestTimeout(send, REQUEST_TIMEOUT_MS, init?.signal);
+    } catch (error) {
+      if (error instanceof RequestTimeoutError && failure) {
+        throw apiResponseError(failure.status, failure.retryAt);
+      }
+      throw error;
+    }
   }
 
   private async resolveStudioTenantId(): Promise<number> {

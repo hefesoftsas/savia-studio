@@ -10,8 +10,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Paperclip, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { R2AttachmentPolicy } from "@savia/studio-shared/metadata";
-import { studioFetch, downloadCrm } from "./api";
+import { api, downloadCrm } from "./api";
 import { FilePicker } from "./file-picker";
+import type { AttachmentUploadFailure } from "./attachment-queue";
 
 export type StudioFileAttachment = {
   id: string;
@@ -25,16 +26,18 @@ export type StudioFileAttachment = {
 
 export type R2AttachmentFieldProps = {
   field: string;
+  failures?: AttachmentUploadFailure[];
   inputId?: string;
   object: string;
   onPendingChange(files: File[]): void;
+  onRetryUpload?(file: File): void;
   pending: File[];
   policy: R2AttachmentPolicy;
   refreshVersion?: number;
   recordId?: string;
   disabled?: boolean;
   uploadedFiles?: File[];
-  uploadingFile?: File;
+  uploadingFiles?: File[];
 };
 
 function formatBytes(size: number, locale = "es-CO") {
@@ -44,35 +47,20 @@ function formatBytes(size: number, locale = "es-CO") {
   })} MB`;
 }
 
-async function filesFor(
-  object: string,
-  recordId: string,
-  field: string,
-  fallback: string,
-) {
-  const response = await studioFetch(
-    `/api/files/${encodeURIComponent(object)}/${encodeURIComponent(recordId)}?field=${encodeURIComponent(field)}`,
-  );
-  const body = (await response.json()) as {
-    data?: StudioFileAttachment[];
-    error?: string;
-  };
-  if (!response.ok) throw new Error(body.error ?? fallback);
-  return body.data ?? [];
-}
-
 export function R2AttachmentField({
   disabled = false,
   field,
+  failures,
   inputId,
   object,
   onPendingChange,
+  onRetryUpload,
   pending,
   policy,
   refreshVersion = 0,
   recordId,
   uploadedFiles,
-  uploadingFile,
+  uploadingFiles = [],
 }: R2AttachmentFieldProps) {
   const uiLocale = intlLocale(useAppLocale());
 
@@ -80,38 +68,43 @@ export function R2AttachmentField({
 
   const client = useQueryClient();
   const [error, setError] = useState("");
+  const [removing, setRemoving] = useState(false);
+  const filesKey = ["r2-attachments", object, recordId, field];
   const query = useQuery({
     enabled: Boolean(recordId),
-    queryKey: ["r2-attachments", object, recordId, field, refreshVersion],
-    queryFn: () =>
-      filesFor(
-        object,
-        recordId!,
-        field,
-        t("No se pudieron cargar los archivos."),
-      ),
+    queryKey: [...filesKey, refreshVersion],
+    retry: false,
+    queryFn: async ({ signal }) => {
+      const result = await api<{ data?: StudioFileAttachment[] }>(
+        `/files/${encodeURIComponent(object)}/${encodeURIComponent(recordId!)}?field=${encodeURIComponent(field)}`,
+        "GET",
+        undefined,
+        { signal },
+      );
+      return result?.data ?? [];
+    },
   });
   const persisted = query.data ?? [];
   const remaining = Math.max(0, policy.maxFiles - persisted.length);
 
   async function remove(file: StudioFileAttachment) {
+    setRemoving(true);
     setError("");
-    const response = await studioFetch(
-      `/api/file/${encodeURIComponent(file.id)}`,
-      {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ version: file.version }),
-      },
-    );
-    const body = (await response.json()) as { error?: string };
-    if (!response.ok) {
-      setError(body.error ?? t("No se pudo eliminar el archivo."));
-      return;
+    try {
+      await api(`/file/${encodeURIComponent(file.id)}`, "DELETE", {
+        version: file.version,
+      });
+    } catch (cause) {
+      setError(
+        cause instanceof Error && cause.message
+          ? cause.message
+          : t("No se pudo eliminar el archivo."),
+      );
+    } finally {
+      setRemoving(false);
+      // A lost response can hide a deletion that committed.
+      void client.invalidateQueries({ queryKey: filesKey });
     }
-    await client.invalidateQueries({
-      queryKey: ["r2-attachments", object, recordId, field],
-    });
   }
 
   return (
@@ -121,10 +114,20 @@ export function R2AttachmentField({
           {t("Cargando archivos…")}
         </p>
       )}
-      {query.error && (
-        <p className="text-sm text-destructive" role="alert">
-          {query.error.message}
-        </p>
+      {query.error && !query.isFetching && (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm text-destructive" role="alert">
+            {query.error.message || t("No se pudieron cargar los archivos.")}
+          </p>
+          <Button
+            onClick={() => void query.refetch()}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {t("Reintentar")}
+          </Button>
+        </div>
       )}
       {persisted.length > 0 && (
         <ul className="grid gap-2" aria-label={t("Archivos guardados")}>
@@ -144,7 +147,7 @@ export function R2AttachmentField({
               <span className="shrink-0 text-xs text-muted-foreground">
                 {formatBytes(file.size, uiLocale)}
               </span>
-              <OfficeEditButton file={file} disabled={disabled} />
+              <OfficeEditButton file={file} />
               {recordId && (
                 <DocumentDeliveryActions file={file} disabled={disabled} />
               )}
@@ -164,7 +167,7 @@ export function R2AttachmentField({
               </Button>
               <Button
                 aria-label={t("Eliminar %{p0}", { p0: file.name })}
-                disabled={disabled}
+                disabled={disabled || removing}
                 onClick={() => void remove(file)}
                 size="icon"
                 type="button"
@@ -186,7 +189,7 @@ export function R2AttachmentField({
       <div>
         <CreateOfficeAttachment
           disabled={
-            disabled || Boolean(uploadingFile) || pending.length >= remaining
+            disabled || uploadingFiles.length > 0 || pending.length >= remaining
           }
           formats={(Object.keys(OFFICE_FORMATS) as OfficeFormat[]).filter(
             (format) =>
@@ -206,14 +209,16 @@ export function R2AttachmentField({
       </div>
       <FilePicker
         accept={policy.accept}
-        disabled={disabled || Boolean(uploadingFile) || remaining === 0}
+        disabled={disabled || uploadingFiles.length > 0 || remaining === 0}
+        failures={failures}
         files={pending}
         inputId={inputId}
         maxFiles={Math.min(remaining, policy.maxFiles)}
         maxSize={policy.maxSize}
         onFilesChange={onPendingChange}
+        onRetry={onRetryUpload}
         uploadedFiles={uploadedFiles}
-        uploadingFile={uploadingFile}
+        uploadingFiles={uploadingFiles}
       />
       {error && (
         <p className="text-sm text-destructive" role="alert">

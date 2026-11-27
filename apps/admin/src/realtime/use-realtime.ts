@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "@/api/api-client";
+import {
+  getSessionReadsPaused,
+  useSessionReadsPaused,
+} from "@/auth/logout-progress";
 import { useSessionGeneration } from "@/auth/session-scope";
 import { useAppServices } from "@/features/assistant/assistant-context";
 import { useOnlineStatus } from "@/offline/use-online-status";
@@ -192,7 +196,8 @@ function connectRoom(
   onEvent: (event: RealtimeChangeEvent) => void,
   initialReason: RealtimeConnectionReason,
 ): () => void {
-  let stopped = false;
+  const scope = new AbortController();
+  const stopped = () => scope.signal.aborted || getSessionReadsPaused();
   let socket: WebSocket | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffMs = 1000;
@@ -201,7 +206,7 @@ function connectRoom(
   const wanted = topicsKey.split(",");
 
   const scheduleRetry = () => {
-    if (stopped) return;
+    if (stopped()) return;
     setStatus("connecting");
     retryTimer = setTimeout(
       () => void connect(),
@@ -211,7 +216,7 @@ function connectRoom(
   };
 
   const connect = async () => {
-    if (stopped) return;
+    if (stopped()) return;
     setStatus("connecting");
     let ticket: TicketResponse;
     try {
@@ -220,9 +225,10 @@ function connectRoom(
         tenantId === undefined
           ? { topics: wanted }
           : { topics: wanted, tenantId },
+        { signal: scope.signal },
       );
     } catch (error) {
-      if (stopped) return;
+      if (stopped()) return;
       const status = (error as { status?: number } | null)?.status;
       // Permanent failures hide the indicator instead of retrying forever
       // with a stuck "connecting" state. 503 covers REALTIME_UNAVAILABLE
@@ -235,7 +241,7 @@ function connectRoom(
       scheduleRetry();
       return;
     }
-    if (stopped) return;
+    if (stopped()) return;
     const apiUrl = import.meta.env.VITE_SAVIA_API_URL ?? window.location.origin;
     try {
       socket = new WebSocket(
@@ -246,12 +252,12 @@ function connectRoom(
       return;
     }
     socket.onopen = () => {
-      if (stopped) return;
+      if (stopped()) return;
       openedAt = Date.now();
     };
     let acknowledged = false;
     socket.onmessage = (message) => {
-      if (stopped) return;
+      if (stopped()) return;
       if (typeof message.data !== "string") return;
       let parsed: unknown;
       try {
@@ -279,7 +285,7 @@ function connectRoom(
       socket?.close();
     };
     socket.onclose = (event) => {
-      if (stopped) return;
+      if (stopped()) return;
       if (
         openedAt !== undefined &&
         Date.now() - openedAt >= STABLE_CONNECTION_MS
@@ -297,7 +303,7 @@ function connectRoom(
 
   void connect();
   return () => {
-    stopped = true;
+    scope.abort();
     if (retryTimer) clearTimeout(retryTimer);
     socket?.close();
   };
@@ -324,6 +330,7 @@ export function useRealtimeTopics({
     apiClient = undefined;
   }
   const online = useOnlineStatus();
+  const readsPaused = useSessionReadsPaused();
   const sessionGeneration = useSessionGeneration();
   const [status, setStatus] = useState<RealtimeStatus>("connecting");
   const [lastEvent, setLastEvent] = useState<RealtimeChangeEvent | null>(null);
@@ -336,7 +343,7 @@ export function useRealtimeTopics({
   const topicsKey = [...topics].sort().join(",");
   useEffect(() => {
     setLastEvent(null);
-    if (!enabled || !online || !apiClient || !topicsKey) {
+    if (!enabled || readsPaused || !online || !apiClient || !topicsKey) {
       setStatus("unavailable");
       return;
     }
@@ -363,6 +370,14 @@ export function useRealtimeTopics({
         callbacks.current.onEvent?.(event);
       },
     });
-  }, [apiClient, enabled, online, tenantId, topicsKey, sessionGeneration]);
+  }, [
+    apiClient,
+    enabled,
+    readsPaused,
+    online,
+    tenantId,
+    topicsKey,
+    sessionGeneration,
+  ]);
   return { status, lastEvent };
 }

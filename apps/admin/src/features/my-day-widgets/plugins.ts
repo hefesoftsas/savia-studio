@@ -8,6 +8,7 @@ import {
   type ExtensionWidgetContribution,
 } from "@savia/release-catalog";
 import type { ApiClient } from "@/api/api-client";
+import { readResponseBodyWithInactivityTimeout } from "@/api/response-body-timeout";
 import type { MyDayWidget } from "@savia/studio-shared/my-day-widgets";
 
 export type PluginWidgetRef = {
@@ -159,15 +160,25 @@ export function pluginRequestFor(
         data instanceof FormData ? { method, body: data } : { method },
       );
       if (!response.ok) {
-        const failure = await response.json().catch(() => undefined);
+        const failure = await readResponseBodyWithInactivityTimeout(
+          response,
+          (input) => input.json(),
+        ).catch(() => undefined);
         const message =
           typeof failure?.error === "string"
             ? failure.error
             : (failure?.error?.message ?? `Error ${response.status}`);
         throw new Error(message);
       }
-      if (options?.responseType === "blob") return (await response.blob()) as T;
-      return (await response.json()) as T;
+      if (options?.responseType === "blob")
+        return readResponseBodyWithInactivityTimeout(
+          response,
+          (input) => input.blob() as Promise<T>,
+        );
+      return readResponseBodyWithInactivityTimeout(
+        response,
+        (input) => input.json() as Promise<T>,
+      );
     }
     switch (method) {
       case "POST":

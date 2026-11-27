@@ -114,13 +114,26 @@ it("saves a dynamic form with multiple choices and rich text", async () => {
   vi.unstubAllGlobals();
 });
 
-it("keeps rich-text link clicks separate from record navigation", () => {
-  const openRecord = vi.fn();
-  render(
-    <div onClick={openRecord}>
-      <RichTextValue value="[Documentation](https://example.com/docs)" />
-    </div>,
-  );
-  fireEvent.click(screen.getByRole("link", { name: "Documentation" }));
-  expect(openRecord).not.toHaveBeenCalled();
-});
+it.each(["http", "https"])(
+  "opens rich-text %s links without leaving the record",
+  (scheme) => {
+    const openRecord = vi.fn();
+    const url = `${scheme}://example.com/docs`;
+    render(
+      <div onClick={openRecord}>
+        <RichTextValue
+          value={`[Documentation](${url}) [Support](mailto:support@example.test)`}
+        />
+      </div>,
+    );
+    const documentation = screen.getByRole("link", { name: "Documentation" });
+    expect(documentation).toHaveAttribute("href", url);
+    expect(documentation).toHaveAttribute("target", "_blank");
+    expect(documentation).toHaveAttribute("rel", "noopener noreferrer");
+    fireEvent.click(documentation);
+    expect(openRecord).not.toHaveBeenCalled();
+    const support = screen.getByRole("link", { name: "Support" });
+    expect(support).toHaveAttribute("href", "mailto:support@example.test");
+    expect(support).not.toHaveAttribute("target");
+  },
+);

@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "@/app";
@@ -105,6 +106,48 @@ afterEach(() => {
 });
 
 describe("tenant-admin user pages", () => {
+  it("shows a retry action and hides account changes for a pending deletion", async () => {
+    open("/users/user-1/show");
+    const appServices = services();
+    vi.mocked(appServices.dataProvider.getOne).mockResolvedValue({
+      data: {
+        id: "user-1",
+        displayName: "Ari Rios",
+        email: "ari@example.test",
+        isActive: false,
+        deletionPending: true,
+        memberships: [{ tenantId: 101, role: "viewer", isActive: true }],
+      },
+    });
+    vi.mocked(appServices.dataProvider.delete).mockResolvedValue({
+      data: { id: "user-1" },
+    });
+    await renderApp(appServices);
+    expect(await screen.findByText("Eliminación pendiente")).toBeVisible();
+    const retryDeletion = await screen.findByRole("button", {
+      name: "Reintentar eliminación",
+    });
+    expect(
+      screen.queryByRole("button", { name: /reactivar usuario/i }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(retryDeletion);
+    const confirmation = await screen.findByRole("dialog", {
+      name: "Reintentar eliminación",
+    });
+    expect(confirmation).toHaveTextContent(
+      /eliminar definitivamente a Ari Rios/i,
+    );
+    fireEvent.click(
+      within(confirmation).getByRole("button", { name: "Eliminar" }),
+    );
+    await waitFor(() =>
+      expect(appServices.dataProvider.delete).toHaveBeenCalledWith(
+        "users",
+        expect.objectContaining({ id: "user-1" }),
+      ),
+    );
+  });
+
   it("preserves a user draft when a tenant membership event arrives", async () => {
     open("/users/user-1");
     const appServices = services();

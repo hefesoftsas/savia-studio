@@ -77,6 +77,110 @@ describe("offline workspace session lease", () => {
       createLocalSession(next, "test").checkSession(),
     ).rejects.toBeDefined();
   });
+
+  it.each(["the same tab", "another tab"])(
+    "rejects an offline lease whose online verification completes after logout in %s",
+    async (tab) => {
+      const api = remote();
+      let enteredVerification!: () => void;
+      const verifying = new Promise<void>((resolve) => {
+        enteredVerification = resolve;
+      });
+      let finishVerification!: () => void;
+      const proof = () =>
+        new Promise<void>((resolve) => {
+          finishVerification = resolve;
+          enteredVerification();
+        });
+      const session = createLocalSession(api, "test", proof);
+      const verification = session.checkSession().then(
+        () => "accepted",
+        () => "invalidated",
+      );
+      await verifying;
+
+      const signingOut =
+        tab === "the same tab" ? session : createLocalSession(remote(), "test");
+      await signingOut.logout();
+      finishVerification();
+
+      expect(await verification).toBe("invalidated");
+      const offline = remote();
+      vi.mocked(offline.checkSession).mockRejectedValue(
+        new TypeError("Failed to fetch"),
+      );
+      await expect(
+        createLocalSession(offline, "test").checkSession(),
+      ).rejects.toThrow("Conecta para verificar");
+    },
+  );
+
+  it("preserves a new session when verification from before logout fails late", async () => {
+    const api = remote();
+    let failOldProof!: (reason: Error) => void;
+    const oldProof = new Promise<void>((_, reject) => (failOldProof = reject));
+    const proof = vi
+      .fn()
+      .mockReturnValueOnce(oldProof)
+      .mockResolvedValue(undefined);
+    const session = createLocalSession(api, "test", proof);
+    const oldCheck = session.checkSession().catch(() => undefined);
+    await vi.waitFor(() => expect(proof).toHaveBeenCalledOnce());
+
+    await session.clearSession();
+    vi.mocked(api.getIdentity).mockResolvedValue({ id: "b", fullName: "B" });
+    await session.handleCallback();
+    failOldProof(new Error("Old session was rejected"));
+    await oldCheck;
+
+    const offline = remote();
+    vi.mocked(offline.getIdentity).mockRejectedValue(
+      new TypeError("Failed to fetch"),
+    );
+    const restored = createLocalSession(offline, "test");
+    await expect(restored.getIdentity()).resolves.toMatchObject({ id: "b" });
+  });
+
+  it.each(["succeeds", "fails", "loses connectivity"])(
+    "preserves a newer tab's lease when an older authentication check %s after logout",
+    async (outcome) => {
+      const api = remote();
+      let finishCheck!: () => void;
+      vi.mocked(api.checkSession).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            finishCheck = () => {
+              if (outcome === "succeeds") resolve();
+              else if (outcome === "loses connectivity")
+                reject(new TypeError("Failed to fetch"));
+              else reject(new Error("Previous session rejected"));
+            };
+          }),
+      );
+      const oldTab = createLocalSession(api, "test");
+      const staleCheck = oldTab.checkSession().then(
+        () => "accepted",
+        () => "invalidated",
+      );
+      await vi.waitFor(() => expect(api.checkSession).toHaveBeenCalledOnce());
+
+      const next = remote();
+      const newTab = createLocalSession(next, "test");
+      await newTab.logout();
+      vi.mocked(next.getIdentity).mockResolvedValue({ id: "b", fullName: "B" });
+      await newTab.handleCallback();
+      finishCheck();
+
+      expect(await staleCheck).toBe("invalidated");
+      const offline = remote();
+      vi.mocked(offline.getIdentity).mockRejectedValue(
+        new TypeError("Failed to fetch"),
+      );
+      await expect(
+        createLocalSession(offline, "test").getIdentity(),
+      ).resolves.toMatchObject({ id: "b" });
+    },
+  );
 });
 
 it("keeps authenticated online sessions working when IndexedDB writes fail", async () => {
@@ -92,18 +196,18 @@ it("keeps authenticated online sessions working when IndexedDB writes fail", asy
   expect(api.clearSession).not.toHaveBeenCalled();
   failure.mockRestore();
 });
-it("still clears the remote session when IndexedDB deletion fails", async () => {
+it("still clears the remote session when IndexedDB revocation fails", async () => {
   const api = remote();
   const session = createLocalSession(api, "test");
   await session.checkSession();
-  const failure = vi
-    .spyOn(IDBObjectStore.prototype, "delete")
-    .mockImplementation(() => {
-      throw new DOMException("Unavailable", "UnknownError");
-    });
+  vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(() => {
+    throw new DOMException("Unavailable", "UnknownError");
+  });
+  vi.spyOn(IDBObjectStore.prototype, "delete").mockImplementation(() => {
+    throw new DOMException("Unavailable", "UnknownError");
+  });
   await expect(session.clearSession()).resolves.toBeUndefined();
   expect(api.clearSession).toHaveBeenCalled();
-  failure.mockRestore();
 });
 
 it("does not renew or bypass an expired lease when remote checkSession silently uses cached credentials", async () => {

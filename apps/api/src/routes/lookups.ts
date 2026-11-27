@@ -1,4 +1,5 @@
 import type { OpenAPIHono } from "@hono/zod-openapi";
+import { daneLookupRequest } from "@savia/studio-server/dane-lookup";
 import { actorFromContext } from "../auth/middleware";
 import type { SaviaRequestService } from "./savia-request";
 
@@ -19,7 +20,6 @@ export function registerLookupRoutes(
         503,
       );
     }
-    const source = new URL(c.req.url);
     const city = c.req.query("city") ?? "";
     const department = c.req.query("department");
     if (
@@ -29,15 +29,7 @@ export function registerLookupRoutes(
     ) {
       return c.json({ error: "Indica una ciudad válida." }, 400);
     }
-    const response = await service.fetch(
-      new Request(
-        "https://savia-request.internal/api/lookups/dane" + source.search,
-        {
-          method: "GET",
-          headers: { "content-type": "application/json" },
-        },
-      ),
-    );
+    const response = await service.fetch(daneLookupRequest(city, department));
     return new Response(response.body, {
       status: response.status,
       headers: {

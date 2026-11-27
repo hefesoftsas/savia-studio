@@ -18,6 +18,10 @@ The separate user creation endpoint reports an invalid temporary password as
 The user creation form focuses the field, shows the error, and preserves the
 entered values so the administrator can correct them and retry.
 
+If the tenant creation response is lost or incomplete, the form keeps the
+entered values and offers the tenant list in a new tab. Check the list for the
+saved tenant before submitting again.
+
 To create a tenant by transferring its first administrator, select the existing
 user before saving. Savia requires this selection to submit a transfer.
 

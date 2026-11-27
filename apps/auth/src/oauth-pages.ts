@@ -184,7 +184,10 @@ export function oauthPageResponse(
       return htmlResponse(
         page(
           `Completando inicio de sesión | ${branding?.displayName ?? "Savia"}`,
-          renderOAuthSurface("sso-complete", { branding }),
+          renderOAuthSurface("sso-complete", {
+            branding,
+            restartUrl: options?.restartUrl,
+          }),
           options?.restartUrl,
         ),
       );
@@ -429,8 +432,9 @@ const oauthUiScript = String.raw`(() => {
     return fallback;
   }
 
-  function requestError(payload, fallback) {
+  function requestError(payload, fallback, status) {
     const error = new Error(readableError(payload, fallback));
+    error.status = status;
     if (payload && typeof payload === "object") {
       if (typeof payload.code === "string") error.code = payload.code;
       else if (typeof payload.error === "string") error.code = payload.error;
@@ -440,12 +444,17 @@ const oauthUiScript = String.raw`(() => {
 
   async function withAuthRequestTimeout(operation) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    let timer;
     try {
-      return await operation(controller.signal);
-    } catch (error) {
-      if (controller.signal.aborted) throw new Error("La solicitud tardó demasiado. Inténtalo de nuevo.");
-      throw error;
+      return await new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("La solicitud tardó demasiado. Inténtalo de nuevo.");
+          // Release the form even if the transport ignores or reacts synchronously to abort.
+          reject(error);
+          controller.abort(error);
+        }, 15000);
+        void operation(controller.signal).then(resolve, reject);
+      });
     } finally {
       clearTimeout(timer);
     }
@@ -468,20 +477,32 @@ const oauthUiScript = String.raw`(() => {
         try {
           result = JSON.parse(text);
         } catch {
-          throw new Error("El servidor devolvió una respuesta no válida.");
+          throw requestError(undefined, "El servidor devolvió una respuesta no válida.", response.status);
         }
       }
-      if (!response.ok) throw requestError(result, "No fue posible completar la solicitud.");
+      if (!response.ok) throw requestError(result, "No fue posible completar la solicitud.", response.status);
       return result;
     });
   }
 
-  function restartExpiredAuthorization(error) {
-    if (!(error instanceof Error) || !["invalid_signature", "INVALID_TWO_FACTOR_COOKIE"].includes(error.code)) return false;
+  function restartAuthorization() {
     const restartUrl = document.body && document.body.dataset && document.body.dataset.oauthRestartUrl;
     if (typeof restartUrl !== "string" || !restartUrl) return false;
     navigateTo(restartUrl, true);
     return true;
+  }
+
+  function restartExpiredAuthorization(error, formKind) {
+    const restartCodes = [
+      "invalid_signature",
+      "INVALID_TWO_FACTOR_COOKIE",
+      "TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE",
+      "TOTP_NOT_ENABLED",
+      "BACKUP_CODES_NOT_ENABLED",
+    ];
+    if (!(error instanceof Error)) return false;
+    const enrollmentSessionExpired = formKind === "enable-totp" && error.status === 401;
+    return (enrollmentSessionExpired || restartCodes.includes(error.code)) && restartAuthorization();
   }
 
   function redirectFromServer(result) {
@@ -500,11 +521,9 @@ const oauthUiScript = String.raw`(() => {
 
   async function continueAfterEnrollment() {
     if (!oauthQuery) {
-      const restartUrl = document.body && document.body.dataset && document.body.dataset.oauthRestartUrl;
-      if (typeof restartUrl !== "string" || !restartUrl) {
+      if (!restartAuthorization()) {
         throw new Error("Abre Savia para iniciar una nueva solicitud de acceso.");
       }
-      navigateTo(restartUrl, true);
       return;
     }
     const result = await request("oauth2/continue", { postLogin: true });
@@ -689,6 +708,7 @@ const oauthUiScript = String.raw`(() => {
   }
 
   async function submitSignIn(form) {
+    clearVerifiedSecondFactor();
     const result = await request("sign-in/email", {
       email: formValue(form, "email"),
       password: formValue(form, "password"),
@@ -838,18 +858,48 @@ const oauthUiScript = String.raw`(() => {
     setStatus("Si la cuenta necesita verificación, recibirás un enlace en ese correo.");
   }
 
+  let verifiedSecondFactor;
+  function clearVerifiedSecondFactor() {
+    if (!verifiedSecondFactor) return;
+    const { input, button, label } = verifiedSecondFactor;
+    if (input) input.disabled = false;
+    if (button) button.textContent = label;
+    verifiedSecondFactor = undefined;
+  }
+
   async function submitSecondFactor(form, path) {
-    const result = await request(path, { code: formValue(form, "code") });
-    if (!redirectFromServer(result)) await continueAfterEnrollment();
+    if (!verifiedSecondFactor) {
+      const result = await request(path, { code: formValue(form, "code") });
+      if (redirectFromServer(result)) return;
+      const input = form.querySelector('input[name="code"]');
+      const button = form.querySelector('button[type="submit"]');
+      verifiedSecondFactor = { input, button, label: button?.textContent };
+      if (input) {
+        input.value = "";
+        input.disabled = true;
+      }
+      if (button) button.textContent = "Continuar a Savia";
+    }
+    try {
+      await continueAfterEnrollment();
+    } catch (error) {
+      if (error?.status !== 401) throw error;
+      clearVerifiedSecondFactor();
+      if (!restartAuthorization()) throw error;
+    }
   }
 
   async function submitEnrollment(form) {
+    clearVerifiedSecondFactor();
     const result = await request("two-factor/enable", {
       password: formValue(form, "password"),
       method: "totp",
     });
+    const setupUri = result?.totpURI;
+    if (typeof setupUri !== "string" || !setupUri.startsWith("otpauth://totp/"))
+      throw new Error("No se pudo generar el código de configuración. Inténtalo de nuevo.");
     const uri = document.querySelector("[data-oauth-totp-uri]");
-    if (uri) uri.textContent = typeof result.totpURI === "string" ? result.totpURI : "";
+    if (uri) uri.textContent = setupUri;
     const qr = document.querySelector("[data-oauth-totp-qr]");
     if (qr) {
       const qrDataUrl = typeof result.totpQrDataUrl === "string" ? result.totpQrDataUrl : "";
@@ -873,6 +923,7 @@ const oauthUiScript = String.raw`(() => {
     form.hidden = true;
     if (enrollment) enrollment.hidden = false;
     setStatus("Escanea el código QR y confirma el código de tu aplicación autenticadora.");
+    return enrollment;
   }
 
   function showExistingAuthenticator(form) {
@@ -897,7 +948,7 @@ const oauthUiScript = String.raw`(() => {
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (!beginAuthenticationAction()) return;
-        let factorCodeScope;
+        let focusAfterSubmit;
         setSubmitting(form, true);
         try {
           switch (form.dataset.oauthForm) {
@@ -905,7 +956,7 @@ const oauthUiScript = String.raw`(() => {
               await submitSSODiscovery(form);
               break;
             case "sign-in":
-              factorCodeScope = await submitSignIn(form);
+              focusAfterSubmit = (await submitSignIn(form))?.querySelector('input[name="code"]');
               break;
             case "request-password-reset":
               await submitRecovery(form);
@@ -920,7 +971,7 @@ const oauthUiScript = String.raw`(() => {
               await submitSecondFactor(form, "two-factor/verify-backup-code");
               break;
             case "enable-totp":
-              await submitEnrollment(form);
+              focusAfterSubmit = (await submitEnrollment(form))?.querySelector('input[name="code"]');
               break;
             case "verify-enrollment":
               await submitSecondFactor(form, "two-factor/verify-totp");
@@ -932,35 +983,62 @@ const oauthUiScript = String.raw`(() => {
             }
           }
         } catch (error) {
-          if (!restartExpiredAuthorization(error)) {
+          if (!restartExpiredAuthorization(error, form.dataset.oauthForm)) {
             if (error && error.code === "TOTP_ALREADY_ENABLED" && form.dataset.oauthForm === "enable-totp" && enrollment) {
               showExistingAuthenticator(form);
-              factorCodeScope = enrollment;
+              focusAfterSubmit = enrollment.querySelector('input[name="code"]');
             } else if (error && error.code === "EMAIL_NOT_VERIFIED" && form.dataset.oauthForm === "sign-in") {
               const verificationEmail = document.querySelector("#verification-email");
               if (verificationEmail) verificationEmail.value = formValue(form, "email");
               showAccountPanel("verify");
               setStatus("Verifica tu correo antes de iniciar sesión. Puedes solicitar un nuevo enlace aquí.");
             } else {
-              setStatus(error instanceof Error ? error.message : "No fue posible completar la solicitud.");
-              if (["verify-totp", "verify-backup-code", "verify-enrollment"].includes(form.dataset.oauthForm)) {
-                factorCodeScope = form;
-              }
+              const message = error instanceof Error ? error.message : "No fue posible completar la solicitud.";
+              const factorForm = ["verify-totp", "verify-backup-code", "verify-enrollment"].includes(form.dataset.oauthForm);
+              if (factorForm)
+                focusAfterSubmit = verifiedSecondFactor?.button ?? form.querySelector('input[name="code"]');
+              setStatus(factorForm && verifiedSecondFactor
+                ? message + " Pulsa Continuar a Savia para reintentar el acceso."
+                : message);
             }
           }
         } finally {
           authenticationPending = false;
           setSubmitting(form, false);
-          factorCodeScope?.querySelector('input[name="code"]')?.focus();
+          focusAfterSubmit?.focus();
         }
       });
     }
   }
 
-  if (document.querySelector("[data-sso-complete]")) {
+  function bindSSOContinuation() {
+    const panel = document.querySelector("[data-sso-complete]");
+    if (!panel) return;
     if (new URLSearchParams(window.location.search).has("error")) {
       setStatus("No fue posible validar tu acceso con el proveedor. Usa tu cuenta verificada y el método autorizado por tu organización, o consulta con tu administrador.");
-    } else continueAfterEnrollment().catch(error => { if (!restartExpiredAuthorization(error)) setStatus(error instanceof Error ? error.message : "No fue posible completar SSO."); });
+      return;
+    }
+    const retry = panel.querySelector("[data-sso-continue]");
+    async function completeSignIn() {
+      if (!beginAuthenticationAction()) return;
+      if (retry) retry.hidden = true;
+      setStatus("Validando tu acceso…");
+      setSubmitting(panel, true);
+      try {
+        await continueAfterEnrollment();
+      } catch (error) {
+        if (error?.status === 401 ? restartAuthorization() : restartExpiredAuthorization(error))
+          return;
+        setStatus(error instanceof Error ? error.message : "No fue posible completar el acceso.");
+        if (retry) retry.hidden = false;
+      } finally {
+        authenticationPending = false;
+        setSubmitting(panel, false);
+        if (retry && !retry.hidden) retry.focus();
+      }
+    }
+    retry?.addEventListener("click", completeSignIn);
+    void completeSignIn();
   }
 
   if (new URLSearchParams(window.location.search).get("mode") === "sso-mfa" && twoFactor) {
@@ -973,6 +1051,7 @@ const oauthUiScript = String.raw`(() => {
   renderConsentDetails();
   bindPasswordVisibility();
   bindForms();
+  bindSSOContinuation();
   bindTenantHome();
 })();`;
 

@@ -216,6 +216,27 @@ export type RecordCheckpoint<T = StudioRecord> = {
   before: D1PreparedStatement[];
   after: (record: T) => D1PreparedStatement[];
 };
+export async function findCreatedRecordReplay(
+  db: D1Database,
+  tenant: string,
+  name: string,
+  input: Record<string, unknown>,
+  key: string,
+) {
+  const previous = await db
+    .prepare(
+      "SELECT fingerprint,response FROM studio_requests WHERE tenant_id=? AND request_key=?",
+    )
+    .bind(tenant, key)
+    .first<{ fingerprint: string; response: string }>();
+  if (!previous) return;
+  if (previous.fingerprint !== (await fingerprint(name, input)))
+    return fail("Esta clave ya se usó con otros datos.", 409);
+  const record = JSON.parse(previous.response) as StudioRecord;
+  requireRecordAccess(db, name, "create", record);
+  return record;
+}
+
 export async function createRecord(
   db: D1Database,
   tenant: string,
@@ -233,31 +254,13 @@ export async function createRecord(
     { errors, data } = validateRecord(object, input);
   if (Object.keys(errors).length)
     return fail(Object.values(errors).join(". "), 422);
-  const key = options.idempotencyKey,
-    hash = key ? await fingerprint(name, input) : "";
+  const key = options.idempotencyKey;
   if (key && key.length > 200)
     return fail("Clave de idempotencia demasiado larga.", 422);
-  const replay = async () => {
-    const previous = key
-      ? await db
-          .prepare(
-            "SELECT fingerprint,response FROM studio_requests WHERE tenant_id=? AND request_key=?",
-          )
-          .bind(tenant, key)
-          .first<{ fingerprint: string; response: string }>()
-      : null;
-    if (previous) {
-      if (previous.fingerprint !== hash)
-        return fail("Esta clave ya se usó con otros datos.", 409);
-      return JSON.parse(previous.response) as StudioRecord;
-    }
-    return null;
-  };
+  const replay = async () =>
+    key ? findCreatedRecordReplay(db, tenant, name, input, key) : undefined;
   const previous = await replay();
-  if (previous) {
-    requireRecordAccess(db, name, "create", previous);
-    return previous;
-  }
+  if (previous) return previous;
   const id = options.id ?? crypto.randomUUID(),
     now = new Date().toISOString(),
     result = {
@@ -302,7 +305,12 @@ export async function createRecord(
         .prepare(
           "INSERT INTO studio_requests(tenant_id,request_key,fingerprint,response) VALUES (?,?,?,?)",
         )
-        .bind(tenant, key, hash, JSON.stringify(result)),
+        .bind(
+          tenant,
+          key,
+          await fingerprint(name, input),
+          JSON.stringify(result),
+        ),
     );
   try {
     await transaction(db, [
@@ -580,7 +588,9 @@ export async function restoreRecord(
     .bind(tenant, name, id)
     .first<any>();
   if (!row) return fail("El registro no está en la papelera.", 404);
-  requireRecordAccess(db, name, "restore", parseRecord(row));
+  const record = parseRecord(row);
+  requireRecordAccess(db, name, "restore", record);
+  requireRecordAccess(db, name, "read", record);
   const object = await getObject(db, tenant, name),
     { data, errors } = validateRecord(object, JSON.parse(row.data));
   if (Object.keys(errors).length)
@@ -589,6 +599,16 @@ export async function restoreRecord(
         Object.values(errors).join(". "),
       409,
     );
+  const serialized = JSON.stringify(data);
+  const restored = parseRecord({
+    ...row,
+    data: serialized,
+    deleted_at: null,
+    updated_at: new Date().toISOString(),
+    version: version + 1,
+  });
+  // The response requires read access to the normalized record. Verify it before writing.
+  requireRecordAccess(db, name, "read", restored);
   const g = guard(
     db,
     "SELECT version=? AND deleted_at IS NOT NULL FROM studio_records WHERE tenant_id=? AND id=?",
@@ -608,10 +628,10 @@ export async function restoreRecord(
       .prepare(
         "UPDATE studio_records SET deleted_at=NULL,data=?,version=version+1,updated_at=? WHERE tenant_id=? AND id=?",
       )
-      .bind(JSON.stringify(data), new Date().toISOString(), tenant, id),
+      .bind(serialized, restored.updated_at, tenant, id),
     audit(db, tenant, "record.restored", name, id, {}),
     g.end,
     schemaGuard.end,
   ]);
-  return getRecord(db, tenant, name, id);
+  return restored;
 }

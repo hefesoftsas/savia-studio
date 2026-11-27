@@ -163,6 +163,13 @@ test("preview preserves canonical and wildcard tenant gateway routes", async () 
     const gateway = await readConfig(root, "admin");
     assert.equal(gateway.name, "savia-preview");
     assert.equal(gateway.vars.CANONICAL_HOST, "savia-preview.hefesoft.com");
+    for (const route of [
+      "/public/pages",
+      "/public/pages/*",
+      "/sw.js",
+      "/dev-sw.js",
+    ])
+      assert.ok(gateway.assets.run_worker_first.includes(route), route);
     assert.deepEqual(gateway.routes, [
       { custom_domain: true, pattern: "savia-preview.hefesoft.com" },
       {

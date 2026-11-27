@@ -124,6 +124,7 @@ jobs:
         run: node scripts/preview-deploy.mjs --branch "$PREVIEW_BRANCH"
         env:
           SAVIA_RELEASE_ASSETS_PREBUILT: "true"
+          BETTER_AUTH_BOOTSTRAP_PASSWORD: ${{ secrets.SAVIA_BRANCH_PREVIEW_BOOTSTRAP_PASSWORD }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_BACKEND_URL }}

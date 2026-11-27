@@ -9,6 +9,7 @@ import {
   stat,
   readdir,
 } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import {
   join,
@@ -17,6 +18,7 @@ import {
   relative,
   isAbsolute,
   basename,
+  matchesGlob,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -25,6 +27,67 @@ import {
 } from "./runtime-publisher.mjs";
 import { execFileWithInput } from "./runtime-publisher-branch.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
+
+const defaultModuleRules = [
+  { type: "Text", globs: ["**/*.txt", "**/*.html", "**/*.sql"] },
+  { type: "Data", globs: ["**/*.bin"] },
+  { type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] },
+];
+
+export async function previewWorkerStartupOptions(directory, config) {
+  // Capture the emitted modules before assets and database migrations are copied in.
+  const complete = new Set();
+  const rules = [...(config.rules ?? []), ...defaultModuleRules].filter(
+    (rule) => {
+      if (complete.has(rule.type)) return false;
+      if (rule.fallthrough !== true) complete.add(rule.type);
+      return true;
+    },
+  );
+  const entry = join(directory, config.main);
+  const modules = [{ type: "ESModule", path: entry }];
+  for (const file of await readdir(directory, {
+    recursive: true,
+    withFileTypes: true,
+  })) {
+    if (!file.isFile()) continue;
+    const path = join(file.parentPath, file.name);
+    if (path === entry) continue;
+    const name = relative(directory, path).replaceAll("\\", "/");
+    const rule = rules.find(({ globs }) =>
+      globs.some((glob) => matchesGlob(name, glob)),
+    );
+    if (rule) modules.push({ type: rule.type, path });
+  }
+  return {
+    name: config.name,
+    modules,
+    modulesRoot: directory,
+    compatibilityDate: config.compatibility_date,
+    compatibilityFlags: config.compatibility_flags,
+    bindings: config.vars,
+    unsafeRegisterWorker: false,
+  };
+}
+
+export async function bootPreviewWorkers(workers) {
+  const requireApi = createRequire(join(root, "apps/api/package.json"));
+  const { Miniflare, convertV4MiniflareOptions } = requireApi("miniflare");
+  const runtime = new Miniflare(
+    convertV4MiniflareOptions({ host: "127.0.0.1", port: 0, workers }),
+  );
+  try {
+    await runtime.ready;
+  } catch (cause) {
+    // Miniflare can repeat the startup failure while disposing the runtime.
+    await runtime.dispose().catch(() => {});
+    throw new Error("Prepared Preview Workers failed to start locally", {
+      cause,
+    });
+  }
+  await runtime.dispose();
+}
+
 async function normalizeBuildMetadata(directory) {
   // Wrangler's README embeds a timestamp and source maps use the temporary
   // outdir as sourceRoot. Neither should change a content-addressed release.
@@ -54,6 +117,57 @@ async function normalizeBuildMetadata(directory) {
       if (map.file) map.file = basename(map.file);
       await writeFile(path, JSON.stringify(map), { mode: 0o600 });
     }
+}
+
+export async function bundleRuntimeWorker(
+  { path, config, directory, metafile },
+  runWrangler,
+) {
+  await mkdir(directory, { recursive: true });
+  await runWrangler([
+    "deploy",
+    "--dry-run",
+    "--config",
+    path,
+    "--outdir",
+    directory,
+    "--metafile",
+    metafile,
+  ]);
+  const metadata = JSON.parse(await readFile(metafile, "utf8"));
+  const entries = Object.entries(metadata.outputs ?? {}).filter(
+    ([file, info]) => info.entryPoint && /\.m?js$/.test(file),
+  );
+  if (entries.length !== 1)
+    throw new Error("Worker compiler must produce one entry module");
+  const requiredExports = [
+    ...(config.durable_objects?.bindings ?? [])
+      .filter(
+        (binding) =>
+          !binding.script_name || binding.script_name === config.name,
+      )
+      .map((binding) => binding.class_name),
+    ...(config.workflows ?? [])
+      .filter(
+        (binding) =>
+          !binding.script_name || binding.script_name === config.name,
+      )
+      .map((binding) => binding.class_name),
+  ];
+  if (requiredExports.some((name) => !entries[0][1].exports?.includes(name)))
+    throw new Error(
+      "Worker bundle is missing a declared Durable Object or Workflow export",
+    );
+  const entry = resolve(dirname(path), entries[0][0]);
+  const main = relative(directory, entry);
+  if (
+    main.startsWith("..") ||
+    isAbsolute(main) ||
+    !(await stat(entry)).isFile()
+  )
+    throw new Error("Worker compiler entry is outside its frozen directory");
+  await normalizeBuildMetadata(directory);
+  return { main, no_bundle: true, find_additional_modules: true };
 }
 
 export async function freezeRuntimeRelease(
@@ -129,6 +243,9 @@ export async function freezeRuntimeRelease(
       );
     }
     const frozen = {};
+    const startupWorkers = [];
+    const validateStartup =
+      environment === "preview" || environment.startsWith("branch-");
     if (domainMigrations)
       await cp(domainMigrations, join(staging, "migrations"), {
         recursive: true,
@@ -137,56 +254,16 @@ export async function freezeRuntimeRelease(
       });
     const freezeWorker = async ({ path, config }) => {
       const directory = join(staging, "workers", config.name);
-      await mkdir(directory, { recursive: true });
-      const metafile = join(work, `${config.name}.build-meta.json`);
-      await runWrangler([
-        "deploy",
-        "--dry-run",
-        "--config",
-        path,
-        "--outdir",
-        directory,
-        "--metafile",
-        metafile,
-      ]);
-      const metadata = JSON.parse(await readFile(metafile, "utf8"));
-      const entries = Object.entries(metadata.outputs ?? {}).filter(
-        ([file, info]) => info.entryPoint && /\.m?js$/.test(file),
+      const bundle = await bundleRuntimeWorker(
+        {
+          path,
+          config,
+          directory,
+          metafile: join(work, `${config.name}.build-meta.json`),
+        },
+        runWrangler,
       );
-      if (entries.length !== 1)
-        throw new Error("Worker compiler must produce one entry module");
-      const requiredExports = [
-        ...(config.durable_objects?.bindings ?? [])
-          .filter(
-            (binding) =>
-              !binding.script_name || binding.script_name === config.name,
-          )
-          .map((binding) => binding.class_name),
-        ...(config.workflows ?? [])
-          .filter(
-            (binding) =>
-              !binding.script_name || binding.script_name === config.name,
-          )
-          .map((binding) => binding.class_name),
-      ];
-      if (
-        requiredExports.some((name) => !entries[0][1].exports?.includes(name))
-      )
-        throw new Error(
-          "Worker bundle is missing a declared Durable Object or Workflow export",
-        );
-      const entry = resolve(dirname(path), entries[0][0]);
-      const main = relative(directory, entry);
-      if (
-        main.startsWith("..") ||
-        isAbsolute(main) ||
-        !(await stat(entry)).isFile()
-      )
-        throw new Error(
-          "Worker compiler entry is outside its frozen directory",
-        );
-      await normalizeBuildMetadata(directory);
-      const output = structuredClone(config);
+      const output = { ...structuredClone(config), ...bundle };
       if (
         ["preview", "production"].includes(environment) &&
         config.name ===
@@ -201,9 +278,9 @@ export async function freezeRuntimeRelease(
       }
       delete output.$schema;
       delete output.build;
-      output.main = main;
-      output.no_bundle = true;
-      output.find_additional_modules = true;
+      const startup = validateStartup
+        ? await previewWorkerStartupOptions(directory, output)
+        : undefined;
       if (config.assets?.directory) {
         await cp(
           resolve(dirname(path), config.assets.directory),
@@ -242,7 +319,7 @@ export async function freezeRuntimeRelease(
           });
           output[key][binding] = target;
         }
-      return [`workers/${config.name}/wrangler.json`, output];
+      return [`workers/${config.name}/wrangler.json`, output, startup];
     };
     const freezeSources = async (targets) => {
       let offset = 0;
@@ -255,8 +332,9 @@ export async function freezeRuntimeRelease(
         );
         for (const result of results) {
           if (result.status === "rejected") throw result.reason;
-          const [path, config] = result.value;
+          const [path, config, startup] = result.value;
           frozen[path] = config;
+          if (startup) startupWorkers.push(startup);
         }
         offset += batchSize;
       }
@@ -273,6 +351,7 @@ export async function freezeRuntimeRelease(
     } else {
       await freezeSources(sources);
     }
+    if (startupWorkers.length) await bootPreviewWorkers(startupWorkers);
     return await prepareRuntimeArtifact({
       environment,
       release: { directory: staging, configs: frozen },

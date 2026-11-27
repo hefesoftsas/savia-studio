@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { TENANT_SLUG_HEADER } from "@savia/tenant-host/tenant-host";
 
 import {
   flowsContentSecurityPolicy,
@@ -8,7 +9,6 @@ import {
   isServicePath,
   serviceWorkerCacheControl,
   staticAssetCacheControl,
-  TENANT_SLUG_HEADER,
   tenantSlugFromRequest,
 } from "./edge-gateway";
 
@@ -122,6 +122,12 @@ describe("edge gateway", () => {
     let assetRequest: Request | undefined;
     const assets = {
       fetch: vi.fn(async (request: Request) => {
+        if (request.method === "HEAD") {
+          expect(new URL(request.url).pathname).toBe("/flows-ui/manifest.json");
+          return new Response(null, {
+            headers: { "content-type": "application/json" },
+          });
+        }
         assetRequest = request;
         return new Response("flows child shell", {
           headers: { "content-type": "text/html; charset=utf-8" },
@@ -135,7 +141,7 @@ describe("edge gateway", () => {
     const response = await gatewayFetch(request, { API: api, ASSETS: assets });
 
     expect(assetRequest && new URL(assetRequest.url).pathname).toBe(
-      "/flows-ui/index.html",
+      "/flows-ui/",
     );
     expect(assetRequest && new URL(assetRequest.url).search).toBe("?mode=edit");
     expect(await response.text()).toBe("flows child shell");
@@ -154,6 +160,29 @@ describe("edge gateway", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(api.fetch).not.toHaveBeenCalled();
   });
+
+  it.each(["/flows-ui/", "/flows-ui/org/example/workflows"])(
+    "returns an unavailable response for %s when the child shell is absent",
+    async (path) => {
+      const assets = {
+        fetch: vi.fn(
+          async () =>
+            new Response("admin shell", {
+              headers: { "content-type": "text/html; charset=utf-8" },
+            }),
+        ),
+      };
+      const response = await gatewayFetch(
+        new Request("https://savia.example.workers.dev" + path),
+        { API: { fetch: vi.fn() }, ASSETS: assets },
+      );
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.text()).toBe("Savia Flows is unavailable.");
+      expect(assets.fetch).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("passes hashed Flows assets through with their MIME type and immutable caching", async () => {
     const assets = {
@@ -202,6 +231,7 @@ describe("edge gateway", () => {
       },
     );
     expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).toBe("Savia Flows asset not found");
   });
 
@@ -437,6 +467,33 @@ describe("edge gateway", () => {
     );
     expect(assets.fetch).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["savia.hefesoft.com", "/summary"],
+    ["demo.savia.hefesoft.com", "/summary"],
+    ["savia.hefesoft.com", "?page=3"],
+    ["demo.savia.hefesoft.com", "?q=Ana&page=3"],
+  ])(
+    "forwards the client cancellation for collection reads on %s (%s)",
+    async (host, suffix) => {
+      const api = {
+        fetch: vi.fn(async (_request: Request, _options?: RequestInit) =>
+          Response.json({ total: 6 }),
+        ),
+      };
+      const assets = { fetch: vi.fn(async () => new Response("admin")) };
+      const controller = new AbortController();
+      const request = new Request(
+        `https://${host}/v1/studio/14/api/records/hubspot_contacts${suffix}`,
+        { signal: controller.signal },
+      );
+      await gatewayFetch(request, { API: api, ASSETS: assets });
+      const options = api.fetch.mock.calls[0]?.[1];
+      expect(options?.signal?.aborted).toBe(false);
+      controller.abort();
+      expect(options?.signal?.aborted).toBe(true);
+    },
+  );
 
   it("does not add the tenant header on the canonical host", async () => {
     const api = { fetch: vi.fn(async () => Response.json({ via: "api" })) };

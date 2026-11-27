@@ -293,6 +293,7 @@ export function registerStudioRoutes(
       {
         method: c.req.method,
         headers,
+        signal: c.req.method === "GET" ? c.req.raw.signal : undefined,
         body: ["GET", "HEAD"].includes(c.req.method)
           ? undefined
           : c.req.raw.body,

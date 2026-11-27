@@ -7,6 +7,9 @@ import {
   TableProperties,
 } from "lucide-react";
 import type { ApiClient } from "@/api/api-client";
+import { useSessionReadsPaused } from "@/auth/logout-progress";
+import { useSessionGeneration } from "@/auth/session-scope";
+import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
 import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
 import {
   createMyDayWidgetId,
@@ -30,21 +33,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  describeWidgetCollection,
-  listWidgetCollections,
   listWidgetTenants,
+  normalizeCollections,
+  normalizeSchema,
+  type ObjectsResponse,
 } from "./data";
-import {
-  availablePluginWidgets,
-  listWidgetExtensions,
-  type ExtensionInstallation,
-} from "./plugins";
+import { availablePluginWidgets, listWidgetExtensions } from "./plugins";
 import { autoDetectWidgetConfig } from "./summarize";
-import type {
-  WidgetCollection,
-  WidgetCollectionSchema,
-  WidgetTenant,
-} from "./types";
 import { officeDocumentsWidgetMessages } from "./office-documents-widget-messages";
 import { widgetMessages } from "./widget-messages";
 
@@ -52,6 +47,70 @@ const AUTO = "__auto";
 type WidgetMessageKey = keyof typeof widgetMessages & string;
 
 type Source = "collection" | "system";
+
+type WorkspacePickerScope = { apiClient: ApiClient; sessionGeneration: number };
+type CollectionPickerScope = WorkspacePickerScope & { apiBasePath: string };
+
+function usePickerRead<Scope, Data>(
+  scope: Scope | undefined,
+  load: (scope: Scope, signal: AbortSignal) => Promise<Data>,
+) {
+  const [revision, setRevision] = useState(0);
+  const [response, setResponse] = useState<
+    { scope: Scope; revision: number } & (
+      { status: "ready"; data: Data } | { status: "failed" }
+    )
+  >();
+  useEffect(() => {
+    if (!scope) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    void load(scope, signal).then(
+      (data) => {
+        if (!signal.aborted)
+          setResponse({ scope, revision, status: "ready", data });
+      },
+      () => {
+        if (!signal.aborted) setResponse({ scope, revision, status: "failed" });
+      },
+    );
+    return () => controller.abort();
+  }, [scope, load, revision]);
+  const current =
+    response?.scope === scope && response?.revision === revision
+      ? response
+      : undefined;
+  return {
+    data: current?.status === "ready" ? current.data : undefined,
+    failed: current?.status === "failed",
+    loading: Boolean(scope) && !current,
+    retry: () => setRevision((value) => value + 1),
+  };
+}
+
+function readWorkspaces({ apiClient }: WorkspacePickerScope) {
+  return listWidgetTenants(apiClient);
+}
+
+async function readObjects(
+  { apiClient, apiBasePath }: CollectionPickerScope,
+  signal: AbortSignal,
+) {
+  const response = await apiClient.get<ObjectsResponse>(
+    `${apiBasePath}/api/objects`,
+    { signal },
+  );
+  if (!Array.isArray(response?.data))
+    throw new Error("Studio did not return a collection catalog.");
+  return response;
+}
+
+function readExtensions(
+  { apiClient, apiBasePath }: CollectionPickerScope,
+  signal: AbortSignal,
+) {
+  return listWidgetExtensions(apiClient, apiBasePath, { signal });
+}
 
 export function AddWidgetDialog({
   open,
@@ -76,23 +135,22 @@ export function AddWidgetDialog({
   const uiLocale = intlLocale(locale);
   const extensionTitle = (title: { es: string; en?: string; pt?: string }) =>
     title[locale] ?? title.es;
+  const sessionGeneration = useSessionGeneration();
+  const readsPaused = useSessionReadsPaused();
   const [source, setSource] = useState<Source>("collection");
-  const [tenants, setTenants] = useState<WidgetTenant[]>([]);
-  const [tenantApiBasePath, setTenantApiBasePath] = useState("");
-  const [collections, setCollections] = useState<WidgetCollection[]>([]);
-  const [collection, setCollection] = useState("");
-  const [loadedSchema, setSchema] = useState<WidgetCollectionSchema | null>(
-    null,
-  );
-  const [kind, setKind] = useState<string>("summary");
+  const [workspaceSelection, setWorkspaceSelection] = useState<{
+    scope: WorkspacePickerScope;
+    path: string;
+  }>();
+  const [collectionSelection, setCollectionSelection] = useState<{
+    scope: CollectionPickerScope;
+    name: string;
+  }>();
+  const [preferredKind, setKind] = useState("summary");
   const [systemKind, setSystemKind] = useState<string>("agenda");
-  const [extensions, setExtensions] = useState<
-    ExtensionInstallation[] | undefined
-  >(undefined);
   const [statusField, setStatusField] = useState(AUTO);
   const [amountField, setAmountField] = useState(AUTO);
   const [limit, setLimit] = useState("5");
-  const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<WidgetMessageKey | null>(null);
 
   const hasMail = existingKinds.includes("mail");
@@ -103,97 +161,57 @@ export function AddWidgetDialog({
   useEffect(() => {
     if (!open) return;
     setFeedback(null);
-    setSource(hasAgenda && hasQuickTask ? "collection" : "collection");
+    setSource("collection");
     if (!hasAgenda) setSystemKind("agenda");
     else if (!hasQuickTask) setSystemKind("quick_task");
     else if (!hasOfficeDocuments) setSystemKind("office_documents");
   }, [open, hasAgenda, hasQuickTask, hasOfficeDocuments]);
 
-  useEffect(() => {
-    if (!open || !apiClient || source !== "collection") return;
-    let active = true;
-    setLoading(true);
-    setFeedback(null);
-    void listWidgetTenants(apiClient).then(
-      (result) => {
-        if (!active) return;
-        setTenants(result);
-        const preferred =
-          result.find((entry) => entry.kind === "platform") ?? result[0];
-        if (preferred) setTenantApiBasePath(preferred.apiBasePath);
-        setLoading(false);
-      },
-      () => {
-        if (!active) return;
-        setFeedback("Could not load your collections. Try again.");
-        setLoading(false);
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, [open, apiClient, source]);
-
-  useEffect(() => {
-    if (!open || !apiClient || source !== "collection" || !tenantApiBasePath)
-      return;
-    let active = true;
-    setLoading(true);
-    void Promise.allSettled([
-      listWidgetCollections(apiClient, tenantApiBasePath),
-      listWidgetExtensions(apiClient, tenantApiBasePath).catch(() => []),
-    ]).then((results) => {
-      if (!active) return;
-      if (results[0].status === "fulfilled") {
-        setCollections(results[0].value);
-      } else {
-        setFeedback("Could not load this tenant's collections.");
-      }
-      setExtensions(results[1].status === "fulfilled" ? results[1].value : []);
-      setCollection("");
-      setSchema(null);
-      setLoading(false);
-    });
-    return () => {
-      active = false;
-    };
-  }, [open, apiClient, tenantApiBasePath, source]);
-
-  useEffect(() => {
-    if (
-      !open ||
-      !apiClient ||
-      source !== "collection" ||
-      !tenantApiBasePath ||
-      !collection
-    )
-      return;
-    let active = true;
-    void describeWidgetCollection(
-      apiClient,
-      tenantApiBasePath,
-      collection,
-    ).then(
-      (result) => {
-        if (!active || !result) return;
-        setSchema(result);
-        setStatusField(AUTO);
-        setAmountField(AUTO);
-      },
-      () => {
-        if (active) setFeedback("Could not read this collection.");
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, [open, apiClient, tenantApiBasePath, collection, source]);
-
-  const schema =
-    loadedSchema?.apiBasePath === tenantApiBasePath &&
-    loadedSchema.name === collection
-      ? loadedSchema
-      : null;
+  const workspaceScope = useMemo(
+    () =>
+      open && apiClient && !readsPaused && source === "collection"
+        ? { apiClient, sessionGeneration }
+        : undefined,
+    [open, apiClient, readsPaused, sessionGeneration, source],
+  );
+  const workspaces = usePickerRead(workspaceScope, readWorkspaces);
+  const tenants = workspaces.data ?? [];
+  const chosenTenant =
+    workspaceSelection?.scope === workspaceScope
+      ? tenants.find((entry) => entry.apiBasePath === workspaceSelection?.path)
+      : undefined;
+  const tenantApiBasePath =
+    (
+      chosenTenant ??
+      tenants.find((entry) => entry.kind === "platform") ??
+      tenants[0]
+    )?.apiBasePath ?? "";
+  const collectionScope = useMemo(
+    () =>
+      workspaceScope && tenantApiBasePath
+        ? { ...workspaceScope, apiBasePath: tenantApiBasePath }
+        : undefined,
+    [workspaceScope, tenantApiBasePath],
+  );
+  const objects = usePickerRead(collectionScope, readObjects);
+  const plugins = usePickerRead(collectionScope, readExtensions);
+  const collections = useMemo(
+    () =>
+      objects.data ? normalizeCollections(tenantApiBasePath, objects.data) : [],
+    [objects.data, tenantApiBasePath],
+  );
+  const selected =
+    collectionSelection?.scope === collectionScope
+      ? collections.find((entry) => entry.name === collectionSelection?.name)
+      : undefined;
+  const collection = selected?.name ?? "";
+  const schema = useMemo(
+    () =>
+      objects.data && collection
+        ? normalizeSchema(tenantApiBasePath, objects.data, collection)
+        : undefined,
+    [objects.data, tenantApiBasePath, collection],
+  );
   const detected = useMemo(
     () => (schema ? autoDetectWidgetConfig(schema) : {}),
     [schema],
@@ -209,11 +227,17 @@ export function AddWidgetDialog({
       ) ?? [],
     [schema],
   );
-  const selected = collections.find((entry) => entry.name === collection);
   const pluginOptions = useMemo(
-    () => availablePluginWidgets(collection, extensions),
-    [collection, extensions],
+    () => availablePluginWidgets(collection, plugins.data),
+    [collection, plugins.data],
   );
+  const selectedPlugin = pluginOptions.find(
+    (option) => `plugin:${option.extensionId}:${option.id}` === preferredKind,
+  );
+  const kind =
+    preferredKind.startsWith("plugin:") && !selectedPlugin
+      ? "summary"
+      : preferredKind;
   const isPluginKind = kind.startsWith("plugin:");
   const needsGroup = kind === "chart";
   const needsDate = kind === "actions";
@@ -232,13 +256,18 @@ export function AddWidgetDialog({
     else if (schema.sortSupported === false)
       incompatibility = "This source cannot sort records by due date.";
   }
-  const needsSchema = needsGroup || needsDate;
-  const canSaveCollection =
-    Boolean(collection) &&
-    !incompatibility &&
-    (!needsSchema || schema !== null);
+  const canSaveCollection = Boolean(schema) && !incompatibility;
+
+  function chooseCollection(name: string) {
+    if (!collectionScope) return;
+    setCollectionSelection({ scope: collectionScope, name });
+    if (preferredKind.startsWith("plugin:")) setKind("summary");
+    setStatusField(AUTO);
+    setAmountField(AUTO);
+  }
 
   async function save() {
+    if (readsPaused || saving) return;
     if (source === "system") {
       if (
         (systemKind === "agenda" && hasAgenda) ||
@@ -256,8 +285,7 @@ export function AddWidgetDialog({
       const ok = await onAdd(widget);
       if (ok) {
         onOpenChange(false);
-        setCollection("");
-        setSchema(null);
+        setCollectionSelection(undefined);
       }
       return;
     }
@@ -300,8 +328,7 @@ export function AddWidgetDialog({
     const ok = await onAdd(widget);
     if (ok) {
       onOpenChange(false);
-      setCollection("");
-      setSchema(null);
+      setCollectionSelection(undefined);
     }
   }
 
@@ -411,13 +438,25 @@ export function AddWidgetDialog({
             </div>
           ) : (
             <>
+              <ReadRefreshStatus
+                refreshing={workspaces.loading}
+                error={
+                  workspaces.failed
+                    ? t("Could not load the list of tenants.")
+                    : undefined
+                }
+                onRetry={workspaces.retry}
+              />
               {tenants.length !== 1 ? (
                 <div className="space-y-2">
                   <Label htmlFor="widget-tenant">{t("Tenant")}</Label>
                   <Select
                     value={tenantApiBasePath}
-                    onValueChange={setTenantApiBasePath}
-                    disabled={loading || tenants.length === 0}
+                    onValueChange={(path) => {
+                      if (workspaceScope)
+                        setWorkspaceSelection({ scope: workspaceScope, path });
+                    }}
+                    disabled={tenants.length === 0}
                   >
                     <SelectTrigger id="widget-tenant" className="w-full">
                       <SelectValue placeholder={t("Choose a tenant")} />
@@ -444,8 +483,8 @@ export function AddWidgetDialog({
                 <Label htmlFor="widget-collection">{t("Collection")}</Label>
                 <Select
                   value={collection}
-                  onValueChange={setCollection}
-                  disabled={loading || collections.length === 0}
+                  onValueChange={chooseCollection}
+                  disabled={collections.length === 0}
                 >
                   <SelectTrigger id="widget-collection" className="w-full">
                     <SelectValue placeholder={t("Choose a collection")} />
@@ -461,6 +500,15 @@ export function AddWidgetDialog({
                     ))}
                   </SelectContent>
                 </Select>
+                <ReadRefreshStatus
+                  refreshing={objects.loading}
+                  error={
+                    objects.failed
+                      ? t("Could not load this tenant's collections.")
+                      : undefined
+                  }
+                  onRetry={objects.retry}
+                />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="widget-kind">{t("Widget type")}</Label>
@@ -491,6 +539,14 @@ export function AddWidgetDialog({
                     ))}
                   </SelectContent>
                 </Select>
+                <ReadRefreshStatus
+                  error={
+                    plugins.failed
+                      ? t("Could not load this tenant's plugin widgets.")
+                      : undefined
+                  }
+                  onRetry={plugins.retry}
+                />
               </div>
               {incompatibility ? (
                 <p role="alert" className="text-sm text-destructive">
@@ -586,11 +642,9 @@ export function AddWidgetDialog({
                             : kind === "actions"
                               ? t("actions")
                               : extensionTitle(
-                                  pluginOptions.find(
-                                    (option) =>
-                                      `plugin:${option.extensionId}:${option.id}` ===
-                                      kind,
-                                  )?.title ?? { es: t("extension") },
+                                  selectedPlugin?.title ?? {
+                                    es: t("extension"),
+                                  },
                                 ),
                     collection: selected.label,
                   })}
@@ -612,6 +666,7 @@ export function AddWidgetDialog({
             type="button"
             onClick={() => void save()}
             disabled={
+              readsPaused ||
               saving ||
               (source === "system" ? !canSaveSystem : !canSaveCollection)
             }

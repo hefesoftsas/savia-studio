@@ -1,25 +1,33 @@
-import type { DataProvider } from "ra-core";
+import type { DataProvider, GetListParams, GetListResult } from "ra-core";
+import type { StudioRecord } from "@savia/studio-shared/metadata";
 import { REQUEST_TIMEOUT_MS, withRequestTimeout } from "@/api/request-timeout";
+import { readResponseBodyWithInactivityTimeout } from "@/api/response-body-timeout";
 import { problemMessage, responseMediaType } from "@/api/response-media-type";
-import { recordPath } from "./record-path";
+import { getSessionReadsPaused } from "@/auth/logout-progress";
+import { getSessionGeneration } from "@/auth/session-scope";
+import { recordDeletionPath, recordPath } from "./record-path";
 import { retryDeadline } from "@/api/retry-after";
-import { getStudioRuntime } from "./runtime";
+import {
+  getStudioRuntime,
+  type StudioRuntime,
+  type StudioTransport,
+} from "./runtime";
 
 function readStudioBody<T>(
   response: Response,
   read: (input: Response) => Promise<T>,
   callerSignal?: AbortSignal | null,
+  useDeadline = true,
 ): Promise<T> {
   const body = response.body;
   if (!body) return read(response);
-  return withRequestTimeout(
-    (signal) => {
-      const stream = body.pipeThrough(new TransformStream(), { signal });
-      return read(new Response(stream, { headers: response.headers }));
-    },
-    REQUEST_TIMEOUT_MS,
-    callerSignal,
-  );
+  const readStream = (signal?: AbortSignal) => {
+    const stream = body.pipeThrough(new TransformStream(), { signal });
+    return read(new Response(stream, { headers: response.headers }));
+  };
+  return useDeadline
+    ? withRequestTimeout(readStream, REQUEST_TIMEOUT_MS, callerSignal)
+    : readStream(callerSignal ?? undefined);
 }
 
 export async function apiFetch<T>(
@@ -70,7 +78,12 @@ export async function apiFetch<T>(
       },
     );
   }
-  if (responseType === "blob") return (await response.blob()) as T;
+  if (responseType === "blob")
+    return readResponseBodyWithInactivityTimeout(
+      response,
+      (input) => input.blob() as Promise<T>,
+      init.signal,
+    );
   if (mediaType === "text/html") {
     void response.body?.cancel().catch(() => undefined);
     throw Object.assign(
@@ -116,19 +129,59 @@ export const pluginApi = <T = unknown>(
           body: data instanceof FormData ? data : JSON.stringify(data),
         }),
   });
-export const api = <T = any>(
-  url: string,
-  method = "GET",
-  data?: unknown,
-  options?: RequestInit & { responseType?: "blob" },
-) =>
-  apiFetch<T>("/api" + url, {
-    ...options,
-    method,
-    ...(data !== undefined
-      ? { body: data instanceof FormData ? data : JSON.stringify(data) }
-      : {}),
+function studioRequest(transport?: StudioTransport) {
+  return <T = any>(
+    url: string,
+    method = "GET",
+    data?: unknown,
+    options?: RequestInit & { responseType?: "blob" },
+  ) =>
+    apiFetch<T>(
+      "/api" + url,
+      {
+        ...options,
+        method,
+        ...(data !== undefined
+          ? { body: data instanceof FormData ? data : JSON.stringify(data) }
+          : {}),
+      },
+      transport,
+    );
+}
+
+export const api = studioRequest();
+
+/** Complete a submitted operation against its original tenant and session. */
+export function createStudioRequest(runtime = getStudioRuntime()) {
+  const sessionGeneration = runtime.sessionGeneration ?? getSessionGeneration();
+  return studioRequest(async (url, init) => {
+    const sessionChanged = new DOMException(
+      "The Studio session changed.",
+      "AbortError",
+    );
+    if (getSessionReadsPaused() || sessionGeneration !== getSessionGeneration())
+      throw sessionChanged;
+    if (typeof window === "undefined") return studioFetch(url, init, runtime);
+
+    const controller = new AbortController();
+    const abort = () => controller.abort(sessionChanged);
+    window.addEventListener("savia:principal-changed", abort);
+    try {
+      return await studioFetch(
+        url,
+        {
+          ...init,
+          signal: init?.signal
+            ? AbortSignal.any([init.signal, controller.signal])
+            : controller.signal,
+        },
+        runtime,
+      );
+    } finally {
+      window.removeEventListener("savia:principal-changed", abort);
+    }
   });
+}
 // Ephemeral navigation hints only. Records and exact totals remain backend-owned.
 let pageCursors = new WeakMap<
   Function,
@@ -140,7 +193,14 @@ if (typeof window !== "undefined") {
       pageCursors = new WeakMap();
     });
 }
-const list = async (resource: string, params: any) => {
+const list = async (
+  resource: string,
+  params: GetListParams,
+  runtime = getStudioRuntime(),
+  request = api,
+) => {
+  const signal: AbortSignal | undefined = params.signal;
+  signal?.throwIfAborted();
   const query = new URLSearchParams({
     page: String(params.pagination?.page ?? 1),
     perPage: String(params.pagination?.perPage ?? 25),
@@ -166,7 +226,6 @@ const list = async (resource: string, params: any) => {
       : {}),
     ...(params.filter?.trash ? { trash: params.filter.trash } : {}),
   });
-  const runtime = getStudioRuntime();
   const transport = runtime.transport ?? studioFetch;
   let cursors = pageCursors.get(transport);
   if (!cursors) {
@@ -185,17 +244,22 @@ const list = async (resource: string, params: any) => {
   const key = (number: number) => scope + ":" + number;
   const hint = page > 1 ? cursors.get(key(page)) : undefined;
   if (hint && hint.expires > Date.now()) query.set("cursor", hint.cursor);
-  const fetchPage = () => api("/records/" + resource + "?" + query.toString());
+  const fetchPage = () =>
+    request("/records/" + resource + "?" + query.toString(), "GET", undefined, {
+      signal,
+    });
   let result;
   try {
     result = await fetchPage();
   } catch (error) {
+    signal?.throwIfAborted();
     if (!query.has("cursor") || (error as { status?: number }).status !== 422)
       throw error;
     cursors.delete(key(page));
     query.delete("cursor");
     result = await fetchPage();
   }
+  signal?.throwIfAborted();
   // Clear later positions when the first page refreshes after edits or filtering.
   if (page === 1)
     for (const cachedKey of cursors.keys())
@@ -209,12 +273,62 @@ const list = async (resource: string, params: any) => {
   } else cursors.delete(key(page + 1));
   return result;
 };
+
+export async function listRecordIds(
+  resource: string,
+  params: Pick<GetListParams, "sort" | "filter" | "signal">,
+  runtime: StudioRuntime,
+) {
+  const request = createStudioRequest(runtime);
+  const ids = new Set<string>();
+  // This page size is accepted by both Studio storage and external sources.
+  const perPage = 100;
+  let total: number | undefined;
+  for (let page = 1; ; page++) {
+    const result: GetListResult<StudioRecord> = await list(
+      resource,
+      { ...params, pagination: { page, perPage } },
+      runtime,
+      request,
+    );
+    if (result.meta?.pageLimitReached) return null;
+    if (result.total !== undefined) {
+      if (
+        !Number.isSafeInteger(result.total) ||
+        result.total < 0 ||
+        (total !== undefined && total !== result.total)
+      )
+        return null;
+      total = result.total;
+    }
+    for (const { id } of result.data) {
+      if (typeof id !== "string" || !id || ids.has(id)) return null;
+      ids.add(id);
+    }
+    const hasNext =
+      result.pageInfo?.hasNextPage ??
+      (total === undefined ? result.data.length === perPage : ids.size < total);
+    if (!hasNext)
+      return total === undefined || ids.size === total ? [...ids] : null;
+    if (!result.data.length || (total !== undefined && ids.size >= total))
+      return null;
+  }
+}
+
 export const dataProvider: DataProvider = {
-  getList: list,
-  getOne: (resource, params) => api(recordPath(resource, params.id)),
+  supportAbortSignal: true,
+  getList: (resource, params) => list(resource, params),
+  getOne: (resource, params) =>
+    api(recordPath(resource, params.id), "GET", undefined, {
+      signal: params.signal,
+    }),
   getMany: async (resource, params) => ({
     data: await Promise.all(
-      params.ids.map((id) => api(recordPath(resource, id)).then((r) => r.data)),
+      params.ids.map((id) =>
+        api(recordPath(resource, id), "GET", undefined, {
+          signal: params.signal,
+        }).then((r) => r.data),
+      ),
     ),
   }),
   getManyReference: (resource, params) => list(resource, params),
@@ -227,7 +341,7 @@ export const dataProvider: DataProvider = {
     }),
   delete: (resource, params) =>
     api(
-      `${recordPath(resource, params.id)}?version=${params.previousData?._version}`,
+      recordDeletionPath(resource, params.id, params.previousData?._version),
       "DELETE",
     ),
   updateMany: async (resource, params) => {
@@ -278,8 +392,8 @@ export const dataProvider: DataProvider = {
 export function studioFetch(
   url: string,
   init?: RequestInit,
+  runtime = getStudioRuntime(),
 ): Promise<Response> {
-  const runtime = getStudioRuntime();
   if (runtime.transport) return runtime.transport(url, init);
   if (runtime.embedded)
     return Promise.resolve(
@@ -292,47 +406,92 @@ export async function downloadCrm(
   url: string,
   name: string,
   expectedType?: "text/csv",
-  { useBodyDeadline = true }: { useBodyDeadline?: boolean } = {},
-) {
-  const response = await studioFetch(
-    url,
-    expectedType ? { headers: { Accept: expectedType } } : undefined,
-  );
-  const mediaType = responseMediaType(response);
-  if (!response.ok) {
-    const retryAt = retryDeadline(response);
-    const failure = await readStudioBody(response, (input) =>
-      input.json(),
-    ).catch(() => undefined);
-    const message =
-      typeof failure?.error === "string"
-        ? failure.error
-        : failure?.error?.message;
-    throw Object.assign(
-      new Error(
-        typeof message === "string" && message.trim()
-          ? message
-          : ((mediaType === "application/problem+json"
-              ? problemMessage(failure)
-              : undefined) ?? "No se pudo descargar el archivo."),
-      ),
-      { status: response.status, retryAt },
+  {
+    useBodyDeadline = true,
+    signal: callerSignal,
+  }: { useBodyDeadline?: boolean; signal?: AbortSignal } = {},
+): Promise<boolean> {
+  const runtime = getStudioRuntime();
+  const generation = runtime.sessionGeneration ?? getSessionGeneration();
+  const controller = new AbortController();
+  const signal = callerSignal
+    ? AbortSignal.any([callerSignal, controller.signal])
+    : controller.signal;
+  const isCurrent = () =>
+    !signal.aborted &&
+    !getSessionReadsPaused() &&
+    generation === getSessionGeneration();
+  if (!isCurrent()) return false;
+
+  const abort = () => controller.abort();
+  const stopMonitoringSession = () => {
+    window.removeEventListener("savia:principal-changed", abort);
+    window.removeEventListener("savia:session-cleared", abort);
+  };
+  window.addEventListener("savia:principal-changed", abort);
+  window.addEventListener("savia:session-cleared", abort);
+  signal.addEventListener("abort", stopMonitoringSession, { once: true });
+  try {
+    const response = await studioFetch(
+      url,
+      {
+        signal,
+        ...(expectedType ? { headers: { Accept: expectedType } } : {}),
+      },
+      runtime,
     );
+    if (!isCurrent()) {
+      void response.body?.cancel().catch(() => undefined);
+      return false;
+    }
+    const mediaType = responseMediaType(response);
+    if (!response.ok) {
+      const retryAt = retryDeadline(response);
+      const failure = await readStudioBody(
+        response,
+        (input) => input.json(),
+        signal,
+      ).catch(() => undefined);
+      const message =
+        typeof failure?.error === "string"
+          ? failure.error
+          : failure?.error?.message;
+      throw Object.assign(
+        new Error(
+          typeof message === "string" && message.trim()
+            ? message
+            : ((mediaType === "application/problem+json"
+                ? problemMessage(failure)
+                : undefined) ?? "No se pudo descargar el archivo."),
+        ),
+        { status: response.status, retryAt },
+      );
+    }
+    if (expectedType && mediaType !== expectedType) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error("No se recibió un archivo CSV válido.");
+    }
+    const file = await readStudioBody(
+      response,
+      (input) => input.blob(),
+      signal,
+      Boolean(expectedType && useBodyDeadline),
+    );
+    if (!isCurrent()) return false;
+    if (expectedType && !file.size)
+      throw new Error("No se recibió un archivo CSV válido.");
+    const blob = URL.createObjectURL(file);
+    const link = document.createElement("a");
+    link.href = blob;
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(blob), 1000);
+    return true;
+  } catch (error) {
+    if (!isCurrent()) return false;
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", stopMonitoringSession);
+    stopMonitoringSession();
   }
-  if (expectedType && mediaType !== expectedType) {
-    void response.body?.cancel().catch(() => undefined);
-    throw new Error("No se recibió un archivo CSV válido.");
-  }
-  const file =
-    expectedType && useBodyDeadline
-      ? await readStudioBody(response, (input) => input.blob())
-      : await response.blob();
-  if (expectedType && !file.size)
-    throw new Error("No se recibió un archivo CSV válido.");
-  const blob = URL.createObjectURL(file);
-  const link = document.createElement("a");
-  link.href = blob;
-  link.download = name;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(blob), 1000);
 }

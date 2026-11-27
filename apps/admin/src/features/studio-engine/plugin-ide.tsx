@@ -293,7 +293,14 @@ export default function PluginIde({
   const [logs, setLogs] = useState<string[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
   const currentPreview = useRef(preview);
-  currentPreview.current = preview;
+  function updatePreview(next: Preview | null) {
+    currentPreview.current = next;
+    setPreview(next);
+  }
+  const previewTimeoutText = t("timeout");
+  const previewTimeoutMessage = useRef(previewTimeoutText);
+  previewTimeoutMessage.current = previewTimeoutText;
+  const previewCompilation = useRef<{ revision: string } | null>(null);
   const [published, setPublished] = useState<{
     id: string;
     version: string;
@@ -552,53 +559,52 @@ export default function PluginIde({
   useLayoutEffect(() => {
     if (!preview) return;
     const session = preview.session;
+    const timer = window.setTimeout(() => {
+      const current = currentPreview.current;
+      if (current?.session !== session || current.state !== "loading") return;
+      updatePreview(null);
+      setError(previewTimeoutMessage.current);
+    }, 15000);
     const receive = (event: MessageEvent) => {
+      const current = currentPreview.current;
       if (
+        current?.session !== session ||
         event.source !== frame.current?.contentWindow ||
         event.data?.type !== "savia-plugin-ide" ||
         event.data.session !== session
       )
         return;
       const { kind, message: detail } = event.data;
-      if (kind === "ready")
-        setPreview((value) =>
-          value?.session === session && value.state === "loading"
-            ? { ...value, state: "ready" }
-            : value,
-        );
+      if (kind === "ready" && current.state === "loading") {
+        window.clearTimeout(timer);
+        updatePreview({ ...current, state: "ready" });
+      }
       if (kind === "error") {
-        if (currentPreview.current?.session === session)
-          currentPreview.current = {
-            ...currentPreview.current,
-            state: "error",
-          };
-        setPreview((value) =>
-          value?.session === session ? { ...value, state: "error" } : value,
-        );
+        window.clearTimeout(timer);
+        updatePreview({ ...current, state: "error" });
         if (typeof detail === "string") setError(detail.slice(0, 4000));
       }
       if ((kind === "log" || kind === "error") && typeof detail === "string")
         setLogs((value) => [...value.slice(-49), detail.slice(0, 2000)]);
     };
     window.addEventListener("message", receive);
-    const timer = window.setTimeout(
-      () =>
-        setPreview((value) => {
-          if (value?.session !== session || value.state !== "loading")
-            return value;
-          setError(t("timeout"));
-          return { ...value, state: "error" };
-        }),
-      15000,
-    );
     return () => {
       window.removeEventListener("message", receive);
       window.clearTimeout(timer);
     };
-  }, [preview?.session, t]);
+  }, [preview?.session]);
+
+  function stopPreview() {
+    if (previewCompilation.current) {
+      previewCompilation.current = null;
+      setBusy((current) => (current === "compile" ? null : current));
+      setPane((current) => (current === "preview" ? "code" : current));
+    }
+    updatePreview(null);
+  }
 
   function replaceFiles(next: IdeFiles) {
-    currentPreview.current = null;
+    stopPreview();
     if (next["original-source.json"] !== files["original-source.json"]) {
       const names = next["original-source.json"]
         ? Object.keys(
@@ -640,7 +646,6 @@ export default function PluginIde({
       });
     }
     setFiles(next);
-    setPreview(null);
     setError("");
     setLogs([]);
     setProposal(null);
@@ -873,17 +878,22 @@ export default function PluginIde({
   }
   async function runPreview() {
     setPane("preview");
-    if (busy) return;
-    const revision = snapshot;
+    if (busy || previewCompilation.current) return;
+    const attempt = { revision: snapshot };
+    previewCompilation.current = attempt;
+    const isCurrent = () =>
+      active.current &&
+      previewCompilation.current === attempt &&
+      currentSnapshot.current === attempt.revision;
     setBusy("compile");
     setError("");
     setLogs([]);
-    setPreview(null);
+    updatePreview(null);
     try {
       const compiled = await compilePluginProject(files);
-      if (!active.current || currentSnapshot.current !== revision) return;
+      if (!isCurrent()) return;
       const session = crypto.randomUUID();
-      setPreview({
+      updatePreview({
         document: createPluginPreviewDocument(
           compiled.entryJs,
           compiled.fixtures,
@@ -893,14 +903,17 @@ export default function PluginIde({
           readPluginIdeTheme(surface.current ?? document.documentElement),
         ),
         session,
-        snapshot: revision,
+        snapshot: attempt.revision,
         entryJs: compiled.entryJs,
         state: "loading",
       });
     } catch (reason) {
-      if (active.current) setError(message(reason));
+      if (isCurrent()) setError(message(reason));
     } finally {
-      if (active.current) setBusy(null);
+      if (active.current && previewCompilation.current === attempt) {
+        previewCompilation.current = null;
+        setBusy(null);
+      }
     }
   }
   async function installPublished(release: { id: string; version: string }) {
@@ -1044,6 +1057,7 @@ export default function PluginIde({
     preview?.state === "ready" &&
     preview.snapshot === snapshot &&
     (published?.snapshot !== snapshot || published.destination !== destination);
+  const compiling = busy === "compile";
   return (
     <section
       ref={surface}
@@ -1084,12 +1098,16 @@ export default function PluginIde({
           <Button
             variant="outline"
             size="sm"
-            disabled={!!busy}
-            aria-label={t("run")}
-            onClick={() => void runPreview()}
+            disabled={!!busy && !compiling}
+            aria-label={t(compiling ? "stop" : "run")}
+            onClick={compiling ? stopPreview : () => void runPreview()}
           >
-            <Play aria-hidden="true" />
-            {t("tryPreview")}
+            {compiling ? (
+              <Square aria-hidden="true" />
+            ) : (
+              <Play aria-hidden="true" />
+            )}
+            {t(compiling ? "stop" : "tryPreview")}
           </Button>
           <Button
             size="sm"
@@ -1146,12 +1164,7 @@ export default function PluginIde({
                 </DropdownMenuItem>
               )}
               {preview && (
-                <DropdownMenuItem
-                  onSelect={() => {
-                    currentPreview.current = null;
-                    setPreview(null);
-                  }}
-                >
+                <DropdownMenuItem onSelect={stopPreview}>
                   <Square aria-hidden="true" />
                   {t("stop")}
                 </DropdownMenuItem>
@@ -1771,14 +1784,16 @@ export default function PluginIde({
                   <div className="plugin-ide-preview-empty">
                     <Play />
                     <h3>{t("previewTitle")}</h3>
-                    <p>{t(busy === "compile" ? "compiling" : "empty")}</p>
-                    <Button
-                      variant="outline"
-                      disabled={!!busy}
-                      onClick={() => void runPreview()}
-                    >
-                      {t("tryPreview")}
-                    </Button>
+                    <p>{t(compiling ? "compiling" : "empty")}</p>
+                    {!compiling && (
+                      <Button
+                        variant="outline"
+                        disabled={!!busy}
+                        onClick={() => void runPreview()}
+                      >
+                        {t("tryPreview")}
+                      </Button>
+                    )}
                   </div>
                 )}
                 <details className="plugin-ide-console" open={logs.length > 0}>

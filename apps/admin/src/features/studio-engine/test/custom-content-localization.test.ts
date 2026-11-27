@@ -55,9 +55,14 @@ describe("custom authored localization", () => {
     ).toBe("Olá %{other}");
   });
   it("passes locale safely and accepts updates only from its parent", () => {
+    const hostLanguage = document.documentElement.lang;
     const source = resultSurfaceDocument("<p>content</p>", [], [], false, "en");
-    expect(source).toContain("default-src 'none'");
-    const script = source.match(/<script>([\s\S]*?)<\/script>/)![1];
+    const frameDocument = new DOMParser().parseFromString(source, "text/html");
+    const policy = frameDocument.querySelector<HTMLMetaElement>(
+      'meta[http-equiv="Content-Security-Policy"]',
+    );
+    expect(policy?.content).toContain("default-src 'none'");
+    expect(frameDocument.scripts).toHaveLength(1);
     const handlers: Record<string, (event: any) => void> = {};
     const parent = { postMessage: vi.fn() };
     const scope: any = {};
@@ -68,7 +73,7 @@ describe("custom authored localization", () => {
       "addEventListener",
       "dispatchEvent",
       "document",
-      script,
+      frameDocument.scripts[0].text,
     )(
       scope,
       parent,
@@ -76,7 +81,7 @@ describe("custom authored localization", () => {
         handlers[name] = fn;
       },
       dispatch,
-      document,
+      frameDocument,
     );
     const catalog = { hello: ["Hola", "Hello %{name}", "Olá"] };
     expect(scope.savia.locale).toBe("en");
@@ -93,6 +98,8 @@ describe("custom authored localization", () => {
       data: { type: "savia-result-locale", locale: "pt" },
     });
     expect(scope.savia.t(catalog, "hello")).toBe("Olá");
+    expect(frameDocument.documentElement.lang).toBe("pt");
+    expect(document.documentElement.lang).toBe(hostLanguage);
     expect(dispatch).toHaveBeenCalledOnce();
     handlers.message({
       source: parent,

@@ -20,6 +20,7 @@ const roleClaim = "https://savia.hefesoft.com/roles";
 const emailClaim = "https://savia.hefesoft.com/email";
 const nameClaim = "https://savia.hefesoft.com/name";
 const twoFactorClaim = "https://savia.hefesoft.com/two-factor-enabled";
+const sessionCreatedAtClaim = "https://savia.hefesoft.com/session-created-at";
 
 const oauthResourceClient = oauthProviderResourceClient().getActions();
 
@@ -47,6 +48,7 @@ export type OAuthAuthenticatedIdentity = {
   scopes: Set<string>;
   subject: string;
   twoFactorEnabled: boolean;
+  sessionCreatedAt?: number;
 };
 
 export type OAuthResourceAuthenticator = {
@@ -303,12 +305,18 @@ function booleanClaim(claims: Record<string, unknown>, name: string): boolean {
 function parseIdentity(
   claims: Record<string, unknown>,
 ): OAuthAuthenticatedIdentity {
+  const sessionCreatedAt = claims[sessionCreatedAtClaim];
   return {
     subject: requiredString(claims, "sub"),
     email: requiredString(claims, emailClaim),
     displayName: requiredString(claims, nameClaim),
     roles: stringArrayClaim(claims, roleClaim),
     twoFactorEnabled: booleanClaim(claims, twoFactorClaim),
+    ...(typeof sessionCreatedAt === "number" &&
+    Number.isSafeInteger(sessionCreatedAt) &&
+    sessionCreatedAt > 0
+      ? { sessionCreatedAt }
+      : {}),
     scopes: new Set(requiredString(claims, "scope").split(" ").filter(Boolean)),
   };
 }

@@ -1,7 +1,10 @@
 import { databaseConflict, databaseInputFailure } from "@savia/db/errors";
 import { HTTPException } from "hono/http-exception";
 import { daneCityFlow, lookupDaneCity } from "./dane";
-import { validateRequestCachePolicy } from "./request-cache";
+import {
+  tenantWasPurgedSince,
+  validateRequestCachePolicy,
+} from "./request-cache";
 import { openApi } from "./openapi";
 import { Hono } from "hono";
 import type { Env } from "./env";
@@ -43,16 +46,25 @@ import {
   seedOnce,
   syncExampleRequestBundleBundle,
 } from "./store";
-import { isPlatformTenant, scopeTenant, tenantFromRequest } from "./tenant";
+import {
+  isPlatformTenant,
+  scopeTenant,
+  tenantFromRequest,
+  TenantPurgedError,
+} from "./tenant";
 import { execute } from "./runner";
 import { demoInput } from "./mock";
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{
+  Bindings: Env;
+  Variables: { requestStartedAt: number };
+}>();
 const scopeOf = tenantFromRequest;
 /** Principal id forwarded by the API gateway for attribution, if any. */
 function actorOf(request: Request): string {
   return (request.headers.get("x-savia-actor") ?? "").slice(0, 200);
 }
 app.use("*", async (c, next) => {
+  const receivedAt = Date.now();
   if (new URL(c.req.url).hostname !== "savia-request.internal")
     return c.json({ error: "Acceso privado." }, 403);
   if (
@@ -60,11 +72,23 @@ app.use("*", async (c, next) => {
     !c.req.header("content-type")?.startsWith("application/json")
   )
     return c.json({ error: "Usa application/json." }, 415);
+  let scope: string;
   try {
-    scopeOf(c.req.raw);
+    scope = scopeOf(c.req.raw);
   } catch {
     return c.json({ error: "Tenant inválido." }, 400);
   }
+  let startedAt = receivedAt;
+  const forwardedStart = c.req.header("x-savia-request-started-at");
+  if (scope && forwardedStart !== undefined) {
+    const value = Number(forwardedStart);
+    if (!/^\d+$/.test(forwardedStart) || !Number.isSafeInteger(value))
+      return c.json({ error: "Fecha de inicio de solicitud inválida." }, 400);
+    startedAt = Math.min(receivedAt, value);
+    if (await tenantWasPurgedSince(c.env.DB, scope, startedAt))
+      throw new TenantPurgedError();
+  }
+  c.set("requestStartedAt", startedAt);
   c.header("Cache-Control", "no-store");
   await next();
 });
@@ -89,6 +113,7 @@ app.get("/api/lookups/dane", async (c) => {
         c.env,
         definition?.steps[0]?.cache,
         scopeOf(c.req.raw),
+        c.get("requestStartedAt"),
       ),
     );
   } catch (error) {
@@ -181,8 +206,11 @@ app.delete("/api/admin/tenants/:tenant", async (c) => {
     return c.json({ tenant: scope, purged });
   } catch {
     return c.json(
-      { error: "El catálogo de plataforma no se puede purgar." },
-      400,
+      {
+        error:
+          "No se pudo completar la eliminación de datos del tenant en Savia Request.",
+      },
+      503,
     );
   }
 });
@@ -698,7 +726,17 @@ app.post("/api/flows/:id/runs", async (c) => {
     Object.values(body.input).some((v) => typeof v !== "string")
   )
     return c.json({ error: "Envía mode e input con valores de texto." }, 400);
-  return c.json(await execute(c.env, flow, body.input, body.mode, null, scope));
+  return c.json(
+    await execute(
+      c.env,
+      flow,
+      body.input,
+      body.mode,
+      null,
+      scope,
+      c.get("requestStartedAt"),
+    ),
+  );
 });
 app.get("/api/flows/:id/runs", async (c) => {
   const scope = scopeOf(c.req.raw);
@@ -767,6 +805,7 @@ app.post("/v1/flows/:id/runs", async (c) => {
       body.mode,
       version.id,
       scope,
+      c.get("requestStartedAt"),
     ),
   );
 });
@@ -789,6 +828,8 @@ app.fetch = async (request, environment, executionContext) => {
 };
 
 app.onError((error, c) => {
+  if (error instanceof TenantPurgedError)
+    return c.json({ error: error.message }, 409);
   if (error instanceof SecretReplacementRequiredError)
     return c.json({ error: error.message }, 400);
   if (databaseConflict(error))

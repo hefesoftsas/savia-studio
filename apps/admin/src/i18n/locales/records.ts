@@ -361,7 +361,6 @@ export const recordsMessages = {
     "Dias de retenção para novas alterações",
   ],
   Editar: ["Editar", "Edit", "Editar"],
-  "Editar documento": ["Editar documento", "Edit document", "Editar documento"],
   "Editar relacionado": [
     "Editar relacionado",
     "Edit related record",
@@ -686,6 +685,18 @@ export const recordsMessages = {
     "Redefinir colunas",
   ],
   Restaurar: ["Restaurar", "Restore", "Restaurar"],
+  "Hay cambios locales pendientes. Sincroniza o resuelve los conflictos antes de restaurar.":
+    [
+      "Hay cambios locales pendientes. Sincroniza o resuelve los conflictos antes de restaurar.",
+      "There are pending local changes. Sync or resolve conflicts before restoring.",
+      "Há alterações locais pendentes. Sincronize ou resolva os conflitos antes de restaurar.",
+    ],
+  "El registro volverá a la lista principal si cumple la estructura actual y el servidor confirma la restauración.":
+    [
+      "El registro volverá a la lista principal si cumple la estructura actual y el servidor confirma la restauración.",
+      "The record returns to the main list if it matches the current schema and the server confirms the restore.",
+      "O registro voltará à lista principal se atender à estrutura atual e o servidor confirmar a restauração.",
+    ],
   "Restaurar campos": [
     "Restaurar campos",
     "Restore fields",
@@ -712,6 +723,12 @@ export const recordsMessages = {
     "Seleccionar registro",
     "Select record",
     "Selecionar registro",
+  ],
+  "Seleccionar todo": ["Seleccionar todo", "Select all", "Selecionar tudo"],
+  "Seleccionando registros…": [
+    "Seleccionando registros…",
+    "Selecting records…",
+    "Selecionando registros…",
   ],
   "Seleccionar…": ["Seleccionar…", "Select…", "Selecionar…"],
   Siguiente: ["Siguiente", "Next", "Próximo"],
@@ -891,6 +908,11 @@ export const recordsMessages = {
     "Wait for the files to finish uploading.",
     "Aguarde o término do envio dos arquivos.",
   ],
+  "Estamos volviendo a cargar un adjunto. Guarda cuando termine.": [
+    "Estamos volviendo a cargar un adjunto. Guarda cuando termine.",
+    "We’re uploading an attachment again. Save when it finishes.",
+    "Estamos reenviando um anexo. Salve após o envio.",
+  ],
   "Revisa los archivos antes de guardar. Uno o más no se pudieron cargar.": [
     "Revisa los archivos antes de guardar. Uno o más no se pudieron cargar.",
     "Review the files before saving. One or more could not be uploaded.",
@@ -1039,6 +1061,11 @@ export const recordsMessages = {
     "Some records could not be deleted.",
     "Não foi possível excluir alguns registros.",
   ],
+  "Se completó la eliminación de %{p0} de %{p1} registros.": [
+    "Se completó la eliminación de %{p0} de %{p1} registros.",
+    "Deleted %{p0} of %{p1} records.",
+    "A exclusão de %{p0} de %{p1} registros foi concluída.",
+  ],
   "Registro eliminado": [
     "Registro eliminado",
     "Record deleted",
@@ -1048,6 +1075,11 @@ export const recordsMessages = {
     "Registro movido a la papelera",
     "Record moved to trash",
     "Registro movido para a lixeira",
+  ],
+  "Movido a la papelera en este dispositivo · sincronización pendiente": [
+    "Movido a la papelera en este dispositivo · sincronización pendiente",
+    "Moved to trash on this device · sync pending",
+    "Movido para a lixeira neste dispositivo · sincronização pendente",
   ],
   "Eliminar registro": [
     "Eliminar registro",
@@ -1146,6 +1178,11 @@ export const recordsMessages = {
     "No se pudo cargar el registro. Reintenta.",
     "The record could not be loaded. Retry.",
     "Não foi possível carregar o registro. Tente novamente.",
+  ],
+  "No se pudieron seleccionar todos los registros. Reintenta.": [
+    "No se pudieron seleccionar todos los registros. Reintenta.",
+    "Could not select all records. Try again.",
+    "Não foi possível selecionar todos os registros. Tente novamente.",
   ],
   "Cargando copia…": ["Cargando copia…", "Loading copy…", "Carregando cópia…"],
   Duplicar: ["Duplicar", "Duplicate", "Duplicar"],
@@ -1556,6 +1593,11 @@ export const recordsMessages = {
     "Enviando arquivo…",
   ],
   "Archivo cargado": ["Archivo cargado", "File uploaded", "Arquivo enviado"],
+  "Reintentar carga de %{p0}": [
+    "Reintentar carga de %{p0}",
+    "Retry upload for %{p0}",
+    "Tentar enviar %{p0} novamente",
+  ],
   "Pendiente de subir": [
     "Pendiente de subir",
     "Pending upload",
@@ -1596,7 +1638,6 @@ export const recordsMessages = {
     "Showing the latest available results.",
     "Mostrando os últimos resultados disponíveis.",
   ],
-  "este registro": ["este registro", "this record", "este registro"],
   "Quitar %{p0}": ["Quitar %{p0}", "Remove %{p0}", "Remover %{p0}"],
   "%{p0} of %{p1}": ["%{p0} de %{p1}", "%{p0} of %{p1}", "%{p0} de %{p1}"],
   "Pregunta %{p0} de %{p1}": [
@@ -1635,10 +1676,11 @@ export const recordsMessages = {
     "Registros de %{p0}",
   ],
   "Abrir %{p0}": ["Abrir %{p0}", "Open %{p0}", "Abrir %{p0}"],
-  "%{p0} registros eliminados": [
-    "%{p0} registros eliminados",
-    "%{p0} records deleted",
-    "%{p0} registros excluídos",
+  "Abrir en Office": ["Abrir en Office", "Open in Office", "Abrir no Office"],
+  "Abrir %{p0} en Office": [
+    "Abrir %{p0} en Office",
+    "Open %{p0} in Office",
+    "Abrir %{p0} no Office",
   ],
   "%{p0} registros movidos a la papelera": [
     "%{p0} registros movidos a la papelera",
@@ -1650,17 +1692,11 @@ export const recordsMessages = {
     "Delete %{p0} records",
     "Excluir %{p0} registros",
   ],
-  "¿Archivar %{p0} en HubSpot?": [
-    "¿Archivar %{p0} en HubSpot?",
-    "Archive %{p0} in HubSpot?",
-    "Arquivar %{p0} no HubSpot?",
+  "¿Mover este registro a la papelera?": [
+    "¿Mover este registro a la papelera?",
+    "Move this record to trash?",
+    "Mover este registro para a lixeira?",
   ],
-  "¿Eliminar permanentemente %{p0} registros? Esta acción no se puede deshacer.":
-    [
-      "¿Eliminar permanentemente %{p0} registros? Esta acción no se puede deshacer.",
-      "Permanently delete %{p0} records? This cannot be undone.",
-      "Excluir %{p0} registros permanentemente? Esta ação não pode ser desfeita.",
-    ],
   "¿Mover %{p0} registros a la papelera?": [
     "¿Mover %{p0} registros a la papelera?",
     "Move %{p0} records to trash?",

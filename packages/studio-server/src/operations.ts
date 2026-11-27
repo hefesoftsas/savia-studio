@@ -1,4 +1,16 @@
 import { dialectFor } from "@savia/db/dialect";
+import { databaseConflict } from "@savia/db/errors";
+import {
+  cleanDeletedAttachmentObjects,
+  purgeExpiredTemporaryAttachments,
+} from "./attachment-deletions";
+import {
+  authorizeAttachmentAssociation,
+  requireAttachmentCreator,
+  requireAttachmentCreateGrant,
+  requireAttachmentRecord,
+  type AttachmentIntent,
+} from "./attachment-access";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
@@ -8,6 +20,7 @@ import {
   assertLocalCollection,
   getRecord,
   createRecord,
+  findCreatedRecordReplay,
   parseRecord,
   audit,
   guard,
@@ -23,13 +36,19 @@ import {
   validateRecord,
 } from "@savia/studio-shared/metadata";
 import {
+  CSV_IMPORT_MAX_LENGTH,
   parseCsv,
   mapCsvRow,
   csvHeaders,
   csvLine,
 } from "@savia/studio-shared/csv";
 import { buildWhere } from "./query";
-import { policyFor, accessDenied, accessRecord } from "./access-authorization";
+import {
+  policyFor,
+  accessDenied,
+  accessRecord,
+  requireRecordAccess,
+} from "./access-authorization";
 import { decideWrite } from "@savia/studio-shared/access-evaluator";
 import {
   formatRecordCsvValue,
@@ -43,6 +62,36 @@ const fail = (
 ): never => {
   throw new HTTPException(status, { message });
 };
+
+async function csvRelationAvailable(
+  db: D1Database,
+  tenant: string,
+  collection: string,
+  id: string,
+): Promise<boolean> {
+  if (!policyFor(db)) {
+    return Boolean(
+      await db
+        .prepare(
+          "SELECT id FROM studio_records WHERE tenant_id=? AND object_name=? AND deleted_at IS NULL AND id=?",
+        )
+        .bind(tenant, collection, id)
+        .first(),
+    );
+  }
+  try {
+    await getRecord(db, tenant, collection, id);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof HTTPException &&
+      (error.status === 403 || error.status === 404)
+    )
+      return false;
+    throw error;
+  }
+}
+
 const pageSize = 20;
 const pageNumber = (value?: string) =>
   Math.max(1, Math.floor(Number(value) || 1));
@@ -66,29 +115,161 @@ const automationSchema = z.object({
   enabled: z.boolean().default(true),
 });
 const temporaryAttachmentLifetimeMs = 24 * 60 * 60 * 1000;
+const recordAttachmentLimit = 50;
 const temporaryExpiresAt = () =>
   new Date(Date.now() + temporaryAttachmentLifetimeMs).toISOString();
+const temporaryAttachmentKey = (tenant: string, id: string) =>
+  `${tenant}/temporary/${id}`;
 
-async function purgeExpiredTemporaryAttachments(
+type StoredAttachment = AttachmentIntent & {
+  id: string;
+  object_name: string;
+  field_name: string;
+  name: string;
+  mime: string;
+  size: number;
+  storage_key: string;
+  version: number;
+};
+type DraftAttachment = StoredAttachment & { target_record_id: string | null };
+type SavedAttachmentAssociation = StoredAttachment & {
+  record_id: string;
+  original_storage_key: string | null;
+};
+const attachmentTarget = z
+  .object({
+    recordId: z.string().trim().min(1).max(200).optional(),
+    createRequestKey: z.string().trim().min(1).max(200).optional(),
+  })
+  .refine(({ recordId, createRequestKey }) => !(recordId && createRequestKey));
+
+function attachmentLimits(
+  db: D1Database,
+  tenant: string,
+  object: string,
+  recordId: string,
+  field: string,
+  maxFiles: number,
+) {
+  const counts = `SELECT count(*) AS total,
+      count(CASE WHEN object_name=? AND field_name=? THEN 1 END) AS field_total
+    FROM studio_files WHERE tenant_id=? AND record_id=?`;
+  const args = [object, field, tenant, recordId];
+  return {
+    async check() {
+      const current = await db
+        .prepare(counts)
+        .bind(...args)
+        .first<{ total: number; field_total: number }>();
+      if ((current?.total ?? 0) >= recordAttachmentLimit)
+        fail("Máximo 50 adjuntos por registro.", 422);
+      if ((current?.field_total ?? 0) >= maxFiles)
+        fail("Máximo de archivos alcanzado para este campo.", 422);
+    },
+    writeGuard: () =>
+      guard(
+        db,
+        `SELECT total<? AND field_total<? FROM (${counts}) AS attachment_counts`,
+        [recordAttachmentLimit, maxFiles, ...args],
+      ),
+  };
+}
+
+function isAttachmentWriteConflict(error: unknown) {
+  return (
+    (error instanceof HTTPException && error.status === 409) ||
+    databaseConflict(error)
+  );
+}
+
+async function commitAttachment(
+  db: D1Database,
+  statements: D1PreparedStatement[],
+) {
+  // PostgreSQL rolls back these conflicts. Retry the batch without uploading the file again.
+  const maxAttempts = 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await transaction(db, statements);
+      return;
+    } catch (error) {
+      if (attempt === maxAttempts || !databaseConflict(error)) throw error;
+    }
+  }
+}
+
+async function uploadAttachment(
   db: D1Database,
   files: R2Bucket,
-  tenant: string,
+  upload: {
+    tenant: string;
+    fileId: string;
+    storageKey: string;
+    file: File;
+    mime: string;
+  },
+  statements: D1PreparedStatement[],
 ) {
-  const { results } = await db
+  const { tenant, fileId, storageKey, file, mime } = upload;
+  const bytes = await file.arrayBuffer();
+  const cleanupAt = Date.now() + temporaryAttachmentLifetimeMs;
+  await db
     .prepare(
-      "SELECT id,storage_key FROM studio_file_drafts WHERE tenant_id=? AND expires_at<=?",
+      "INSERT INTO studio_file_deletions (storage_key,tenant_id,file_id,next_attempt_at) VALUES (?,?,?,?)",
     )
-    .bind(tenant, now())
-    .all<{ id: string; storage_key: string }>();
-  if (!results.length) return;
-  await Promise.all(results.map((row) => files.delete(row.storage_key)));
-  await db.batch(
-    results.map((row) =>
-      db
-        .prepare("DELETE FROM studio_file_drafts WHERE tenant_id=? AND id=?")
-        .bind(tenant, row.id),
-    ),
+    .bind(storageKey, tenant, fileId, cleanupAt)
+    .run();
+  const gate = guard(
+    db,
+    "SELECT next_attempt_at=? FROM studio_file_deletions WHERE storage_key=?",
+    [cleanupAt, storageKey],
   );
+  try {
+    await files.put(storageKey, bytes, { httpMetadata: { contentType: mime } });
+    await commitAttachment(db, [
+      gate.start,
+      ...statements,
+      db
+        .prepare("DELETE FROM studio_file_deletions WHERE storage_key=?")
+        .bind(storageKey),
+      gate.end,
+    ]);
+  } catch (error) {
+    try {
+      const released = await db
+        .prepare(
+          "UPDATE studio_file_deletions SET next_attempt_at=0 WHERE storage_key=? AND next_attempt_at=?",
+        )
+        .bind(storageKey, cleanupAt)
+        .run();
+      if (!released.meta.changes) {
+        // Losing the batch response can leave a committed draft, file, or revision.
+        const identity = [tenant, fileId, storageKey];
+        const saved = await db
+          .prepare(
+            `SELECT 1 FROM studio_file_drafts WHERE tenant_id=? AND id=? AND storage_key=?
+             UNION ALL SELECT 1 FROM studio_files WHERE tenant_id=? AND id=? AND storage_key=?
+             UNION ALL SELECT 1 FROM studio_file_revisions WHERE tenant_id=? AND file_id=? AND storage_key=?
+             LIMIT 1`,
+          )
+          .bind(...identity, ...identity, ...identity)
+          .first();
+        if (saved) return;
+        // A late upload needs another cleanup, even if a previous claim is still active.
+        await db
+          .prepare(
+            `INSERT INTO studio_file_deletions (storage_key,tenant_id,file_id) VALUES (?,?,?)
+             ON CONFLICT(storage_key) DO UPDATE SET next_attempt_at=studio_file_deletions.next_attempt_at+1`,
+          )
+          .bind(storageKey, tenant, fileId)
+          .run();
+      }
+      await cleanDeletedAttachmentObjects(db, files, { tenant, fileId });
+    } catch {
+      console.warn("STUDIO_ATTACHMENT_UPLOAD_RECOVERY_DEFERRED");
+    }
+    throw error;
+  }
 }
 
 export type AutomationRuleSnapshot = {
@@ -392,6 +573,27 @@ export function registerOperations(app: Hono<Env>) {
       return fail("Selecciona un archivo.", 422);
     if (!field || !identifier.safeParse(field).success)
       return fail("Campo de archivo inválido.", 422);
+    const { recordId, createRequestKey } = attachmentTarget.parse({
+      recordId: form.get("recordId") ?? undefined,
+      createRequestKey: form.get("createRequestKey") ?? undefined,
+    });
+    const access = policyFor(db);
+    const principalId = access?.principalId ?? (c.get("principalId") || null);
+    if (access) {
+      if (
+        definition.config.studio?.business ||
+        definition.config.studio?.collection
+      )
+        accessDenied();
+      await assertLocalCollection(db, tenant, object);
+      const target = { object_name: object, field_name: field };
+      if (recordId)
+        await requireAttachmentRecord(db, tenant, target, recordId, "update");
+      else {
+        if (!createRequestKey) accessDenied();
+        requireAttachmentCreateGrant(access, target);
+      }
+    }
     const fieldDefinition = definition.config.fields[field];
     if (fieldDefinition?.type !== R2_ATTACHMENT_TYPE)
       return fail("El campo no admite archivos R2.", 422);
@@ -415,16 +617,24 @@ export function registerOperations(app: Hono<Env>) {
       file.name.replace(/[\x00-\x1f\x7f/\\\\]/g, "_").slice(0, 200) ||
       "adjunto";
     const id = crypto.randomUUID();
-    const key = `${tenant}/temporary/${id}`;
+    const key = temporaryAttachmentKey(tenant, id);
     const expiresAt = temporaryExpiresAt();
-    await c.env.FILES.put(key, await file.arrayBuffer(), {
-      httpMetadata: { contentType: mime },
-    });
-    try {
-      await transaction(db, [
+    const createGuard =
+      createRequestKey &&
+      guard(
+        db,
+        "SELECT NOT EXISTS (SELECT 1 FROM studio_requests WHERE tenant_id=? AND request_key=?)",
+        [tenant, createRequestKey],
+      );
+    await uploadAttachment(
+      db,
+      c.env.FILES,
+      { tenant, fileId: id, storageKey: key, file, mime },
+      [
+        ...(createGuard ? [createGuard.start] : []),
         db
           .prepare(
-            "INSERT INTO studio_file_drafts (id,tenant_id,object_name,field_name,name,mime,size,storage_key,expires_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO studio_file_drafts (id,tenant_id,object_name,field_name,name,mime,size,storage_key,expires_at,created_by,target_record_id,create_request_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
           )
           .bind(
             id,
@@ -436,6 +646,9 @@ export function registerOperations(app: Hono<Env>) {
             file.size,
             key,
             expiresAt,
+            principalId,
+            recordId ?? null,
+            createRequestKey ?? null,
           ),
         audit(db, tenant, "file.temporary_uploaded", object, null, {
           field,
@@ -443,11 +656,9 @@ export function registerOperations(app: Hono<Env>) {
           size: file.size,
           expiresAt,
         }),
-      ]);
-    } catch (error) {
-      await c.env.FILES.delete(key);
-      throw error;
-    }
+        ...(createGuard ? [createGuard.end] : []),
+      ],
+    );
     return c.json(
       {
         data: {
@@ -485,7 +696,11 @@ export function registerOperations(app: Hono<Env>) {
       return fail("El campo no admite archivos R2.", 422);
     const policy = fieldDefinition
       ? r2AttachmentPolicy(fieldDefinition.config as Record<string, unknown>)
-      : { maxFiles: 50, maxSize: 5 * 1024 * 1024, accept: [] };
+      : {
+          maxFiles: recordAttachmentLimit,
+          maxSize: 5 * 1024 * 1024,
+          accept: [],
+        };
     const mime = file.type || "application/octet-stream";
     if (!file.size || file.size > policy.maxSize)
       return fail(
@@ -499,63 +714,58 @@ export function registerOperations(app: Hono<Env>) {
     );
     if (policy.accept.length && !acceptsMime)
       return fail("El tipo de archivo no está permitido para este campo.", 422);
-    const count = await db
-      .prepare(
-        "SELECT count(*) AS total FROM studio_files WHERE tenant_id=? AND record_id=?",
-      )
-      .bind(tenant, recordId)
-      .first<{ total: number }>();
-    if ((count?.total ?? 0) >= 50)
-      return fail("Máximo 50 adjuntos por registro.", 422);
-    if (field) {
-      const fieldCount = await db
-        .prepare(
-          "SELECT count(*) AS total FROM studio_files WHERE tenant_id=? AND object_name=? AND record_id=? AND field_name=?",
-        )
-        .bind(tenant, object, recordId, field)
-        .first<{ total: number }>();
-      if ((fieldCount?.total ?? 0) >= policy.maxFiles)
-        return fail("Máximo de archivos alcanzado para este campo.", 422);
-    }
+    const limits = attachmentLimits(
+      db,
+      tenant,
+      object,
+      recordId,
+      field,
+      policy.maxFiles,
+    );
+    await limits.check();
     const name =
       file.name.replace(/[\x00-\x1f\x7f/\\]/g, "_").slice(0, 200) || "adjunto";
     const id = crypto.randomUUID(),
       key = `${tenant}/${recordId}/${id}`;
-    await c.env.FILES.put(key, await file.arrayBuffer(), {
-      httpMetadata: { contentType: mime },
-    });
+    const limitGuard = limits.writeGuard();
     try {
-      const limitGuard = guard(
+      await uploadAttachment(
         db,
-        "SELECT count(*)<50 FROM studio_files WHERE tenant_id=? AND record_id=?",
-        [tenant, recordId],
-      );
-      await transaction(db, [
-        limitGuard.start,
-        db
-          .prepare(
-            "INSERT INTO studio_files (id,tenant_id,object_name,record_id,field_name,name,mime,size,storage_key) VALUES (?,?,?,?,?,?,?,?,?)",
-          )
-          .bind(
-            id,
-            tenant,
-            object,
-            recordId,
+        c.env.FILES,
+        {
+          tenant,
+          fileId: id,
+          storageKey: key,
+          file,
+          mime,
+        },
+        [
+          limitGuard.start,
+          db
+            .prepare(
+              "INSERT INTO studio_files (id,tenant_id,object_name,record_id,field_name,name,mime,size,storage_key) VALUES (?,?,?,?,?,?,?,?,?)",
+            )
+            .bind(
+              id,
+              tenant,
+              object,
+              recordId,
+              field,
+              name,
+              mime,
+              file.size,
+              key,
+            ),
+          audit(db, tenant, "file.uploaded", object, recordId, {
             field,
             name,
-            mime,
-            file.size,
-            key,
-          ),
-        audit(db, tenant, "file.uploaded", object, recordId, {
-          field,
-          name,
-          size: file.size,
-        }),
-        limitGuard.end,
-      ]);
+            size: file.size,
+          }),
+          limitGuard.end,
+        ],
+      );
     } catch (error) {
-      await c.env.FILES.delete(key);
+      if (isAttachmentWriteConflict(error)) await limits.check();
       throw error;
     }
     return c.json(
@@ -570,103 +780,230 @@ export function registerOperations(app: Hono<Env>) {
         version: z.number().int().positive(),
       })
       .parse(await c.req.json());
-    const db = c.env.DB,
-      tenant = c.get("tenant");
+    const db = c.env.DB;
+    const tenant = c.get("tenant");
+    const principalId = c.get("principalId");
+    const id = c.req.param("id");
+    const nextVersion = input.version + 1;
+    const originalKey = temporaryAttachmentKey(tenant, id);
     if (!c.env.FILES)
       return fail("El almacenamiento de archivos no está configurado.", 503);
     await purgeExpiredTemporaryAttachments(db, c.env.FILES, tenant);
+    const findSavedAttachment = () =>
+      db
+        .prepare(
+          `SELECT f.*, (SELECT r.storage_key FROM studio_file_revisions r
+           WHERE r.tenant_id=f.tenant_id AND r.file_id=f.id AND r.version=?) AS original_storage_key
+           FROM studio_files f WHERE f.tenant_id=? AND f.id=?`,
+        )
+        .bind(nextVersion, tenant, id)
+        .first<SavedAttachmentAssociation>();
+    const matchesAssociation = (saved: SavedAttachmentAssociation) =>
+      saved.record_id === input.recordId &&
+      ((saved.version === nextVersion && saved.storage_key === originalKey) ||
+        (saved.version > nextVersion &&
+          saved.original_storage_key === originalKey));
+    const confirmation = (file: StoredAttachment, version = file.version) =>
+      c.json({
+        data: {
+          id: file.id,
+          name: file.name,
+          mime: file.mime,
+          size: file.size,
+          field: file.field_name,
+          recordId: input.recordId,
+          version,
+        },
+      });
+    const expiryClock = dialectFor(db).utcNow();
     const row = await db
-      .prepare("SELECT * FROM studio_file_drafts WHERE tenant_id=? AND id=?")
-      .bind(tenant, c.req.param("id"))
-      .first<any>();
-    if (!row) return fail("El adjunto temporal no existe o expiró.", 404);
+      .prepare(
+        `SELECT * FROM studio_file_drafts WHERE tenant_id=? AND id=? AND expires_at>${expiryClock}`,
+      )
+      .bind(tenant, id)
+      .first<DraftAttachment>();
+    if (!row) {
+      const saved = await findSavedAttachment();
+      if (!saved)
+        return c.json(
+          {
+            error: "El adjunto temporal no existe o expiró.",
+            code: "ATTACHMENT_DRAFT_UNAVAILABLE",
+          },
+          404,
+        );
+      if (!matchesAssociation(saved))
+        return fail("El adjunto temporal no existe o expiró.", 404);
+      await authorizeAttachmentAssociation(
+        db,
+        tenant,
+        saved,
+        input.recordId,
+        principalId,
+      );
+      return confirmation(saved);
+    }
+    requireAttachmentCreator(db, row.created_by, principalId);
+    if (row.target_record_id && row.target_record_id !== input.recordId)
+      accessDenied();
     if (row.version !== input.version)
       return fail("El adjunto cambió. Actualiza la ficha.", 409);
     const definition = await getObject(db, tenant, row.object_name);
+    if (policyFor(db)) {
+      if (
+        definition.config.studio?.business ||
+        definition.config.studio?.collection
+      )
+        accessDenied();
+      await assertLocalCollection(db, tenant, row.object_name);
+    }
     const fieldDefinition = definition.config.fields[row.field_name];
     if (fieldDefinition?.type !== R2_ATTACHMENT_TYPE)
       return fail("El campo ya no admite archivos R2.", 422);
-    await getRecord(db, tenant, row.object_name, input.recordId);
+    const record = await authorizeAttachmentAssociation(
+      db,
+      tenant,
+      row,
+      input.recordId,
+      principalId,
+    );
+    const recordGuard =
+      policyFor(db) &&
+      guard(
+        db,
+        "SELECT version=? AND deleted_at IS NULL FROM studio_records WHERE tenant_id=? AND object_name=? AND id=?",
+        [record._version, tenant, row.object_name, input.recordId],
+      );
     const policy = r2AttachmentPolicy(
       fieldDefinition.config as Record<string, unknown>,
     );
-    const total = await db
-      .prepare(
-        "SELECT count(*) AS total FROM studio_files WHERE tenant_id=? AND record_id=?",
-      )
-      .bind(tenant, input.recordId)
-      .first<{ total: number }>();
-    if ((total?.total ?? 0) >= 50)
-      return fail("Máximo 50 adjuntos por registro.", 422);
-    const fieldTotal = await db
-      .prepare(
-        "SELECT count(*) AS total FROM studio_files WHERE tenant_id=? AND object_name=? AND record_id=? AND field_name=?",
-      )
-      .bind(tenant, row.object_name, input.recordId, row.field_name)
-      .first<{ total: number }>();
-    if ((fieldTotal?.total ?? 0) >= policy.maxFiles)
-      return fail("Máximo de archivos alcanzado para este campo.", 422);
-    const nextVersion = row.version + 1;
-    await transaction(db, [
-      db
+    const limits = attachmentLimits(
+      db,
+      tenant,
+      row.object_name,
+      input.recordId,
+      row.field_name,
+      policy.maxFiles,
+    );
+    try {
+      await limits.check();
+      const limitGuard = limits.writeGuard();
+      // Serialize promotion with cleanup before checking the expiry in the batch.
+      const lockDraft = db
         .prepare(
-          "INSERT INTO studio_files (id,tenant_id,object_name,record_id,field_name,name,mime,size,storage_key,version) VALUES (?,?,?,?,?,?,?,?,?,?)",
+          "UPDATE studio_file_drafts SET expires_at=expires_at WHERE tenant_id=? AND id=?",
         )
-        .bind(
-          row.id,
+        .bind(tenant, id);
+      const draftGuard = guard(
+        db,
+        `SELECT version=? AND expires_at>${expiryClock} FROM studio_file_drafts WHERE tenant_id=? AND id=?`,
+        [input.version, tenant, id],
+      );
+      await commitAttachment(db, [
+        lockDraft,
+        draftGuard.start,
+        ...(recordGuard ? [recordGuard.start] : []),
+        limitGuard.start,
+        db
+          .prepare(
+            "INSERT INTO studio_files (id,tenant_id,object_name,record_id,field_name,name,mime,size,storage_key,version,created_by,create_request_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+          )
+          .bind(
+            row.id,
+            tenant,
+            row.object_name,
+            input.recordId,
+            row.field_name,
+            row.name,
+            row.mime,
+            row.size,
+            row.storage_key,
+            nextVersion,
+            row.created_by,
+            row.create_request_key,
+          ),
+        db
+          .prepare(
+            "DELETE FROM studio_file_drafts WHERE tenant_id=? AND id=? AND version=?",
+          )
+          .bind(tenant, row.id, row.version),
+        audit(db, tenant, "file.attached", row.object_name, input.recordId, {
+          field: row.field_name,
+          name: row.name,
+          temporaryId: row.id,
+        }),
+        limitGuard.end,
+        ...(recordGuard ? [recordGuard.end] : []),
+        draftGuard.end,
+      ]);
+    } catch (error) {
+      // A concurrent attempt can commit before this attempt checks capacity or writes.
+      const saved = await findSavedAttachment();
+      if (saved && matchesAssociation(saved)) {
+        await authorizeAttachmentAssociation(
+          db,
           tenant,
-          row.object_name,
+          saved,
           input.recordId,
-          row.field_name,
-          row.name,
-          row.mime,
-          row.size,
-          row.storage_key,
-          nextVersion,
-        ),
-      db
-        .prepare(
-          "DELETE FROM studio_file_drafts WHERE tenant_id=? AND id=? AND version=?",
-        )
-        .bind(tenant, row.id, row.version),
-      audit(db, tenant, "file.attached", row.object_name, input.recordId, {
-        field: row.field_name,
-        name: row.name,
-        temporaryId: row.id,
-      }),
-    ]);
-    return c.json({
-      data: {
-        id: row.id,
-        name: row.name,
-        mime: row.mime,
-        size: row.size,
-        field: row.field_name,
-        recordId: input.recordId,
-        version: nextVersion,
-      },
-    });
+          principalId,
+        );
+        return confirmation(saved);
+      }
+      if (isAttachmentWriteConflict(error)) await limits.check();
+      throw error;
+    }
+    return confirmation(row, nextVersion);
   });
   app.get("/api/file/:id/download", async (c) => {
-    const row = await c.env.DB.prepare(
-      "SELECT id,name,storage_key,object_name,NULL AS expires_at,0 AS temporary FROM studio_files WHERE tenant_id=? AND id=? UNION ALL SELECT id,name,storage_key,object_name,expires_at,1 AS temporary FROM studio_file_drafts WHERE tenant_id=? AND id=? LIMIT 1",
-    )
+    const db = c.env.DB;
+    const tenant = c.get("tenant");
+    const row = await db
+      .prepare(
+        `SELECT id,name,storage_key,object_name,field_name,record_id,NULL AS created_by,NULL AS expires_at,NULL AS target_record_id FROM studio_files WHERE tenant_id=? AND id=?
+       UNION ALL SELECT id,name,storage_key,object_name,field_name,NULL,created_by,expires_at,target_record_id FROM studio_file_drafts WHERE tenant_id=? AND id=? LIMIT 1`,
+      )
       .bind(
         c.get("tenant"),
         c.req.param("id"),
         c.get("tenant"),
         c.req.param("id"),
       )
-      .first<any>();
+      .first<{
+        id: string;
+        name: string;
+        storage_key: string;
+        object_name: string;
+        field_name: string;
+        record_id: string | null;
+        created_by: string | null;
+        expires_at: string | null;
+        target_record_id: string | null;
+      }>();
     if (!row) return fail("El adjunto no existe.", 404);
-    await getObject(c.env.DB, c.get("tenant"), row.object_name);
-    if (row.temporary && row.expires_at && String(row.expires_at) <= now()) {
-      await c.env.FILES.delete(row.storage_key);
-      await c.env.DB.prepare(
-        "DELETE FROM studio_file_drafts WHERE tenant_id=? AND id=?",
-      )
-        .bind(c.get("tenant"), row.id)
-        .run();
+    const policy = policyFor(db);
+    if (row.expires_at) {
+      requireAttachmentCreator(db, row.created_by, c.get("principalId"));
+      if (policy) {
+        if (row.target_record_id)
+          await requireAttachmentRecord(
+            db,
+            tenant,
+            row,
+            row.target_record_id,
+            "update",
+          );
+        else requireAttachmentCreateGrant(policy, row);
+      }
+    }
+    if (row.record_id && policy)
+      await requireAttachmentRecord(db, tenant, row, row.record_id, "read");
+    else await getObject(db, tenant, row.object_name);
+    if (row.expires_at && row.expires_at <= now()) {
+      await purgeExpiredTemporaryAttachments(
+        c.env.DB,
+        c.env.FILES,
+        c.get("tenant"),
+      );
       return fail("El adjunto temporal expiró.", 404);
     }
     const file = await c.env.FILES.get(row.storage_key);
@@ -685,13 +1022,17 @@ export function registerOperations(app: Hono<Env>) {
     });
   });
   app.delete("/api/file/:id", async (c) => {
-    const { version } = versionSchema.parse(await c.req.json()),
-      db = c.env.DB,
-      tenant = c.get("tenant");
-    const row = await db
-      .prepare("SELECT * FROM studio_files WHERE tenant_id=? AND id=?")
-      .bind(tenant, c.req.param("id"))
-      .first<any>();
+    const { version, draftOnly } = versionSchema
+      .extend({ draftOnly: z.boolean().optional() })
+      .parse(await c.req.json());
+    const db = c.env.DB;
+    const tenant = c.get("tenant");
+    const row = draftOnly
+      ? null
+      : await db
+          .prepare("SELECT * FROM studio_files WHERE tenant_id=? AND id=?")
+          .bind(tenant, c.req.param("id"))
+          .first<any>();
     const draft = row
       ? null
       : await db
@@ -702,16 +1043,20 @@ export function registerOperations(app: Hono<Env>) {
           .first<any>();
     const file = row ?? draft;
     if (!file) return c.json({ ok: true });
+    if (row && policyFor(db)) {
+      const record = await requireAttachmentRecord(
+        db,
+        tenant,
+        row,
+        row.record_id,
+        "update",
+      );
+      requireRecordAccess(db, row.object_name, "read", record);
+    }
+    if (draft)
+      requireAttachmentCreator(db, draft.created_by, c.get("principalId"));
     if (file.version !== version)
       return fail("El adjunto cambió. Actualiza la ficha.", 409);
-    const revisions = row
-      ? await db
-          .prepare(
-            "SELECT storage_key FROM studio_file_revisions WHERE tenant_id=? AND file_id=?",
-          )
-          .bind(tenant, file.id)
-          .all<{ storage_key: string }>()
-      : { results: [] };
     const gate = guard(
       db,
       row
@@ -721,6 +1066,22 @@ export function registerOperations(app: Hono<Env>) {
     );
     await transaction(db, [
       gate.start,
+      db
+        .prepare(
+          "INSERT INTO studio_file_deletions (storage_key,tenant_id,file_id) VALUES (?,?,?) ON CONFLICT(storage_key) DO NOTHING",
+        )
+        .bind(file.storage_key, tenant, file.id),
+      ...(row
+        ? [
+            db
+              .prepare(
+                `INSERT INTO studio_file_deletions (storage_key,tenant_id,file_id)
+             SELECT storage_key,tenant_id,file_id FROM studio_file_revisions WHERE tenant_id=? AND file_id=?
+             ON CONFLICT(storage_key) DO NOTHING`,
+              )
+              .bind(tenant, file.id),
+          ]
+        : []),
       db
         .prepare(
           row
@@ -740,20 +1101,19 @@ export function registerOperations(app: Hono<Env>) {
       ),
       gate.end,
     ]);
-    // Remove bytes only after the version-checked deletion commits.
-    const keys = [
-      ...new Set([
-        file.storage_key,
-        ...revisions.results.map((r) => r.storage_key),
-      ]),
-    ];
-    for (let offset = 0; offset < keys.length; offset += 1000)
-      await c.env.FILES.delete(keys.slice(offset, offset + 1000));
+    try {
+      await cleanDeletedAttachmentObjects(db, c.env.FILES, {
+        tenant,
+        fileId: file.id,
+      });
+    } catch {
+      console.error("STUDIO_ATTACHMENT_CLEANUP_FAILED");
+    }
     return c.json({ ok: true });
   });
 
   const importSchema = z.object({
-    csv: z.string().max(1024 * 1024),
+    csv: z.string().max(CSV_IMPORT_MAX_LENGTH),
     mapping: z.record(z.string(), z.string()),
     duplicateField: z.string().default(""),
     duplicatePolicy: z.enum(["skip", "error"]).default("skip"),
@@ -796,6 +1156,41 @@ export function registerOperations(app: Hono<Env>) {
           .map(([name]) => name),
       ]),
     ];
+    const policy = policyFor(db);
+    const importPolicy = policy && {
+      ...policy,
+      grants: policy.grants
+        .filter((grant) => grant.action === "import")
+        .map((grant) => ({ ...grant, action: "create" as const })),
+    };
+    const relations = Object.entries(object.config.fields).flatMap(
+      ([name, { config, label }]) =>
+        config?.relation
+          ? [{ name, label, collection: String(config.relation) }]
+          : [],
+    );
+    // Authorize the entire batch before any row can be written.
+    const rows = parsed.rows.map((values) => {
+      const row = mapCsvRow(object, parsed.headers, values, input.mapping);
+      if (
+        importPolicy &&
+        !decideWrite(
+          importPolicy,
+          `collection:${objectName}`,
+          "create",
+          null,
+          {
+            id: "import-preview",
+            createdBy: importPolicy.principalId,
+            values: row.data,
+          },
+          Object.keys(row.data),
+        ).allowed
+      )
+        accessDenied();
+      return row;
+    });
+
     const seen = new Set<string>();
     const results: {
       row: number;
@@ -804,47 +1199,22 @@ export function registerOperations(app: Hono<Env>) {
       error?: string;
       id?: string;
     }[] = [];
-    for (const [index, values] of parsed.rows.entries()) {
-      const { data, errors } = mapCsvRow(
-        object,
-        parsed.headers,
-        values,
-        input.mapping,
-      );
-      const policy = policyFor(db);
-      if (policy) {
-        const importPolicy = {
-          ...policy,
-          grants: policy.grants
-            .filter((g) => g.action === "import")
-            .map((g) => ({ ...g, action: "create" as const })),
-        };
-        if (
-          !decideWrite(
-            importPolicy,
-            `collection:${objectName}`,
-            "create",
-            null,
-            {
-              id: "import-preview",
-              createdBy: policy.principalId,
-              values: data,
-            },
-            Object.keys(data),
-          ).allowed
-        )
-          accessDenied();
-        for (const [field, config] of Object.entries(object.config.fields))
-          if (config.config?.relation && data[field])
-            for (const id of Array.isArray(data[field])
-              ? (data[field] as unknown[])
-              : [data[field]])
-              await getRecord(
-                db,
-                tenant,
-                String(config.config.relation),
-                String(id),
-              );
+    for (const [index, { data, errors }] of rows.entries()) {
+      // A relation can be missing or unreadable without affecting other rows.
+      if (!Object.keys(errors).length) {
+        for (const { name, label, collection } of relations) {
+          const value = data[name];
+          if (!value) continue;
+          const ids = Array.isArray(value) ? value : [value];
+          for (const id of ids) {
+            if (await csvRelationAvailable(db, tenant, collection, String(id)))
+              continue;
+            errors[name] = policy
+              ? `${label} requiere un registro relacionado disponible.`
+              : `${label}: registro relacionado inexistente (${id}).`;
+            break;
+          }
+        }
       }
       if (Object.keys(errors).length) {
         results.push({
@@ -855,90 +1225,124 @@ export function registerOperations(app: Hono<Env>) {
         });
         continue;
       }
-      let duplicate = "";
-      for (const field of duplicateFields) {
+      const checks = duplicateFields.flatMap((field) => {
         const value = data[field];
-        if (value === null || value === undefined || value === "") continue;
+        if (value == null || value === "") return [];
         const normalized =
           typeof value === "string" ? value.trim().toLocaleLowerCase() : value;
-        const key = `${field}:${JSON.stringify(normalized)}`;
-        const row = await db
-          .prepare(
-            `SELECT id FROM studio_records WHERE tenant_id=? AND object_name=? AND deleted_at IS NULL AND LOWER(TRIM(${dialectFor(db).jsonText("data", `$.${field}`)}))=? LIMIT 1`,
+        const sql = `SELECT id FROM studio_records WHERE tenant_id=? AND object_name=? AND deleted_at IS NULL AND LOWER(TRIM(${dialectFor(db).jsonText("data", `$.${field}`)}))=? LIMIT 1`;
+        const parameters = [
+          tenant,
+          objectName,
+          String(
+            typeof value === "boolean"
+              ? Number(value)
+              : typeof value === "object"
+                ? JSON.stringify(value)
+                : value,
           )
-          .bind(
-            tenant,
-            objectName,
-            String(
-              typeof value === "boolean"
-                ? Number(value)
-                : typeof value === "object"
-                  ? JSON.stringify(value)
-                  : value,
-            )
-              .trim()
-              .toLowerCase(),
+            .trim()
+            .toLowerCase(),
+        ];
+        return [
+          {
+            field,
+            sql,
+            parameters,
+            key: `${field}:${JSON.stringify(normalized)}`,
+            error: `${object.config.fields[field].label}: valor duplicado (${String(value)}).`,
+          },
+        ];
+      });
+      const findDuplicate = async () => {
+        for (const check of checks) {
+          if (
+            seen.has(check.key) ||
+            (await db
+              .prepare(check.sql)
+              .bind(...check.parameters)
+              .first())
           )
-          .first<{ id: string }>();
-        if (seen.has(key) || row) {
-          duplicate = `${object.config.fields[field].label}: valor duplicado (${String(value)}).`;
-          break;
+            return check.error;
         }
-      }
-      // Relation checks also run during preview, not only while committing.
-      for (const [field, config] of Object.entries(object.config.fields))
-        if (config.config?.relation && data[field]) {
-          const ids = Array.isArray(data[field])
-            ? (data[field] as unknown[])
-            : [data[field]];
-          for (const id of ids)
-            if (
-              !(await db
-                .prepare(
-                  "SELECT id FROM studio_records WHERE tenant_id=? AND object_name=? AND deleted_at IS NULL AND id=?",
-                )
-                .bind(tenant, String(config.config.relation), String(id))
-                .first())
-            )
-              errors[field] =
-                `${config.label}: registro relacionado inexistente (${id}).`;
-        }
-      if (Object.keys(errors).length) {
-        results.push({
-          row: index + 2,
-          status: "error",
-          error: Object.values(errors).join(" "),
-          data,
-        });
-        continue;
-      }
-      if (duplicate) {
+      };
+      const reportDuplicate = (error: string) => {
         results.push({
           row: index + 2,
           status: input.duplicatePolicy === "skip" ? "skipped" : "error",
-          error: duplicate,
+          error,
           data,
         });
-        continue;
-      }
-      for (const field of duplicateFields)
-        if (
-          data[field] !== null &&
-          data[field] !== undefined &&
-          data[field] !== ""
-        )
-          seen.add(
-            `${field}:${JSON.stringify(typeof data[field] === "string" ? (data[field] as string).trim().toLocaleLowerCase() : data[field])}`,
-          );
-      if (!commit) {
-        results.push({ row: index + 2, status: "ready", data });
-        continue;
-      }
+      };
+      const duplicate = await findDuplicate();
+      const key = commit ? `csv:${input.importId}:${index}` : undefined;
       try {
-        const record = await createRecord(db, tenant, objectName, data, {
-          idempotencyKey: `csv:${input.importId}:${index}`,
-          createdBy: c.get("principalId"),
-        });
+        // A previously saved row can match its own duplicate field on a retry.
+        const replay =
+          duplicate && key
+            ? await findCreatedRecordReplay(db, tenant, objectName, data, key)
+            : undefined;
+        if (duplicate && !replay) {
+          reportDuplicate(duplicate);
+          continue;
+        }
+        if (replay) await assertLocalCollection(db, tenant, objectName);
+        let record = replay;
+        if (commit && !record) {
+          // Configured unique fields already have a transactional constraint.
+          const selectedCheck = checks.find(
+            ({ field }) =>
+              field === input.duplicateField &&
+              !object.config.fields[field].config?.unique,
+          );
+          const duplicateGuard =
+            selectedCheck &&
+            guard(
+              db,
+              `SELECT NOT EXISTS (${selectedCheck.sql})`,
+              selectedCheck.parameters,
+            );
+          try {
+            record = await createRecord(db, tenant, objectName, data, {
+              idempotencyKey: key,
+              createdBy: c.get("principalId"),
+              ...(duplicateGuard
+                ? {
+                    checkpoint: {
+                      before: [duplicateGuard.start],
+                      after: () => [duplicateGuard.end],
+                    },
+                  }
+                : {}),
+            });
+          } catch (error) {
+            if (
+              !databaseConflict(error) &&
+              !(error instanceof HTTPException && error.status === 409)
+            )
+              throw error;
+            if (key)
+              record = await findCreatedRecordReplay(
+                db,
+                tenant,
+                objectName,
+                data,
+                key,
+              );
+            if (!record) {
+              const concurrentDuplicate = await findDuplicate();
+              if (!concurrentDuplicate) throw error;
+              reportDuplicate(concurrentDuplicate);
+              continue;
+            }
+          }
+        }
+        // Preview reserves ready rows. Confirmation reserves only saved rows.
+        for (const check of checks) seen.add(check.key);
+        if (!record) {
+          results.push({ row: index + 2, status: "ready", data });
+          continue;
+        }
         let warning: string | undefined;
         try {
           await runAutomations(db, tenant, objectName, null, record);

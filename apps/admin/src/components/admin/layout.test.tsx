@@ -1,5 +1,6 @@
 // @vitest-environment-options {"url":"https://clinic.savia-preview.hefesoft.com/"}
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -8,7 +9,15 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { COOKIE_CONSENT_STORAGE_KEY } from "@/consent/cookie-consent-storage";
 import { useCurrentTenant } from "@/features/tenants/use-current-tenant";
+import type { ApiClient } from "@/api/api-client";
+import type { AppServices } from "@/app-services";
+import { fetchTenantWorkspaces } from "@/api/tenant-workspaces-client";
+import { QueryClient } from "@tanstack/react-query";
+import { AppServicesProvider } from "@/features/assistant/assistant-context";
+import { STUDIO_TENANTS_CHANGED } from "@/features/studio/studio-tenants";
+import type { RealtimeChangeEvent } from "@/realtime/use-realtime";
 import { Layout } from "./layout";
 
 vi.mock("ra-core", async (importOriginal) => {
@@ -23,6 +32,10 @@ vi.mock("ra-core", async (importOriginal) => {
         "savia.layout.noNextScreen": "No hay una pantalla siguiente",
         "savia.layout.toggleSidebar": "Mostrar u ocultar menú",
         "savia.layout.backToSavia": "Volver a Savia",
+        "savia.consent.title": "Usamos cookies",
+        "savia.consent.rejectNonEssential": "Solo esenciales",
+        "savia.pwa.bannerTitle": "Instala Savia en tu dispositivo",
+        "savia.pwa.installAppShort": "Instalar app",
       };
       return labels[key] ?? key;
     },
@@ -66,14 +79,28 @@ vi.mock("@/features/savia-request/savia-request-provider", () => ({
 vi.mock("@/features/notifications/notification-bell", () => ({
   NotificationBell: () => null,
 }));
-vi.mock("@/pwa", () => ({
-  PwaInstallBanner: () => <div data-testid="pwa-install-banner" />,
-}));
 vi.mock("@/features/tenants/use-current-tenant", () => ({
   useCurrentTenant: vi.fn(() => ({})),
 }));
 
-afterEach(cleanup);
+const subscribe = vi.hoisted(() =>
+  vi.fn(
+    (_options: {
+      topics: string[];
+      onEvent?: (event: RealtimeChangeEvent) => void;
+    }) => ({ status: "live" }),
+  ),
+);
+vi.mock("@/realtime/use-realtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/realtime/use-realtime")>()),
+  useRealtimeTopics: subscribe,
+}));
+
+afterEach(() => {
+  cleanup();
+  subscribe.mockClear();
+  localStorage.removeItem(COOKIE_CONSENT_STORAGE_KEY);
+});
 
 function RouteControls() {
   const location = useLocation();
@@ -96,6 +123,114 @@ function RouteControls() {
 }
 
 describe("admin layout", () => {
+  it("refreshes the workspace catalog once for a burst of account security changes", async () => {
+    const workspace = {
+      id: "tenant:14",
+      tenantId: 14,
+      label: "North",
+      kind: "tenant",
+      apiBasePath: "/v1/studio/14",
+    };
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({ data: [workspace] })
+      .mockResolvedValue({ data: [] });
+    const client = { get } as unknown as ApiClient;
+    const queryClient = new QueryClient();
+    const permissionsKey = [
+      "auth",
+      "canAccess",
+      { resource: "studio", action: "list" },
+    ];
+    queryClient.setQueryData(permissionsKey, true);
+    await expect(fetchTenantWorkspaces(client)).resolves.toEqual([workspace]);
+    const page = vi.fn(() => fetchTenantWorkspaces(client));
+    const sidebar = vi.fn(() => fetchTenantWorkspaces(client));
+    window.addEventListener(STUDIO_TENANTS_CHANGED, page);
+    window.addEventListener(STUDIO_TENANTS_CHANGED, sidebar);
+    vi.useFakeTimers();
+    try {
+      render(
+        <MemoryRouter>
+          <AppServicesProvider
+            services={{ apiClient: client, queryClient } as AppServices}
+          >
+            <Layout>{null}</Layout>
+          </AppServicesProvider>
+        </MemoryRouter>,
+      );
+      const account = subscribe.mock.calls.find(([options]) =>
+        options.topics.includes("account"),
+      )?.[0];
+      expect(account).toBeDefined();
+      act(() =>
+        account?.onEvent?.({
+          topic: "account",
+          type: "updated",
+          collection: "preferences",
+        }),
+      );
+      await act(async () => vi.advanceTimersByTimeAsync(200));
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(page).not.toHaveBeenCalled();
+      expect(queryClient.getQueryState(permissionsKey)?.isInvalidated).toBe(
+        false,
+      );
+
+      act(() => {
+        account?.onEvent?.({
+          topic: "account",
+          type: "updated",
+          collection: "security",
+        });
+        account?.onEvent?.({
+          topic: "account",
+          type: "updated",
+          collection: "security",
+        });
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(200));
+      expect(page).toHaveBeenCalledOnce();
+      expect(sidebar).toHaveBeenCalledOnce();
+      await expect(page.mock.results[0]?.value).resolves.toEqual([]);
+      await expect(sidebar.mock.results[0]?.value).resolves.toEqual([]);
+      expect(get).toHaveBeenCalledTimes(2);
+      expect(queryClient.getQueryState(permissionsKey)?.isInvalidated).toBe(
+        true,
+      );
+    } finally {
+      window.removeEventListener(STUDIO_TENANTS_CHANGED, page);
+      window.removeEventListener(STUDIO_TENANTS_CHANGED, sidebar);
+      queryClient.clear();
+      vi.useRealTimers();
+    }
+  });
+  it("shows cookie choices before the install notice in the reserved workspace footer", () => {
+    render(
+      <MemoryRouter>
+        <Layout>
+          <button type="button">Workspace action</button>
+        </Layout>
+      </MemoryRouter>,
+    );
+
+    const action = screen.getByRole("button", { name: "Workspace action" });
+    const workspace = action.closest(".overflow-y-auto");
+    const notice = screen.getByRole("region", { name: "Usamos cookies" });
+    const installNotice = () =>
+      screen.queryByRole("region", { name: "Instala Savia en tu dispositivo" });
+    expect(workspace).not.toBeNull();
+    expect(workspace?.nextElementSibling).toBe(notice);
+    expect(notice.closest("main")).toBe(workspace?.parentElement);
+    expect(installNotice()).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Solo esenciales" }));
+
+    expect(notice).not.toBeInTheDocument();
+    expect(installNotice()).toBeVisible();
+    expect(workspace?.nextElementSibling).toBe(installNotice());
+  });
+
   it("lets a blocked Bookings user choose another organization with the same tab and date", () => {
     vi.mocked(useCurrentTenant).mockReturnValueOnce({
       isDedicated: true,
@@ -133,6 +268,46 @@ describe("admin layout", () => {
       "https://savia-preview.hefesoft.com/#/bookings?tab=reservations&date=2026-11-25",
     );
   });
+
+  it("keeps the selected workspace when signing in again from Bookings", () => {
+    vi.mocked(useCurrentTenant).mockReturnValueOnce({
+      isDedicated: true,
+      slug: "clinic",
+      name: "Clinic",
+      kind: "commercial",
+      id: null,
+      monogram: "C",
+      isPlatformAdmin: false,
+      isLoading: false,
+      scopeStatus: "error",
+      requiresSignIn: true,
+    });
+    render(
+      <MemoryRouter
+        initialEntries={[
+          "/bookings?tab=availability&date=2026-11-25&ignored=1",
+        ]}
+      >
+        <Layout>
+          <p>Protected appointments</p>
+        </Layout>
+      </MemoryRouter>,
+    );
+    const link = screen.getByRole("link", {
+      name: /Sign in again|Volver a iniciar sesión/,
+    });
+    const authorize = new URL(link.getAttribute("href")!);
+    expect(authorize.pathname).toBe("/api/auth/admin/authorize");
+    expect(authorize.searchParams.get("resume")).toBe("bookings");
+    expect(authorize.searchParams.get("return_to")).toBe(
+      "https://clinic.savia-preview.hefesoft.com",
+    );
+    expect(authorize.searchParams.get("booking_query")).toBe(
+      "tab=availability&date=2026-11-25",
+    );
+    expect(screen.queryByText("Protected appointments")).toBeNull();
+  });
+
   it.each([
     "/savia-flows?tenantId=0",
     "/savia-flows/",
@@ -241,7 +416,6 @@ describe("admin layout", () => {
     expect(
       screen.queryByRole("button", { name: /Instalar|Install/i }),
     ).not.toBeInTheDocument();
-    expect(screen.getByTestId("pwa-install-banner")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Volver" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Adelante" })).toBeDisabled();
   });

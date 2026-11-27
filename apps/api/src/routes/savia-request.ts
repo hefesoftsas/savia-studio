@@ -11,6 +11,7 @@ export type SaviaRequestService = {
 };
 
 const TENANT_PATTERN = /^tenant:(?:0|[1-9][0-9]*)$/;
+const PROXY_PATH = "/v1/savia-request";
 const EDITOR_ROLES = new Set([
   "agency_admin",
   "tenant_admin",
@@ -19,14 +20,17 @@ const EDITOR_ROLES = new Set([
 ]);
 
 function parseTenant(source: URL): string {
-  const tenant = source.searchParams.get("tenant");
-  if (tenant === null || tenant.trim() === "") return "";
-  if (!TENANT_PATTERN.test(tenant.trim()))
+  const tenant = source.searchParams.get("tenant")?.trim() ?? "";
+  if (!tenant) return "";
+  if (
+    !TENANT_PATTERN.test(tenant) ||
+    !Number.isSafeInteger(Number(tenant.slice(7)))
+  )
     throw Response.json(
       { error: { code: "INVALID_TENANT", message: "Tenant inválido." } },
       { status: 400 },
     );
-  return tenant.trim();
+  return tenant;
 }
 
 function tenantMatchesMembership(actor: AppActor, tenant: string): boolean {
@@ -64,26 +68,23 @@ function isExecutionRequest(method: string, path: string): boolean {
 
 export function registerSaviaRequestRoutes(
   app: OpenAPIHono,
+  db: D1Database,
   service?: SaviaRequestService,
 ) {
-  app.all("/v1/savia-request/*", async (c) => {
+  app.all(`${PROXY_PATH}/*`, async (c) => {
     const actor = actorFromContext(c);
     const source = new URL(c.req.url);
+    const path = source.pathname.slice(PROXY_PATH.length);
     let tenant = "";
     try {
       tenant = parseTenant(source);
     } catch (response) {
       return response as Response;
     }
-    if (!tenant) {
-      // Legacy platform catalog: unchanged behavior.
+    // Hono routes on the decoded path, including the worker's admin routes.
+    if (!tenant || c.req.path.startsWith(`${PROXY_PATH}/api/admin/`)) {
       requirePlatformAdministrator(actor);
-    } else if (
-      isExecutionRequest(
-        c.req.method,
-        source.pathname.slice("/v1/savia-request".length),
-      )
-    ) {
+    } else if (isExecutionRequest(c.req.method, path)) {
       if (
         !actor.globalRoles.includes("platform_admin") &&
         !tenantMatchesMembership(actor, tenant)
@@ -119,7 +120,6 @@ export function registerSaviaRequestRoutes(
         },
         503,
       );
-    const path = source.pathname.slice("/v1/savia-request".length);
     if (!/^\/(api|v1)\//.test(path))
       return c.json(
         { error: { code: "NOT_FOUND", message: "Ruta no encontrada." } },
@@ -147,7 +147,29 @@ export function registerSaviaRequestRoutes(
       "content-type": "application/json",
       "x-savia-actor": actor.principal.id,
     };
-    if (tenant) headers["x-savia-tenant"] = tenant;
+    if (tenant) {
+      // Start the clock before checking activity so a purge during the handoff
+      // can be detected even if the private worker receives the request later.
+      const startedAt = Date.now();
+      const active = await db
+        .prepare(
+          "SELECT id FROM tenants WHERE id=? AND is_active=1 AND purge_token IS NULL",
+        )
+        .bind(Number(tenant.slice(7)))
+        .first();
+      if (!active)
+        return c.json(
+          {
+            error: {
+              code: "TENANT_NOT_FOUND",
+              message: "El tenant no existe o está inactivo.",
+            },
+          },
+          404,
+        );
+      headers["x-savia-tenant"] = tenant;
+      headers["x-savia-request-started-at"] = String(startedAt);
+    }
     const response = await service.fetch(
       streamingRequest(
         "https://savia-request.internal" + path + source.search,

@@ -74,6 +74,49 @@ const item = {
   installed: null,
 };
 
+it("reads shared release status from the workspace inventory, including bundled plugins", async () => {
+  const installed = { enabled: true, version: "1.0.0" };
+  const releases = ["1.0.0", "1.1.0", "1.2.0"].map((version, index) => ({
+    id: item.manifest.id,
+    label: "Shared Demo",
+    version,
+    sha256: String(index + 1).repeat(64),
+  }));
+  vi.mocked(api).mockImplementation(async (path) => {
+    if (path === "/plugin-store/registry")
+      return { configured: true, data: releases, cursor: null };
+    if (path === "/plugin-store")
+      return {
+        data: releases.map((release) => ({
+          ...item,
+          manifest: { ...item.manifest, version: release.version },
+          version: release.version,
+          sha256: release.version === "1.2.0" ? "b".repeat(64) : release.sha256,
+          installed,
+        })),
+      };
+    if (path === "/solutions")
+      return {
+        data: [{ manifest: { requires: [item.manifest.id] } }],
+      };
+    throw new Error(`Unexpected API request: ${path}`);
+  });
+  renderStore({ onChanged: vi.fn(), hideBundledPlugins: true });
+
+  expect(
+    await screen.findByRole("button", {
+      name: "Instalar versión Shared Demo 1.0.0",
+    }),
+  ).toBeDisabled();
+  expect(screen.getByText("Versión instalada")).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "Instalar versión Shared Demo 1.1.0" }),
+  ).toBeEnabled();
+  expect(
+    screen.getByRole("button", { name: "Añadir al espacio Shared Demo 1.2.0" }),
+  ).toBeEnabled();
+});
+
 it("lista, instala y muestra un plugin del store", async () => {
   let installed: { enabled: boolean; version: string } | null = null;
   vi.mocked(api).mockImplementation(async (path, method) => {

@@ -27,9 +27,15 @@ Las conexiones JSON:API admiten únicamente destinos públicos HTTPS y recursos 
 When a linked collection omits its total, the list marks the current page and
 shows the range of records returned on that page. The source's pagination
 metadata determines whether the next page is available.
+For JSON and JSON:API sources, Savia omits a total that falls below the
+returned rows or would place an explicit JSON:API next page out of range.
+When the source provides a next link, that link determines whether the user can
+advance.
 An empty page with a continuation keeps the current position and allows the
-user to advance. The tracked `ra-core` patch prevents the list controller from
-resetting to page one in that case.
+user to advance. The footer shows zero results for that page, even when the
+collection total is known. The tracked `ra-core` patch uses the provider's
+continuation metadata to keep valid pages accessible. HubSpot row ranges use
+the number of records read on previous pages, including after short pages.
 
 Linked collections open in the table view. Older saved pipeline views still
 apply their supported table settings, with stage filters omitted.
@@ -62,11 +68,19 @@ free-text search in HubSpot's record order. Saved views only apply settings
 supported by the connected source when exporting. Exports can include up to 1,000
 matching records. Savia reports a provider error when a page is incomplete
 or a record repeats during export, so the user never receives a partial CSV.
+If the CSV request is canceled, Savia cancels the active HubSpot request and
+stops fetching pages for that export.
 If HubSpot rate-limits listing, summaries, or exports, Savia reports the
 rate limit and keeps the provider's HTTP 429 status. When HubSpot includes
 `Retry-After`, the API and Studio transport preserve that header.
 Studio shows the earliest retry time in the records table and CSV export errors
-when that header provides a valid future deadline.
+when that header provides a valid future deadline. The affected retry or CSV
+download action becomes available at that time. If a table page fails to load,
+Studio keeps the requested page selected so Retry can load it in place.
+If the HubSpot connection needs to be restored, Studio hides the previous
+records and count. Retry the read after reconnecting HubSpot.
+Clearing a cached page leaves results from other pages visible. Studio clears
+displayed or retained rows when the cache entry that supplied them is cleared.
 Studio reports a download error if the response contains no CSV, including
 when a sign-in page is returned instead of the file.
 Studio gives the CSV response body 15 seconds to finish and reports a timeout
@@ -75,8 +89,12 @@ If the server sends an error status and the explanation stalls, Studio keeps
 the original status and reports the failed download.
 The export action stays disabled while a download is in progress and becomes
 available again when the download finishes or fails.
+Signing out or switching accounts cancels pending Studio downloads, including
+downloads that have already started receiving a file.
 When the search text changes, Studio applies it to the table before enabling
 the export. Both requests use the same search text.
+For HubSpot lists, summaries, and CSV exports, an empty filter set is
+equivalent to omitting filters. Structured filter conditions return an error.
 Search and CSV export accept punctuation in the search text, including percent
 signs and ellipses.
 Studio only shows the CSV action for Savia tables, domain collections, and
@@ -102,8 +120,11 @@ Members with read-only access to a shared CRM can browse its records without
 an export action.
 
 Studio shows the live record total in the heading and sidebar for the open
-HubSpot collection when its summary is available. Unopened HubSpot collections
-omit the count.
+HubSpot collection. The records screen uses the verified unfiltered list total
+and requests a summary only when the list cannot supply one. After a list rate
+limit, Studio waits for an eligible list response before requesting a summary.
+Search and saved view filters leave their totals in the table. Unopened
+HubSpot collections omit the count.
 The Mi día summary widget reports a HubSpot rate limit and keeps the last
 verified total visible during that error, if available.
 When HubSpot provides a retry deadline, the widget shows it and skips live
@@ -111,13 +132,33 @@ refresh events until the deadline passes. The manual retry action stays availabl
 For other connected collections, Studio and Mi día omit catalog count badges
 because those counts describe Savia's local records. Use the record list for a
 provider-reported total where available.
-Record lists and summaries reject malformed pages and repeated cursors, so an
-invalid provider response cannot appear as an empty collection or an exact
-count. A HubSpot record list leaves the total unknown when it matches the
+Record lists, summaries, and CSV exports reject malformed pages and repeated
+cursors. A non-null `paging` value must be an object. Malformed pagination
+raises a provider error without supplying a total or producing a partial CSV.
+A HubSpot record list leaves the total unknown when it matches the
 number of scanned records and HubSpot still supplies a next cursor. The
-summary follows that cursor before returning a total. Search retains the
-provider's reported total when the requested page is beyond the last
-available cursor.
+summary follows that cursor before returning a total. When an unfiltered
+cursor ends, the list omits totals that exceed the number of scanned records
+and the summary reports the inconsistency. Search retains the provider's
+reported total when the requested page is beyond the last available cursor.
+Studio starts at page one when the search or filters change. It cancels the
+previous records request when navigation or a new search replaces it. When
+the API proxy receives the cancellation, it stops fetching further pages from
+HubSpot.
+For sequential HubSpot navigation, Studio can reuse the previous page's
+short-lived cursor. The API verifies the same collection, connection, user,
+and query before continuing, and retains the scanned count and duplicate
+checks. A rate-limited or canceled request, or a temporary upstream failure,
+can reuse that cursor within its original lifetime. A request without a
+matching live checkpoint scans from the first page.
+The assistant's Studio record tool can also pass `nextCursor` as `cursor`
+with the next page number and the same collection, query, sort, filters, and
+page size. Its reported total stays unknown if the listed rows and the
+continuation indicate more records than the supplied total.
+The assistant's tools preserve provider error messages and include the retry
+time when the API supplies a valid `Retry-After` header for a rate limit.
+Each Savia API read has a 15-second deadline that includes consuming the
+response body. A timed-out read returns an error to the assistant.
 
 Connected CRM record lists expose at most 100 pages. Salesforce also limits
 the starting offset to 2,000 records. Studio and the mail context picker stop

@@ -1,6 +1,7 @@
 import { createRoute, type OpenAPIHono, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 import { bodyLimit } from "hono/body-limit";
+import { daneLookupRequest } from "@savia/studio-server/dane-lookup";
 import { actorFromContext } from "../auth/middleware";
 import type { AppActor } from "../auth/types";
 import {
@@ -422,11 +423,7 @@ export function registerPublicFormRoutes(
       if (search.length < 2)
         throw new HTTPException(400, { message: "Indica una ciudad válida." });
       const upstream = await options.saviaRequest.fetch(
-        new Request(
-          "https://savia-request.internal/api/lookups/dane?city=" +
-            encodeURIComponent(search.slice(0, 100)),
-          { method: "GET", headers: { "content-type": "application/json" } },
-        ),
+        daneLookupRequest(search),
       );
       if (!upstream.ok)
         throw new HTTPException(503, { message: "Public form unavailable." });

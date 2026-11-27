@@ -3,7 +3,12 @@ import { z } from "zod";
 import { dialectFor } from "@savia/db/dialect";
 import type { Env } from "./context";
 import { fail } from "./context";
-import { getObject, getRecord, guard, transaction, audit } from "./services";
+import { getObject, guard, transaction, audit } from "./services";
+import {
+  allowsAttachmentField,
+  requireAttachmentRecord,
+} from "./attachment-access";
+import { policyFor } from "./access-authorization";
 import {
   r2AttachmentPolicy,
   R2_ATTACHMENT_TYPE,
@@ -60,8 +65,14 @@ async function fileContext(c: Context<Env>) {
     .bind(tenant, c.req.param("id"))
     .first<FileRow>();
   if (!row) return fail("El adjunto no existe.", 404);
+  const record = await requireAttachmentRecord(
+    db,
+    tenant,
+    row,
+    row.record_id,
+    "read",
+  );
   const definition = await getObject(db, tenant, row.object_name);
-  const record = await getRecord(db, tenant, row.object_name, row.record_id);
   const field = row.field_name
     ? definition.config.fields[row.field_name]
     : undefined;
@@ -73,13 +84,27 @@ async function fileContext(c: Context<Env>) {
   const policy = r2AttachmentPolicy(
     field?.config as Record<string, unknown> | undefined,
   );
-  return { row, record, field, format, policy, tenant, db };
+  const access = policyFor(db);
+  const readOnly = Boolean(
+    field?.readOnly ||
+    (access && !allowsAttachmentField(access, row, record, "update")),
+  );
+  return {
+    row,
+    record,
+    readOnly,
+    objectVersion: definition.version,
+    format,
+    policy,
+    tenant,
+    db,
+  };
 }
 export function registerOfficeFiles(app: Hono<Env>) {
   app.get("/api/file/:id/office", async (c) => {
     const disabled = await officeSuiteDisabled(c);
     if (disabled) return disabled;
-    const { row, field, policy } = await fileContext(c);
+    const { row, readOnly, policy } = await fileContext(c);
     return c.json({
       data: {
         id: row.id,
@@ -90,7 +115,7 @@ export function registerOfficeFiles(app: Hono<Env>) {
         field: row.field_name,
         object: row.object_name,
         recordId: row.record_id,
-        readOnly: Boolean(field?.readOnly),
+        readOnly,
         maxSize: Math.min(policy.maxSize, OFFICE_MAX_SIZE),
       },
     });
@@ -154,9 +179,9 @@ export function registerOfficeFiles(app: Hono<Env>) {
   app.post("/api/file/:id/revisions", async (c) => {
     const disabled = await officeSuiteDisabled(c);
     if (disabled) return disabled;
-    const { row, record, field, format, policy, tenant, db } =
+    const { row, record, readOnly, objectVersion, format, policy, tenant, db } =
       await fileContext(c);
-    if (field?.readOnly) return fail("Este campo es de solo lectura.", 403);
+    if (readOnly) return fail("Este campo es de solo lectura.", 403);
     const form = await c.req.formData();
     const version = z.coerce
       .number()
@@ -207,8 +232,10 @@ export function registerOfficeFiles(app: Hono<Env>) {
     await c.env.FILES.put(key, bytes, { httpMetadata: { contentType: mime } });
     const gate = guard(
       db,
-      "SELECT f.version=? AND r.version=? AND r.deleted_at IS NULL FROM studio_files f JOIN studio_records r ON r.tenant_id=f.tenant_id AND r.id=f.record_id WHERE f.tenant_id=? AND f.id=?",
-      [version, record._version, tenant, row.id],
+      `SELECT f.version=? AND r.version=? AND r.deleted_at IS NULL AND o.version=?
+       FROM studio_files f JOIN studio_records r ON r.tenant_id=f.tenant_id AND r.id=f.record_id AND r.object_name=f.object_name
+       JOIN studio_objects o ON o.tenant_id=f.tenant_id AND o.name=f.object_name WHERE f.tenant_id=? AND f.id=?`,
+      [version, record._version, objectVersion, tenant, row.id],
     );
     try {
       await transaction(db, [

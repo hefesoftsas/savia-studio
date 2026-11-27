@@ -8,12 +8,14 @@ import {
   normalizeCanonicalHost,
   normalizeTenantSlug,
   parseTenantSlugFromHostname,
+  TENANT_SLUG_HEADER,
 } from "@savia/tenant-host/tenant-host";
 import { companionDownloadsResponse } from "./companion-downloads-catalog";
+import { FLOWS_UI_MANIFEST_PATH, FLOWS_UI_PATH } from "./embedded-flows-paths";
 import { SERVICE_ROUTE_EXACT, SERVICE_ROUTE_PREFIX } from "./service-routes";
 
 export type GatewayFetcher = {
-  fetch(request: Request): Response | Promise<Response>;
+  fetch(request: Request, init?: RequestInit): Response | Promise<Response>;
 };
 
 export type GatewayEnv = {
@@ -24,7 +26,6 @@ export type GatewayEnv = {
   CANONICAL_HOST?: string;
 };
 
-const FLOWS_UI_PATH = "/flows-ui";
 const LEGACY_PRODUCTION_HOST = "savia.app.hefesoft.com";
 const vscodeDownloadPath =
   /^\/downloads\/(savia-plugin-authoring-[a-z0-9.+-]+\.vsix(?:\.sha256)?)$/i;
@@ -180,14 +181,36 @@ async function flowsAssetResponse(
     lastSegment === "index.html" ||
     !/\.[A-Za-z0-9]{1,12}$/.test(lastSegment);
   const assetUrl = new URL(sourceUrl);
-  if (isHtmlNavigation) assetUrl.pathname = `${FLOWS_UI_PATH}/index.html`;
+  if (isHtmlNavigation) {
+    // A missing file can resolve to the Admin HTML through the SPA fallback.
+    const manifest = await assets.fetch(
+      new Request(new URL(FLOWS_UI_MANIFEST_PATH, sourceUrl), {
+        method: "HEAD",
+      }),
+    );
+    if (
+      !manifest.ok ||
+      !/^application\/json\b/i.test(manifest.headers.get("content-type") ?? "")
+    )
+      return new Response(
+        request.method === "HEAD" ? null : "Savia Flows is unavailable.",
+        { status: 404, headers: { "Cache-Control": "no-store" } },
+      );
+    // Fetch the directory URL directly to avoid the index.html redirect.
+    assetUrl.pathname = `${FLOWS_UI_PATH}/`;
+  }
 
   const response = await assets.fetch(new Request(assetUrl, request));
   const contentType = response.headers.get("content-type") ?? "";
   // Cloudflare's SPA fallback is configured for the Admin shell. A missing
   // child asset must not silently become admin HTML with a .js/.css URL.
-  if (!isHtmlNavigation && /^text\/html\b/i.test(contentType))
-    return new Response("Savia Flows asset not found", { status: 404 });
+  if (!isHtmlNavigation && /^text\/html\b/i.test(contentType)) {
+    await response.body?.cancel().catch(() => undefined);
+    return new Response(
+      request.method === "HEAD" ? null : "Savia Flows asset not found",
+      { status: 404, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   const isolated = withFlowsHeaders(response, request);
   if (isHtmlNavigation) isolated.headers.set("Cache-Control", "no-store");
   else if (isImmutableFlowsAsset(path))
@@ -197,9 +220,6 @@ async function flowsAssetResponse(
     );
   return isolated;
 }
-
-/** Header carrying the tenant slug resolved from the public hostname. */
-export const TENANT_SLUG_HEADER = "x-savia-tenant-slug";
 
 export function canonicalHostFromEnv(
   env?: Pick<GatewayEnv, "CANONICAL_HOST">,
@@ -354,15 +374,20 @@ export async function gatewayFetch(
     return response;
   }
   const slug = tenantSlugFromRequest(request, env);
-  if (!slug) return env.API.fetch(request);
-  const forwarded = new Request(request, {
-    headers: (() => {
-      const headers = new Headers(request.headers);
-      headers.set(TENANT_SLUG_HEADER, slug);
-      return headers;
-    })(),
-  });
-  return env.API.fetch(forwarded);
+  let forwarded = request;
+  if (slug) {
+    const headers = new Headers(request.headers);
+    headers.set(TENANT_SLUG_HEADER, slug);
+    forwarded = new Request(request, { headers });
+  }
+  const signal =
+    request.method === "GET" &&
+    /\/api\/records\/[^/]+(?:\/summary)?$/.test(pathname)
+      ? request.signal
+      : undefined;
+  return signal
+    ? env.API.fetch(forwarded, { signal: AbortSignal.any([signal]) })
+    : env.API.fetch(forwarded);
 }
 
 export default { fetch: gatewayFetch };

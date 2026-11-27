@@ -29,3 +29,22 @@ it("renders a legacy Lucide alias using its canonical icon", async () => {
     expect(container.querySelector("svg")).toHaveClass("lucide-arrow-down-a-z"),
   );
 });
+
+it("keeps the sidebar fallback until its configured icon loads", async () => {
+  const fallback = <span data-testid="default-icon" />;
+  const { container, getByTestId, rerender } = render(
+    <LucideLookupIcon name="not-a-lucide-icon" fallback={fallback} />,
+  );
+  expect(getByTestId("default-icon")).toBeInTheDocument();
+
+  rerender(
+    <LucideLookupIcon name="circle-question-mark" fallback={fallback} />,
+  );
+  expect(getByTestId("default-icon")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(container.querySelector("svg")).toHaveClass(
+      "lucide-circle-question-mark",
+    ),
+  );
+  expect(container.querySelector("[data-testid=default-icon]")).toBeNull();
+});

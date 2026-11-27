@@ -18,6 +18,8 @@ export const SAVIA_ACCESS_TOKEN_EMAIL_CLAIM =
 export const SAVIA_ACCESS_TOKEN_NAME_CLAIM = "https://savia.hefesoft.com/name";
 export const SAVIA_ACCESS_TOKEN_MFA_CLAIM =
   "https://savia.hefesoft.com/two-factor-enabled";
+export const SAVIA_ACCESS_TOKEN_SESSION_CREATED_AT_CLAIM =
+  "https://savia.hefesoft.com/session-created-at";
 
 const scalarClientName = "Savia Scalar";
 const adminClientName = "Savia Admin";
@@ -708,6 +710,33 @@ export function oauthProviderOptions(
         );
       },
     },
+    extensions: [
+      {
+        claims: {
+          accessToken: async ({ ctx, sessionId, user }) => {
+            if (!sessionId || !user || !roleEntries(user).includes("admin"))
+              return {};
+            const session = await ctx.context.adapter.findOne<{
+              userId: string;
+              createdAt: Date;
+              expiresAt: Date;
+            }>({
+              model: "session",
+              where: [{ field: "id", value: sessionId }],
+            });
+            if (session?.userId !== user.id) return {};
+            const createdAt = new Date(session.createdAt).getTime();
+            if (
+              !(createdAt > 0) ||
+              !(new Date(session.expiresAt).getTime() > Date.now())
+            )
+              return {};
+            // A refresh keeps the original sign-in time, even after a role change.
+            return { [SAVIA_ACCESS_TOKEN_SESSION_CREATED_AT_CLAIM]: createdAt };
+          },
+        },
+      },
+    ],
     customAccessTokenClaims: ({ user }) => {
       if (!user) return {};
       const details = user as Record<string, unknown>;

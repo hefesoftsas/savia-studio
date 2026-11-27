@@ -11,6 +11,10 @@ import { runtimePluginRegistryForTenant } from "./studio/plugin-registry-config"
 import { createCollectionGateway } from "./studio/collection-gateway";
 import { remoteMcpResponse } from "./mcp-gateway";
 import { maintainRecordHistory } from "@savia/studio-server/record-history-storage";
+import {
+  cleanDeletedAttachmentObjects,
+  purgeExpiredTemporaryAttachments,
+} from "@savia/studio-server/attachment-deletions";
 import { purgeStudioAudit } from "@savia/studio-server/audit-retention";
 import { createApp } from "./app";
 import { createRealtimeHubClient } from "./realtime/hub-client";
@@ -624,6 +628,12 @@ const runtime = {
       bridgeSecret: environment.SAVIA_FLOWS_BRIDGE_SECRET,
     });
     const realtime = createRealtimeHubClient(environment.REALTIME_HUB);
+    const runAttachmentCleanup = () =>
+      environment.DOCUMENTS &&
+      Promise.all([
+        cleanDeletedAttachmentObjects(environment.DB, environment.DOCUMENTS),
+        purgeExpiredTemporaryAttachments(environment.DB, environment.DOCUMENTS),
+      ]);
     const runWhatsapp = async () => {
       if (
         usesWhatsappEvents(environment) &&
@@ -820,6 +830,7 @@ const runtime = {
         }),
         runScheduledNotifications(environment.DB, realtime),
         runScheduledAuditRetention(environment.DB),
+        runAttachmentCleanup(),
         runJiraPrivacyMaintenance(
           environment.DB,
           nangoConfigurationFromEnvironment(environment),
@@ -859,6 +870,7 @@ const runtime = {
       }),
       runScheduledNotifications(environment.DB, realtime),
       runScheduledAuditRetention(environment.DB),
+      runAttachmentCleanup(),
       runJiraPrivacyMaintenance(
         environment.DB,
         nangoConfigurationFromEnvironment(environment),

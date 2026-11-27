@@ -37,6 +37,16 @@ const messages = {
     "Could not add this version. Retry the import.",
     "Não foi possível adicionar esta versão. Tente importar novamente.",
   ],
+  refreshFailed: [
+    "El cambio se guardó. No pudimos actualizar la lista de plugins.",
+    "The change was saved. We could not refresh the plugin list.",
+    "A alteração foi salva. Não foi possível atualizar a lista de plugins.",
+  ],
+  refreshWorkspace: [
+    "Actualizar lista de plugins",
+    "Refresh plugin list",
+    "Atualizar lista de plugins",
+  ],
   more: ["Cargar más versiones", "Load more versions", "Carregar mais versões"],
   loading: ["Cargando catálogo…", "Loading catalog…", "Carregando catálogo…"],
 } as const;
@@ -49,21 +59,47 @@ type Release = {
   createdAt: string;
 };
 type Catalog = { configured: boolean; data: Release[]; cursor: string | null };
+type WorkspaceVersion = {
+  manifest: { id: string };
+  version: string;
+  sha256: string;
+  installed: { version: string; enabled: boolean } | null;
+};
+const noWorkspaceVersions: readonly WorkspaceVersion[] = [];
+
+function pinnedReleaseKey(id: string, version: string, sha256: string) {
+  return `${id}@${version}#${sha256}`;
+}
 
 /** Server-authorized catalog; credentials never enter browser state. */
 export function PluginRegistry({
   onImported,
+  workspaceVersions = noWorkspaceVersions,
 }: {
   onImported: () => void | Promise<unknown>;
+  workspaceVersions?: readonly WorkspaceVersion[];
 }) {
   const t = useMessages(messages);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [loading, setLoading] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState("");
-  const [installed, setInstalled] = useState<Set<string>>(new Set());
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
-  const [added, setAdded] = useState<Set<string>>(new Set());
+  const [confirmed, setConfirmed] = useState<{
+    inventory: readonly WorkspaceVersion[];
+    added: ReadonlySet<string>;
+    active: ReadonlyMap<string, string>;
+  }>();
+  // Use confirmed writes until the parent supplies a refreshed inventory.
+  const changes =
+    confirmed?.inventory === workspaceVersions ? confirmed : undefined;
+  const local = new Map(
+    workspaceVersions.map((item) => [
+      pinnedReleaseKey(item.manifest.id, item.version, item.sha256),
+      item,
+    ]),
+  );
   const alive = useRef(true);
   const generation = useRef(0);
 
@@ -115,8 +151,34 @@ export function PluginRegistry({
     };
   }, []);
 
+  async function refreshWorkspace() {
+    setRefreshFailed(false);
+    try {
+      await onImported();
+    } catch {
+      if (alive.current) setRefreshFailed(true);
+    }
+  }
+
+  function rememberRelease(release: Release, action: "add" | "install") {
+    const key = pinnedReleaseKey(release.id, release.version, release.sha256);
+    setConfirmed((previous) => {
+      const current =
+        previous?.inventory === workspaceVersions
+          ? previous
+          : {
+              inventory: workspaceVersions,
+              added: new Set<string>(),
+              active: new Map<string, string>(),
+            };
+      return action === "add"
+        ? { ...current, added: new Set(current.added).add(key) }
+        : { ...current, active: new Map(current.active).set(release.id, key) };
+    });
+  }
+
   async function add(release: Release) {
-    const key = `${release.id}@${release.version}`;
+    const key = pinnedReleaseKey(release.id, release.version, release.sha256);
     setBusy(key);
     setError("");
     try {
@@ -126,34 +188,32 @@ export function PluginRegistry({
         sha256: release.sha256,
       });
       if (!alive.current) return;
-      setAdded((previous) => new Set([...previous, key]));
-      await onImported();
-    } catch {
-      if (alive.current) setError(t("failed"));
+      rememberRelease(release, "add");
+      await refreshWorkspace();
+    } catch (reason) {
+      if (alive.current)
+        setError(
+          reason instanceof Error && "status" in reason && reason.status === 409
+            ? reason.message
+            : t("failed"),
+        );
     } finally {
       if (alive.current) setBusy(null);
     }
   }
   async function install(release: Release) {
-    const key = `${release.id}@${release.version}`;
+    const key = pinnedReleaseKey(release.id, release.version, release.sha256);
     setBusy(key);
     setError("");
     try {
       await api(
         `/extensions/${encodeURIComponent(release.id)}/install`,
         "POST",
-        { version: release.version },
+        { version: release.version, sha256: release.sha256 },
       );
       if (!alive.current) return;
-      setInstalled(
-        (previous) =>
-          new Set(
-            [...previous]
-              .filter((value) => !value.startsWith(`${release.id}@`))
-              .concat(key),
-          ),
-      );
-      await onImported();
+      rememberRelease(release, "install");
+      await refreshWorkspace();
     } catch (reason) {
       if (alive.current)
         setError(reason instanceof Error ? reason.message : t("installFailed"));
@@ -192,6 +252,22 @@ export function PluginRegistry({
           {error}
         </p>
       )}
+      {refreshFailed && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-3 border-b px-6 py-4"
+        >
+          <p className="text-sm text-muted-foreground">{t("refreshFailed")}</p>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy !== null}
+            onClick={() => void refreshWorkspace()}
+          >
+            {t("refreshWorkspace")}
+          </Button>
+        </div>
+      )}
       {catalog?.configured && (
         <>
           {catalog.data.length === 0 && !unavailable && (
@@ -201,7 +277,21 @@ export function PluginRegistry({
           )}
           <ul className="divide-y">
             {catalog.data.map((release) => {
-              const key = `${release.id}@${release.version}`;
+              const key = pinnedReleaseKey(
+                release.id,
+                release.version,
+                release.sha256,
+              );
+              const workspaceVersion = local.get(key);
+              const added = Boolean(
+                workspaceVersion || changes?.added.has(key),
+              );
+              const justInstalled = changes?.active.get(release.id);
+              const installed =
+                justInstalled !== undefined
+                  ? justInstalled === key
+                  : workspaceVersion?.installed?.enabled === true &&
+                    workspaceVersion.installed.version === release.version;
               return (
                 <li
                   key={key}
@@ -218,18 +308,18 @@ export function PluginRegistry({
                       {release.id}
                     </p>
                   </div>
-                  {added.has(key) ? (
+                  {added ? (
                     <div className="flex flex-wrap items-center gap-2">
                       <span
                         role="status"
                         className="text-xs text-muted-foreground"
                       >
-                        {installed.has(key) ? t("installed") : t("added")}
+                        {installed ? t("installed") : t("added")}
                       </span>
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={busy !== null || installed.has(key)}
+                        disabled={busy !== null || installed}
                         aria-label={`${t("install")} ${release.label} ${release.version}`}
                         onClick={() => void install(release)}
                       >
@@ -245,11 +335,7 @@ export function PluginRegistry({
                       onClick={() => void add(release)}
                     >
                       <Download aria-hidden="true" className="size-4" />
-                      {added.has(key)
-                        ? t("added")
-                        : busy === key
-                          ? t("adding")
-                          : t("add")}
+                      {busy === key ? t("adding") : t("add")}
                     </Button>
                   )}
                 </li>

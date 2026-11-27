@@ -1,5 +1,6 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { rotateSessionScope } from "@/auth/session-scope";
 import { useRealtimeRefresh } from "./use-realtime-refresh";
 
 const subscribe = vi.hoisted(() =>
@@ -125,6 +126,33 @@ it("cancels queued work when the tenant changes or the view unmounts", async () 
   unmount();
   await tick();
   expect(refresh).not.toHaveBeenCalled();
+});
+
+it("clears notices and queued work when the signed-in account changes", async () => {
+  const refresh = vi.fn();
+  const { rerender, result } = renderHook(
+    ({ blocked }) =>
+      useRealtimeRefresh({ topics: ["account"], blocked, refresh }),
+    { initialProps: { blocked: true } },
+  );
+  const emit = () =>
+    connection().onEvent({ topic: "account", type: "updated" });
+  act(emit);
+  await tick();
+  expect(result.current.changed).toBe(true);
+
+  act(emit);
+  act(() => {
+    rotateSessionScope("principal-change");
+    rerender({ blocked: false });
+  });
+  expect(result.current.changed).toBe(false);
+  await tick();
+  expect(refresh).not.toHaveBeenCalled();
+
+  act(emit);
+  await tick();
+  expect(refresh).toHaveBeenCalledOnce();
 });
 
 it("clears the notice and queued work when the displayed record changes in the same room", async () => {

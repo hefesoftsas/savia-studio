@@ -40,17 +40,30 @@ export type ObjectsResponse = {
 type RecordsResponse = {
   data: WidgetRecord[];
   total?: number;
+  nextCursor?: string | null;
+  hasNext?: boolean | null;
+  pageInfo?: { hasNextPage?: boolean };
 };
 
-function normalizeWidgetRecords(response: RecordsResponse): WidgetRecordsPage {
+function normalizeWidgetRecords(
+  response: RecordsResponse | null,
+): WidgetRecordsPage {
+  if (!Array.isArray(response?.data)) {
+    throw new Error("Studio API did not return a record page");
+  }
+  const hasMoreRecords =
+    response.pageInfo?.hasNextPage === true ||
+    response.hasNext === true ||
+    Boolean(response.nextCursor);
+  const minimumTotal = response.data.length + (hasMoreRecords ? 1 : 0);
   const total =
     typeof response.total === "number" &&
     Number.isSafeInteger(response.total) &&
-    response.total >= 0
+    response.total >= minimumTotal
       ? response.total
       : undefined;
   return {
-    data: Array.isArray(response.data) ? response.data : [],
+    data: response.data,
     ...(total !== undefined ? { total } : {}),
   };
 }
@@ -101,7 +114,7 @@ export function normalizeSchema(
   if (!row || !isVisibleObject(row)) return undefined;
   const source = row.config?.studio?.collection;
   const hubspot = isHubspotCollection(source);
-  const listOnlyCrm = source?.kind === "crm" && !hubspot;
+  const listOnly = Boolean(source?.kind) && !hubspot;
   const fields = Object.entries(row.config?.fields ?? {})
     .filter(
       (entry): entry is [string, { type?: unknown; label?: unknown }] =>
@@ -122,7 +135,7 @@ export function normalizeSchema(
     ...(source?.kind === "crm" || source?.capabilities?.sort === false
       ? { sortSupported: false }
       : {}),
-    ...(listOnlyCrm ? { summarySupported: false } : {}),
+    ...(listOnly ? { summarySupported: false } : {}),
   };
 }
 
@@ -153,9 +166,11 @@ export async function describeWidgetCollection(
   apiClient: ApiClient,
   apiBasePath: string,
   collection: string,
+  options?: { signal?: AbortSignal },
 ): Promise<WidgetCollectionSchema | undefined> {
   const response = await apiClient.get<ObjectsResponse>(
     `${apiBasePath}/api/objects`,
+    options,
   );
   return normalizeSchema(apiBasePath, response, collection);
 }

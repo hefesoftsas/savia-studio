@@ -426,7 +426,16 @@ function ManualRelationsForm(props: DynamicFormProps) {
     }
   }
   const error = definitions.error ?? existing.error;
-  async function save(data: Record<string, unknown>, previous?: StudioRecord) {
+  const bundleCreationKey = bundled
+    ? snapshot.current?.idempotencyKey
+    : undefined;
+  const uploadTemporary = props.onUploadTemporaryAttachment;
+  const save: DynamicFormProps["onSave"] = async (
+    data,
+    previous,
+    _relations,
+    options,
+  ) => {
     if (!initialized)
       throw new Error(
         t("Espera a que se carguen las relaciones antes de guardar."),
@@ -477,7 +486,10 @@ function ManualRelationsForm(props: DynamicFormProps) {
         await client.invalidateQueries({ queryKey: ["record-link-form"] });
         return saved;
       }
-      const saved = await props.onSave(data, savedRecord.current ?? previous);
+      const target = savedRecord.current ?? previous;
+      const saved = options
+        ? await props.onSave(data, target, undefined, options)
+        : await props.onSave(data, target);
       if (saved) savedRecord.current = saved;
       for (const relation of relations) {
         const binding = bindings.find(
@@ -536,7 +548,7 @@ function ManualRelationsForm(props: DynamicFormProps) {
     } finally {
       setBusy(false);
     }
-  }
+  };
   return (
     <div className="space-y-5">
       {!initialized && !error && (
@@ -583,6 +595,17 @@ function ManualRelationsForm(props: DynamicFormProps) {
             object={formObject}
             values={initialValues}
             onSave={save}
+            onUploadTemporaryAttachment={
+              bundleCreationKey && uploadTemporary
+                ? (field, file, recordId) =>
+                    uploadTemporary(
+                      field,
+                      file,
+                      recordId,
+                      recordId ? undefined : bundleCreationKey,
+                    )
+                : uploadTemporary
+            }
             onValuesChange={observeValues}
           />
         )}

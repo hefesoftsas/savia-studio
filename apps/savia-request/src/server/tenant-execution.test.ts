@@ -11,7 +11,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { getPlatformProxy } from "wrangler";
 import { execute } from "./runner";
 import { getFlow, getVariables, seal } from "./store";
-import type { Env } from "./env";
+import type { Env, HookResult } from "./env";
+import type { Flow, Step } from "./types";
 
 let platform: Awaited<ReturnType<typeof getPlatformProxy<Env>>>;
 
@@ -189,6 +190,119 @@ describe("tenant execution secrets", () => {
       value: "topsecret",
     });
   }, 30_000);
+});
+
+describe("request destinations computed from hook variables", () => {
+  const step: Step = {
+    id: "session",
+    name: "Start a quote session",
+    method: "POST",
+    url: "https://provider.test/sessions",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+    bodyType: "json",
+    pre: "",
+    post: "",
+  };
+  const quoteFlow: Flow = {
+    id: "quote-session",
+    name: "Test quote",
+    description: "",
+    kind: "quote",
+    resultPrefix: "sample",
+    steps: [],
+    variables: [],
+    input: {},
+  };
+
+  it("quotes using a URL value from the previous response and the current pre-request hook", async () => {
+    const fetcher = vi
+      .fn<(request: Request) => Promise<Response>>()
+      .mockResolvedValueOnce(Response.json({ reference: "session/7" }))
+      .mockResolvedValueOnce(
+        Response.json({ reference: "TEST-8", premium: 125000 }),
+      );
+    vi.stubGlobal("fetch", fetcher);
+    const env: Env = {
+      ...platform.env,
+      HOOK_EXECUTOR: {
+        async execute(code, { body, response }): Promise<HookResult> {
+          const data = response ? JSON.parse(response) : {};
+          if (code.includes('"session_reference"'))
+            return { body, variables: { session_reference: data.reference } };
+          if (code.includes('"currency"'))
+            return { body, variables: { currency: "COP" } };
+          return {
+            body,
+            variables: {
+              sample_quote_number: data.reference,
+              sample_premium_total: String(data.premium),
+            },
+          };
+        },
+      },
+    };
+    const flow = {
+      ...quoteFlow,
+      steps: [
+        {
+          ...step,
+          post: 'bru.setVar("session_reference", JSON.parse(res.getBody()).reference);',
+        },
+        {
+          ...step,
+          id: "quote",
+          name: "Get the quote",
+          url: "https://provider.test/sessions/{{session_reference}}/quote?currency={{currency}}",
+          pre: 'bru.setVar("currency", "COP");',
+          post: 'const data = JSON.parse(res.getBody()); bru.setVar("sample_quote_number", data.reference); bru.setVar("sample_premium_total", data.premium);',
+        },
+      ],
+    };
+    const run = await execute(env, flow, {}, "live", null, TENANT_A);
+    expect(run).toMatchObject({
+      status: "success",
+      result: {
+        quoteNumber: "TEST-8",
+        premiumTotal: "125000",
+        currency: "COP",
+      },
+    });
+    expect(fetcher.mock.calls.map(([request]) => request.url)).toEqual([
+      "https://provider.test/sessions",
+      "https://provider.test/sessions/session%2F7/quote?currency=COP",
+    ]);
+  });
+
+  it("does not let a hook override the configured origin", async () => {
+    const fetcher = vi.fn(async () => Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetcher);
+    const env: Env = {
+      ...platform.env,
+      HOOK_EXECUTOR: {
+        async execute(_code, { body }) {
+          return { body, variables: { endpoint: "https://other.test/quotes" } };
+        },
+      },
+    };
+    const flow = {
+      ...quoteFlow,
+      input: { endpoint: "https://provider.test/quotes" },
+      steps: [
+        {
+          ...step,
+          url: "{{endpoint}}",
+          pre: 'bru.setVar("endpoint", "https://other.test/quotes");',
+        },
+      ],
+    };
+    const run = await execute(env, flow, flow.input, "live", null, TENANT_A);
+    expect(run).toMatchObject({
+      status: "failed",
+      error: "El hook no puede cambiar el origen del request.",
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 });
 
 describe("flow step request cache", () => {

@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import {
   CoreAdminContext,
   ListBase,
@@ -13,7 +19,7 @@ import { createAppI18nProvider } from "@/lib/i18nProvider";
 
 afterEach(cleanup);
 
-it("can advance through an empty linked page with a continuation", async () => {
+it.each([undefined, 2])("advances past empty pages (%s)", async (total) => {
   const dataProvider = testDataProvider({
     getList: async <RecordType extends RaRecord>(
       _resource: string,
@@ -23,6 +29,9 @@ it("can advance through an empty linked page with a continuation", async () => {
       return {
         data: page === 2 ? [] : [{ id: String(page) } as RecordType],
         pageInfo: { hasPreviousPage: page > 1, hasNextPage: page < 3 },
+        ...(total === undefined
+          ? {}
+          : { total, meta: { recordOffset: page === 1 ? 0 : 1 } }),
       };
     },
   });
@@ -50,7 +59,12 @@ it("can advance through an empty linked page with a continuation", async () => {
     "page",
   );
   fireEvent.click(screen.getByRole("link", { name: "Página siguiente" }));
-  expect(await screen.findByText("3-3 resultados")).toBeVisible();
+  expect(
+    await screen.findByText(
+      total === undefined ? "3-3 resultados" : "2-2 de 2",
+    ),
+  ).toBeVisible();
+  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
   expect(screen.getByRole("link", { name: "3" })).toHaveAttribute(
     "aria-current",
     "page",

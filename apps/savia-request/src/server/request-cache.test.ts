@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { getPlatformProxy } from "wrangler";
 import type { Env } from "./env";
+import { purgeTenant } from "./store";
 import {
   cacheRequest,
   validateRequestCachePolicy,
@@ -69,7 +70,7 @@ async function cacheKeyFor(
   const key = [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");
-  return key;
+  return `${requestPolicy.scope === "public" ? "public" : requestContext.tenant}:${key}`;
 }
 
 async function seedActiveLease(url: string) {
@@ -109,9 +110,50 @@ it("shares a successful bounded response across canonical query order", async ()
   const stored = await platform.env.DB.prepare(
     "SELECT cache_key,response_body FROM savia_request_cache WHERE state='ready'",
   ).first<{ cache_key: string; response_body: string }>();
-  expect(stored?.cache_key).toMatch(/^[a-f0-9]{64}$/);
+  expect(stored?.cache_key).toMatch(/^tenant:101:[a-f0-9]{64}$/);
   expect(stored?.response_body).toBeTruthy();
   expect(stored?.response_body).not.toContain("provider.test");
+});
+
+it("does not let a waiting request recreate private cache data after a tenant purge", async () => {
+  const url = "https://provider.test/cache-purge-waiter";
+  const key = await seedActiveLease(url);
+  const db = platform.env.DB;
+  let attempts = 0;
+  let evicted: number | undefined;
+  const waiterDb = {
+    prepare: db.prepare.bind(db),
+    async batch<T>(statements: D1PreparedStatement[]) {
+      attempts++;
+      if (attempts === 2)
+        evicted = (await purgeTenant(platform.env, context.tenant)).cache;
+      const result = await db.batch<T>(statements);
+      if (attempts === 1)
+        await db
+          .prepare(
+            "UPDATE savia_request_cache SET lease_until=? WHERE cache_key=?",
+          )
+          .bind(new Date(0).toISOString(), key)
+          .run();
+      return result;
+    },
+  } as D1Database;
+  const result = await cacheRequest(
+    { DB: waiterDb },
+    new Request(url, { signal: AbortSignal.timeout(3000) }),
+    policy,
+    context,
+    async () => Response.json({ ok: true }),
+  );
+  expect(attempts).toBe(2);
+  expect(evicted).toBe(1);
+  expect(result.headers.get("x-savia-cache")).toBe("bypass");
+  expect(
+    await db
+      .prepare("SELECT cache_key FROM savia_request_cache WHERE cache_key=?")
+      .bind(key)
+      .first(),
+  ).toBeNull();
 });
 
 it("scopes entries by tenant, revision, and connection identity", async () => {

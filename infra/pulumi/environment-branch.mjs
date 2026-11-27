@@ -11,6 +11,7 @@ import {
 import {
   workerConfig,
   execFileWithInput,
+  requireBranchBootstrapPassword,
 } from "./runtime-publisher-branch.mjs";
 import {
   createEnvironmentDependencies,
@@ -64,12 +65,14 @@ export async function runBranchDeployment(
         "Selected source assets must be built before deployment credentials are exposed",
       );
   }
+  const deps = dry ? undefined : dependencies();
+  let inventory = await deps?.inventory(environment);
+  const provision =
+    inventory && !inventory.resources.some((row) => row.kind === "worker");
+  if (provision) requireBranchBootstrapPassword(env);
   const directory = await mkdtemp(join(tmpdir(), `savia-branch-${slug}-`));
-  let inventory, deps;
-  if (!dry) {
-    deps = dependencies();
-    inventory = await deps.inventory(environment);
-    if (!inventory.resources.some((row) => row.kind === "worker")) {
+  if (inventory) {
+    if (provision) {
       await runEnvironmentOperation(
         parseEnvironmentArgs([
           "plan",
@@ -212,11 +215,8 @@ export async function runBranchDeployment(
     config.main = remap(config.main);
     if (config.assets?.directory)
       config.assets.directory = remap(config.assets.directory);
-    if (config.vars) {
-      delete config.vars.BETTER_AUTH_BOOTSTRAP_PASSWORD;
-      if (!dry && config.vars.SAVIA_MCP_URL?.endsWith(".workers.dev/mcp"))
-        config.vars.SAVIA_MCP_URL = `https://${names.workers.mcp}.${suffix}.workers.dev/mcp`;
-    }
+    if (!dry && config.vars?.SAVIA_MCP_URL?.endsWith(".workers.dev/mcp"))
+      config.vars.SAVIA_MCP_URL = `https://${names.workers.mcp}.${suffix}.workers.dev/mcp`;
     if (config.services)
       config.services = config.services.filter(
         (row) =>

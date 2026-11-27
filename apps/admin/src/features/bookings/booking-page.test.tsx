@@ -1,7 +1,7 @@
 import { AppLocaleProvider } from "@/i18n/app-locale-provider";
 import { StoreContextProvider, memoryStore, useSetLocale } from "ra-core";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
-import type { ReactNode } from "react";
+import { useLayoutEffect, type ReactNode } from "react";
 import {
   act,
   cleanup,
@@ -255,6 +255,144 @@ it("offers workspace recovery when access is lost after Bookings settings load",
     screen.queryByRole("heading", { name: "Reservations" }),
   ).not.toBeInTheDocument();
 });
+
+it.each([
+  ["settings", "reservations", 1],
+  ["reservations", "reservations", 2],
+  ["public links", "sharing", 2],
+])(
+  "offers a fresh sign-in when Bookings %s rejects the session",
+  async (source, tab, reads) => {
+    const get = vi.fn();
+    if (source !== "settings") {
+      get.mockResolvedValueOnce({
+        data: {
+          settings,
+          candidates: [],
+          canManage: true,
+          principalId: "principal-1",
+          publicUrl: null,
+          calendar: { provider: null, status: "not_connected" },
+        },
+      });
+    }
+    get.mockRejectedValue(
+      new ApiClientError(401, "UNAUTHORIZED", "Signed out"),
+    );
+    const query = `tab=${tab}&date=2026-11-25&tenantId=42`;
+    mount({ get }, 42, `/bookings?${query}&ignored=1`);
+
+    const link = await screen.findByRole("link", { name: "Sign in again" });
+    const authorize = new URL(link.getAttribute("href")!);
+    expect(authorize.pathname).toBe("/api/auth/admin/authorize");
+    expect(authorize.searchParams.get("resume")).toBe("bookings");
+    expect(authorize.searchParams.get("booking_query")).toBe(query);
+    expect(screen.queryByRole("heading", { name: "Reservations" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(get).toHaveBeenCalledTimes(reads);
+  },
+);
+
+it("requires a fresh sign-in to return to booking links if deletion is unauthorized", async () => {
+  const publicUrl = "https://savia.test/public/bookings/team-token";
+  const get = vi
+    .fn()
+    .mockResolvedValueOnce({
+      data: { settings, candidates: [], canManage: true, publicUrl: null },
+    })
+    .mockResolvedValueOnce({
+      data: {
+        links: [
+          {
+            id: "link-1",
+            scope: { kind: "team" },
+            serviceId: null,
+            expiresAt: null,
+            revokedAt: null,
+            dailyLimit: 25,
+            version: 8,
+            publicUrl,
+          },
+        ],
+      },
+    });
+  const remove = vi
+    .fn()
+    .mockRejectedValueOnce(
+      new ApiClientError(401, "UNAUTHORIZED", "Signed out"),
+    );
+  const query = "tab=sharing&date=2026-11-25&tenantId=42";
+  mount({ get, delete: remove }, 42, `/bookings?${query}`);
+  fireEvent.click(await screen.findByRole("button", { name: "Delete link" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm deletion" }));
+
+  const link = await screen.findByRole("link", { name: "Sign in again" });
+  const authorize = new URL(link.getAttribute("href")!);
+  expect(authorize.searchParams.get("resume")).toBe("bookings");
+  expect(authorize.searchParams.get("booking_query")).toBe(query);
+  expect(screen.queryByDisplayValue(publicUrl)).toBeNull();
+  expect(remove).toHaveBeenCalledExactlyOnceWith(
+    "/v1/tenants/42/booking/public-links/link-1",
+    {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: 8 }),
+    },
+  );
+});
+
+it("ignores a late session failure after leaving the booking links tab", async () => {
+  const apiClient = managementClient();
+  let rejectLinks!: (error: ApiClientError) => void;
+  const pendingLinks = new Promise((_, reject) => {
+    rejectLinks = reject;
+  });
+  const get = vi.fn((path: string, init?: RequestInit) =>
+    path.endsWith("/public-links") ? pendingLinks : apiClient.get(path, init),
+  );
+  mount({ get }, 42, "/bookings?tab=sharing");
+  await screen.findByText("Loading booking links…");
+  const signal = get.mock.calls.find(([path]) =>
+    path.endsWith("/public-links"),
+  )?.[1]?.signal;
+  expect(signal?.aborted).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Availability" }));
+  expect(signal?.aborted).toBe(true);
+  await act(async () => {
+    rejectLinks(new ApiClientError(401, "UNAUTHORIZED", "Signed out"));
+  });
+  expect(
+    screen.getByRole("heading", { name: "My Day availability" }),
+  ).toBeVisible();
+  expect(screen.queryByRole("link", { name: "Sign in again" })).toBeNull();
+});
+
+it.each([
+  ["settings", "Save settings", ""],
+  ["availability", "Save availability", ""],
+  ["availability", "Choose calendar: Google", "/calendar"],
+  ["availability", "Use My Day to block busy times", "/agenda"],
+])(
+  "offers a fresh sign-in if the session expires at %s → %s",
+  async (tab, action, endpoint) => {
+    const apiClient = managementClient();
+    apiClient.put.mockRejectedValueOnce(
+      new ApiClientError(401, "UNAUTHORIZED", "Signed out"),
+    );
+    const query = `tab=${tab}&date=2026-11-25&tenantId=42`;
+    mount(apiClient, 42, `/bookings?${query}`);
+    fireEvent.click(await screen.findByRole("button", { name: action }));
+
+    const link = await screen.findByRole("link", { name: "Sign in again" });
+    const authorize = new URL(link.getAttribute("href")!);
+    expect(authorize.searchParams.get("resume")).toBe("bookings");
+    expect(authorize.searchParams.get("booking_query")).toBe(query);
+    expect(screen.queryByRole("button", { name: action })).toBeNull();
+    expect(apiClient.put).toHaveBeenCalledExactlyOnceWith(
+      `/v1/tenants/42/booking${endpoint}`,
+      expect.any(Object),
+    );
+  },
+);
 
 it("offers an ordinary retry when Bookings settings are temporarily unavailable", async () => {
   const get = vi
@@ -672,6 +810,58 @@ it("shows the saved calendar provider and asks before cancelling its event", asy
     /^\/v1\/tenants\/42\/booking\/reservations\?from=/,
   );
   expect(apiClient.get.mock.calls[1][0]).toContain("&to=");
+});
+
+it("returns to the selected agenda after a reservation action requires sign-in", async () => {
+  const get = vi
+    .fn()
+    .mockResolvedValueOnce({
+      data: {
+        settings,
+        candidates: [],
+        canManage: true,
+        publicUrl: null,
+        calendar: { provider: null, status: "not_connected" },
+      },
+    })
+    .mockResolvedValueOnce({
+      data: [
+        {
+          id: "reservation-1",
+          serviceName: "Consultation",
+          professionalName: "Ari",
+          startsAt: "2026-11-25T14:00:00Z",
+          endsAt: "2026-11-25T14:30:00Z",
+          customerName: "Casey Customer",
+          customerEmail: "casey@example.test",
+          status: "confirmed",
+          version: 8,
+          deliveryStatus: "sent",
+          calendarStatus: "not_requested",
+          canGenerateConference: true,
+        },
+      ],
+    });
+  const post = vi
+    .fn()
+    .mockRejectedValueOnce(
+      new ApiClientError(401, "UNAUTHORIZED", "Signed out"),
+    );
+  const query = "tab=reservations&date=2026-11-25&tenantId=42";
+  mount({ get, post }, 42, `/bookings?${query}`);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Generate video link" }),
+  );
+
+  const link = await screen.findByRole("link", { name: "Sign in again" });
+  const authorize = new URL(link.getAttribute("href")!);
+  expect(authorize.searchParams.get("resume")).toBe("bookings");
+  expect(authorize.searchParams.get("booking_query")).toBe(query);
+  expect(screen.queryByText("Casey Customer")).toBeNull();
+  expect(post).toHaveBeenCalledExactlyOnceWith(
+    "/v1/tenants/42/booking/reservations/reservation-1/conference",
+    { version: 8 },
+  );
 });
 
 it.each([
@@ -1996,6 +2186,84 @@ it("cancels a pending reservations request when leaving the tab", async () => {
   expect(
     screen.queryByText("No reservations in this period."),
   ).not.toBeInTheDocument();
+});
+
+it("never shows the previous date's reservations or cursor under a new date", async () => {
+  const first = {
+    id: "reservation-1",
+    version: 1,
+    serviceName: "Consultation",
+    professionalName: "Ari",
+    startsAt: "2025-03-09T12:00:00.000Z",
+    endsAt: "2025-03-09T12:30:00.000Z",
+    customerName: "First customer",
+    customerEmail: "first@example.test",
+    status: "cancelled",
+    deliveryStatus: "skipped",
+    calendarStatus: "not_connected",
+  };
+  let nextDateAttempts = 0;
+  const apiClient = {
+    get: vi.fn(async (path: string) => {
+      if (!path.includes("/reservations?"))
+        return {
+          data: { settings, candidates: [], canManage: true, publicUrl: null },
+        };
+      const from = new URL(path, "https://example.test").searchParams.get(
+        "from",
+      );
+      if (!from?.startsWith("2025-03-10"))
+        return { data: [first], nextCursor: "first-date-page-2" };
+      if (nextDateAttempts++ === 0) throw new Error("Temporary failure");
+      return {
+        data: [
+          {
+            ...first,
+            id: "reservation-2",
+            startsAt: "2025-03-10T12:00:00.000Z",
+            endsAt: "2025-03-10T12:30:00.000Z",
+            customerName: "Second customer",
+          },
+        ],
+      };
+    }),
+  };
+  const firstCommit = vi.fn();
+  function Navigation() {
+    const { search } = useLocation();
+    const navigate = useNavigate();
+    useLayoutEffect(() => {
+      if (new URLSearchParams(search).get("date") === "2025-03-10")
+        firstCommit(
+          screen.queryByText("First customer"),
+          screen.queryByRole("button", { name: "Load more reservations" }),
+        );
+    }, [search]);
+    return (
+      <button
+        type="button"
+        onClick={() => navigate("/bookings?tab=reservations&date=2025-03-10")}
+      >
+        Next date
+      </button>
+    );
+  }
+  mount(
+    apiClient,
+    42,
+    "/bookings?tab=reservations&date=2025-03-09",
+    <Navigation />,
+  );
+  expect(await screen.findByText("First customer")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Next date" }));
+
+  expect(firstCommit).toHaveBeenCalledWith(null, null);
+  expect(
+    await screen.findByText("Reservations could not be loaded."),
+  ).toBeVisible();
+  expect(screen.queryByText("First customer")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("Second customer")).toBeVisible();
 });
 
 it("loads additional reservations without changing the original date range", async () => {

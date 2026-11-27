@@ -3,3 +3,8 @@ apps/flows/api/test/fixtures/hello.pdf binary
 apps/flows/packages/runtime/test/fixtures/hello.pdf binary
 # Dependency patches retain upstream context indentation and header separators.
 patches/@cloudflare__vitest-pool-workers@0.19.1.patch -whitespace
+patches/@better-auth__oauth-provider@1.7.6.patch whitespace=-space-before-tab
+patches/better-auth@1.7.6.patch whitespace=-space-before-tab
+# Wrangler's runtime declarations preserve the generator's trailing spaces.
+apps/api/worker-configuration.d.ts whitespace=-blank-at-eol
+apps/connector-gateway/worker-configuration.d.ts whitespace=-blank-at-eol

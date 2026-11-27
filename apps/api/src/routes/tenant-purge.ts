@@ -12,8 +12,89 @@ type Table = {
   predicate?: string;
 };
 
-const METADATA_BATCH_SIZE = 50;
+const INVENTORY_BATCH_SIZE = 50;
+const FILE_KEYS_PER_QUERY = 100;
+const DELETION_LEASE_MS = 5 * 60 * 1000;
 export class TenantFileCleanupError extends Error {}
+export class TenantDeletionLeaseLostError extends Error {}
+
+/** Prepare a claim that can run in the same batch as the initial tenant insert. */
+export function prepareTenantDeletionLease(
+  db: D1Database,
+  tenantId: number,
+  createdAt?: string,
+) {
+  const token = crypto.randomUUID();
+  const now = Date.now();
+  const claim = db
+    .prepare(
+      `INSERT INTO tenant_deletion_leases(tenant_id,lease_token,lease_until)
+       SELECT id,?,? FROM tenants WHERE id=? AND created_at=COALESCE(?,created_at) AND kind='commercial'
+       ON CONFLICT(tenant_id) DO UPDATE
+         SET lease_token=excluded.lease_token,lease_until=excluded.lease_until
+         WHERE tenant_deletion_leases.lease_until<=?
+       RETURNING lease_token`,
+    )
+    .bind(token, now + DELETION_LEASE_MS, tenantId, createdAt ?? null, now);
+  const lease = {
+    token,
+    async renew() {
+      const now = Date.now();
+      const renewed = await db
+        .prepare(
+          `UPDATE tenant_deletion_leases SET lease_until=?
+           WHERE tenant_id=? AND lease_token=? AND lease_until>?
+           RETURNING lease_token`,
+        )
+        .bind(now + DELETION_LEASE_MS, tenantId, token, now)
+        .first();
+      if (!renewed) throw new TenantDeletionLeaseLostError();
+    },
+    async release() {
+      try {
+        await db
+          .prepare(
+            "DELETE FROM tenant_deletion_leases WHERE tenant_id=? AND lease_token=?",
+          )
+          .bind(tenantId, token)
+          .run();
+      } catch {
+        console.warn("TENANT_DELETION_LEASE_RELEASE_DEFERRED");
+      }
+    },
+  };
+  return { claim, lease };
+}
+
+/** Serialize provisioning, activity changes, and deletion for one tenant. */
+export async function acquireTenantDeletionLease(
+  db: D1Database,
+  tenantId: number,
+  createdAt?: string,
+) {
+  const { claim, lease } = prepareTenantDeletionLease(db, tenantId, createdAt);
+  const claimed = await claim.first<string>("lease_token");
+  return claimed === lease.token ? lease : null;
+}
+
+async function readFileKeys(
+  db: D1Database,
+  statements: Iterable<D1PreparedStatement>,
+  onKey: (key: string) => void,
+) {
+  const page: D1PreparedStatement[] = [];
+  const read = async () => {
+    const results = await db.batch<{ key: string | null }>(page);
+    for (const result of results)
+      for (const { key } of result.results) if (key) onKey(key);
+    page.length = 0;
+  };
+  for (const statement of statements) {
+    page.push(statement);
+    if (page.length === INVENTORY_BATCH_SIZE) await read();
+  }
+  if (page.length) await read();
+}
 
 /** Schema-derived cleanup covers optional packages without assuming a business domain. */
 export async function tenantPurgePlan(
@@ -39,8 +120,8 @@ export async function tenantPurgePlan(
   }
   const tables: Table[] = [];
   // Each standalone PRAGMA also takes a backup-gate permit on Cloudflare.
-  for (let offset = 0; offset < names.length; offset += METADATA_BATCH_SIZE) {
-    const page = names.slice(offset, offset + METADATA_BATCH_SIZE);
+  for (let offset = 0; offset < names.length; offset += INVENTORY_BATCH_SIZE) {
+    const page = names.slice(offset, offset + INVENTORY_BATCH_SIZE);
     const [columns, keys] = await Promise.all([
       db.batch<{ name: string }>(
         page.map((name) => {
@@ -160,40 +241,44 @@ export async function tenantPurgePlan(
       db.prepare(`DELETE FROM ${quote(table.name)} WHERE ${table.predicate}`),
     );
   const keys = new Set(companionKeys);
-  for (const table of data) {
-    for (const column of table.columns.filter((column) =>
-      ["storage_key", "object_key", "r2_key"].includes(column),
-    )) {
-      const rows = await db
-        .prepare(
-          `SELECT ${quote(column)} AS key FROM ${quote(table.name)} WHERE ${table.predicate}`,
-        )
-        .all<{ key: string }>();
-      for (const row of rows.results) if (row.key) keys.add(row.key);
-    }
-  }
+  const fileReferences = tables.flatMap((table) =>
+    table.columns
+      .filter((column) =>
+        ["storage_key", "object_key", "r2_key"].includes(column),
+      )
+      .map((column) => ({ table, column: quote(column) })),
+  );
+  const inventory = fileReferences
+    .filter(({ table }) => table.name !== "tenants" && table.predicate)
+    .map(({ table, column }) =>
+      db.prepare(
+        `SELECT ${column} AS key FROM ${quote(table.name)} WHERE ${table.predicate}`,
+      ),
+    );
+  await readFileKeys(db, inventory, (key) => keys.add(key));
   // Some legacy key columns are not unique. Keep bytes still used outside
   // this tenant's deletion plan, including globally shared employee resources.
   const candidates = [...keys];
-  for (const table of tables) {
-    for (const column of table.columns.filter((column) =>
-      ["storage_key", "object_key", "r2_key"].includes(column),
-    )) {
-      for (let offset = 0; offset < candidates.length; offset += 100) {
-        const page = candidates.slice(offset, offset + 100);
-        const outside = table.predicate
-          ? `NOT COALESCE((${table.predicate}), FALSE)`
-          : "1=1";
-        const rows = await db
+  function* outsideTenantReads() {
+    for (const { table, column } of fileReferences) {
+      const outside = table.predicate
+        ? `NOT COALESCE((${table.predicate}), FALSE)`
+        : "1=1";
+      for (
+        let offset = 0;
+        offset < candidates.length;
+        offset += FILE_KEYS_PER_QUERY
+      ) {
+        const page = candidates.slice(offset, offset + FILE_KEYS_PER_QUERY);
+        yield db
           .prepare(
-            `SELECT ${quote(column)} AS key FROM ${quote(table.name)} WHERE ${quote(column)} IN (${page.map(() => "?").join(",")}) AND (${outside})`,
+            `SELECT ${column} AS key FROM ${quote(table.name)} WHERE ${column} IN (${page.map(() => "?").join(",")}) AND (${outside})`,
           )
-          .bind(...page)
-          .all<{ key: string }>();
-        for (const row of rows.results) keys.delete(row.key);
+          .bind(...page);
       }
     }
   }
+  await readFileKeys(db, outsideTenantReads(), (key) => keys.delete(key));
   return {
     statements: [
       ...statements,
@@ -206,18 +291,21 @@ export async function tenantPurgePlan(
   };
 }
 
-export async function deleteTenantFiles(bucket: R2Bucket, keys: string[]) {
-  if (!keys.length) return;
-  try {
-    for (let offset = 0; offset < keys.length; offset += 1000)
+export async function deleteTenantFiles(
+  bucket: R2Bucket,
+  keys: string[],
+  renewLease: () => Promise<void>,
+) {
+  for (let offset = 0; offset < keys.length; offset += 1000) {
+    await renewLease();
+    try {
       await bucket.delete(keys.slice(offset, offset + 1000));
-  } catch (cause) {
-    throw new TenantFileCleanupError(
-      "File cleanup failed. Retry tenant deletion.",
-      {
-        cause,
-      },
-    );
+    } catch (cause) {
+      throw new TenantFileCleanupError(
+        "File cleanup failed. Retry tenant deletion.",
+        { cause },
+      );
+    }
   }
 }
 

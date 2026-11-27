@@ -99,6 +99,27 @@ export const settingsMessages = {
     "Unable to delete the user.",
     "Não foi possível excluir o usuário.",
   ],
+  "Eliminación pendiente": [
+    "Eliminación pendiente",
+    "Deletion pending",
+    "Exclusão pendente",
+  ],
+  "Reintentar eliminación": [
+    "Reintentar eliminación",
+    "Retry deletion",
+    "Tentar excluir novamente",
+  ],
+  "La cuenta está desactivada. Reintenta para completar la eliminación.": [
+    "La cuenta está desactivada. Reintenta para completar la eliminación.",
+    "The account is disabled. Retry to complete the deletion.",
+    "A conta está desativada. Tente novamente para concluir a exclusão.",
+  ],
+  "La eliminación quedó pendiente. Puedes reintentar desde la ficha del usuario o desde Inactivos.":
+    [
+      "La eliminación quedó pendiente. Puedes reintentar desde la ficha del usuario o desde Inactivos.",
+      "Deletion is pending. You can retry from the user's details or the Inactive tab.",
+      "A exclusão está pendente. Você pode tentar novamente na ficha do usuário ou na aba Inativos.",
+    ],
   "El tenant seleccionado alcanzó su límite de usuarios activos.": [
     "El tenant seleccionado alcanzó su límite de usuarios activos.",
     "The selected tenant has reached its active user limit.",
