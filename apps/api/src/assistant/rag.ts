@@ -14,8 +14,6 @@ export type RagEnvironment = {
   };
 };
 
-export const CLOUDFLARE_EMBEDDING_MODEL = "@cf/baai/bge-m3";
-
 /**
  * Splits raw document text into readable chunks with overlap.
  */

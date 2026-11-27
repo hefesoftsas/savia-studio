@@ -1,6 +1,5 @@
 import { postgresTestUrl, withPostgresFixture } from "./postgres-fixture";
 import { createHmac } from "node:crypto";
-import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,7 +41,10 @@ function totp(uri: string) {
     .padStart(6, "0");
 }
 
-async function applicationScenario(postgresUrl?: string, qdrantUrl?: string) {
+async function applicationScenario(
+  postgresUrl?: string,
+  legacyPagesSearch = false,
+) {
   const directory = mkdtempSync(join(tmpdir(), "savia-application-"));
   const origin = "http://localhost:8080";
   const email = "bootstrap@example.test",
@@ -63,38 +65,13 @@ async function applicationScenario(postgresUrl?: string, qdrantUrl?: string) {
     S3_ACCESS_KEY_ID: "test-access",
     S3_SECRET_ACCESS_KEY: "integration-storage-secret",
   });
-  let pauseEmbeddings = false;
-  let startedPausedEmbedding!: () => void;
-  const pausedEmbeddingStarted = new Promise<void>((resolve) => {
-    startedPausedEmbedding = resolve;
-  });
-  const embeddings = createServer(async (incoming, outgoing) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
-    const { input } = JSON.parse(Buffer.concat(chunks).toString());
-    if (pauseEmbeddings) {
-      startedPausedEmbedding();
-      return;
-    }
-    outgoing.setHeader("content-type", "application/json");
-    outgoing.end(
-      JSON.stringify({ embeddings: input.map(() => Array(1024).fill(0.5)) }),
-    );
-  });
-  const collection = `savia-app-test-${crypto.randomUUID()}`;
-  let searchEnvironment: Record<string, string> = {};
-  if (qdrantUrl) {
-    await new Promise<void>((resolve) =>
-      embeddings.listen(0, "127.0.0.1", resolve),
-    );
-    const address = embeddings.address() as { port: number };
-    searchEnvironment = {
-      SAVIA_PAGES_SEARCH_ENABLED: "true",
-      SAVIA_PAGES_OLLAMA_URL: `http://127.0.0.1:${address.port}`,
-      SAVIA_PAGES_QDRANT_URL: qdrantUrl,
-      SAVIA_PAGES_QDRANT_COLLECTION: collection,
-    };
-  }
+  const legacySearchEnvironment = legacyPagesSearch
+    ? {
+        SAVIA_PAGES_SEARCH_ENABLED: "true",
+        SAVIA_PAGES_OLLAMA_URL: "http://127.0.0.1:11434",
+        SAVIA_PAGES_QDRANT_URL: "file:///legacy-unsupported",
+      }
+    : {};
   let app: Awaited<ReturnType<typeof createApplication>> | undefined;
   const cookies = new Map<string, string>();
   const base = "/v1/studio/0/api";
@@ -146,7 +123,7 @@ async function applicationScenario(postgresUrl?: string, qdrantUrl?: string) {
       NANGO_SALESFORCE_INTEGRATION_ID: "salesforce-test",
       NANGO_ZOHO_INTEGRATION_ID: "zoho-test",
       NANGO_PIPEDRIVE_INTEGRATION_ID: "pipedrive-test",
-      ...searchEnvironment,
+      ...legacySearchEnvironment,
     });
     expect(
       (await request(base + "/objects", "GET", undefined, false)).status,
@@ -188,28 +165,23 @@ async function applicationScenario(postgresUrl?: string, qdrantUrl?: string) {
       id: expect.any(Number),
       idSlug: "native-tenant-creation-fixture",
     });
-    if (qdrantUrl) {
-      // Seed the existing tenant gates; the feature must never grant them itself.
-      const database = openSqliteDatabase(join(directory, "core.sqlite"));
-      try {
-        await database
-          .prepare(
-            "INSERT INTO tenant_pages_search_settings(tenant_id,allowed,enabled,updated_at) VALUES(0,1,1,'2026-10-03')",
-          )
-          .run();
-      } finally {
-        database.close();
-      }
+    if (legacyPagesSearch) {
       const page = await json("/v1/pages", 201, "POST", {
-        title: "Automatic local indexing",
+        title: "Legacy keyword search",
       });
-      await expect
-        .poll(async () => (await json("/v1/pages/search/status")).data.indexed)
-        .toBe(1);
-      const found = await json("/v1/pages/search?q=automatic");
-      expect(found.data.map((hit: { id: string }) => hit.id)).toEqual([
+      const found = await json("/v1/pages?q=legacy");
+      expect(found.data.map((hit: { id: string }) => hit.id)).toContain(
         page.data.id,
-      ]);
+      );
+      expect(await json("/v1/pages/search/status")).toMatchObject({
+        data: { enabled: false, available: false },
+      });
+      expect(await json("/v1/pages/search?q=legacy", 403)).toMatchObject({
+        error: { code: "SEARCH_DISABLED" },
+      });
+      expect(
+        await json("/v1/pages/search/index/legacy-page", 403, "POST", {}),
+      ).toMatchObject({ error: { code: "SEARCH_DISABLED" } });
     }
     const providers = await json("/v1/personal-integrations/providers");
     expect(providers.data).toEqual(
@@ -288,29 +260,8 @@ async function applicationScenario(postgresUrl?: string, qdrantUrl?: string) {
         )
       ).status,
     ).toBe(401);
-    if (qdrantUrl) {
-      pauseEmbeddings = true;
-      await json("/v1/pages", 201, "POST", {
-        title: "Cancel indexing at shutdown",
-      });
-      await pausedEmbeddingStarted;
-    }
     await app.close();
     app = undefined;
-    if (qdrantUrl) {
-      const database = openSqliteDatabase(join(directory, "core.sqlite"));
-      try {
-        expect(
-          await database
-            .prepare(
-              "SELECT count(*) AS n FROM tenant_page_search_index_leases",
-            )
-            .first("n"),
-        ).toBe(0);
-      } finally {
-        database.close();
-      }
-    }
     app = await createApplication(config, {});
     const restored = await json(`${base}/records/${object}/${id}`);
     expect(restored.data).toMatchObject({
@@ -341,14 +292,6 @@ async function applicationScenario(postgresUrl?: string, qdrantUrl?: string) {
     );
   } finally {
     await app?.close();
-    if (qdrantUrl) {
-      await new Promise<void>((resolve, reject) =>
-        embeddings.close((error) => (error ? reject(error) : resolve())),
-      );
-      await fetch(`${qdrantUrl}/collections/${collection}`, {
-        method: "DELETE",
-      });
-    }
     rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -362,8 +305,8 @@ it.skipIf(!postgresTestUrl)(
   () => withPostgresFixture(async (_db, url) => applicationScenario(url)),
   60000,
 );
-it.skipIf(!process.env.SAVIA_TEST_QDRANT_URL)(
-  "automatically indexes saved Pages through the authenticated Node runtime and live Qdrant",
-  () => applicationScenario(undefined, process.env.SAVIA_TEST_QDRANT_URL),
+it(
+  "ignores legacy Pages inference settings while preserving keyword search and shutdown",
+  () => applicationScenario(undefined, true),
   30000,
 );

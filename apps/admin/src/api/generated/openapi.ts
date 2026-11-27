@@ -17751,7 +17751,7 @@ export interface paths {
       };
       requestBody?: never;
       responses: {
-        /** @description Cloudflare Pages search */
+        /** @description Semantic Pages search */
         200: {
           headers: {
             [name: string]: unknown;
@@ -17782,36 +17782,8 @@ export interface paths {
             };
           };
         };
-        /** @description Page not found */
+        /** @description Active workspace unavailable */
         404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            "application/json": {
-              error: {
-                code: string;
-                message: string;
-              };
-            };
-          };
-        };
-        /** @description Page changed or indexing is already in progress */
-        409: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            "application/json": {
-              error: {
-                code: string;
-                message: string;
-              };
-            };
-          };
-        };
-        /** @description Tenant search rate limit */
-        429: {
           headers: {
             [name: string]: unknown;
           };
@@ -17857,7 +17829,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Index an accessible page in Cloudflare */
+    /** Request semantic indexing for an accessible page */
     post: {
       parameters: {
         query?: never;
@@ -17869,7 +17841,7 @@ export interface paths {
       };
       requestBody?: never;
       responses: {
-        /** @description Cloudflare Pages search */
+        /** @description Semantic Pages search */
         200: {
           headers: {
             [name: string]: unknown;
@@ -17898,36 +17870,8 @@ export interface paths {
             };
           };
         };
-        /** @description Page not found */
+        /** @description Active workspace unavailable */
         404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            "application/json": {
-              error: {
-                code: string;
-                message: string;
-              };
-            };
-          };
-        };
-        /** @description Page changed or indexing is already in progress */
-        409: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            "application/json": {
-              error: {
-                code: string;
-                message: string;
-              };
-            };
-          };
-        };
-        /** @description Tenant search rate limit */
-        429: {
           headers: {
             [name: string]: unknown;
           };
@@ -17969,7 +17913,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Search accessible Pages semantically with Cloudflare */
+    /** Search accessible Pages semantically */
     get: {
       parameters: {
         query: {
@@ -17981,7 +17925,7 @@ export interface paths {
       };
       requestBody?: never;
       responses: {
-        /** @description Cloudflare Pages search */
+        /** @description Semantic Pages search */
         200: {
           headers: {
             [name: string]: unknown;
@@ -18026,36 +17970,8 @@ export interface paths {
             };
           };
         };
-        /** @description Page not found */
+        /** @description Active workspace unavailable */
         404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            "application/json": {
-              error: {
-                code: string;
-                message: string;
-              };
-            };
-          };
-        };
-        /** @description Page changed or indexing is already in progress */
-        409: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            "application/json": {
-              error: {
-                code: string;
-                message: string;
-              };
-            };
-          };
-        };
-        /** @description Tenant search rate limit */
-        429: {
           headers: {
             [name: string]: unknown;
           };

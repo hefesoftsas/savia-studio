@@ -62,11 +62,12 @@ ALTCHA is a proof-of-work challenge, not a human-identity guarantee. Public subm
 ### Pages semantic search
 
 Pages semantic search is currently unavailable in self-hosted deployments. The
-existing local embedding recipe is not supported; do not enable its Ollama or
-Qdrant override. The runtime must use the configured OpenRouter provider and
-preserve its price cap before semantic indexing or queries can be enabled.
-Ordinary title and content search remains available. Tenant capability controls
-may remain visible, but activating them does not make semantic search available.
+unsupported local embedding adapter and Ollama/Qdrant Compose override have
+been removed. Ordinary title and content search remains available. Tenant
+capability controls may remain visible, but activating them does not make
+semantic search available. A future embedding path must use the configured
+OpenRouter provider and preserve its price cap before indexing or queries can be
+enabled.
 
 ## Backup, upgrade and recovery
 
