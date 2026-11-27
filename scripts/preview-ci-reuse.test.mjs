@@ -46,6 +46,30 @@ const adminBuildJobs = [
   ),
   "Type-check (Core & Apps)",
 ].map((name) => ({ name, status: "completed", conclusion: "success" }));
+const hostedPinPath = "deployment/hosted-plugins.json";
+const hostedPinJobs = [
+  ...adminBuildJobs,
+  ...[
+    "API unit tests (shard 1/3)",
+    "API unit tests (shard 2/3)",
+    "API unit tests (shard 3/3)",
+    "Workspace unit tests (Core packages)",
+    "Workspace unit tests (Studio server 1/2)",
+    "Workspace unit tests (Studio server 2/2)",
+  ].map((name) => ({ name, status: "completed", conclusion: "success" })),
+];
+const flowsJobs = [
+  "Flows API tests",
+  "Flows API tests (shard 2/2)",
+  "Flows core tests",
+  "Flows package tests",
+  "Flows types and recovery",
+  "Flows runtime and preview readiness",
+].map((name) => ({ name, status: "completed", conclusion: "success" }));
+const validPins = {
+  [base]: { mode: "100644", json: '{"revision":"' + "e".repeat(40) + '"}' },
+  [commit]: { mode: "100644", json: '{"revision":"' + "f".repeat(40) + '"}' },
+};
 
 function check({
   parents = commit + " " + base,
@@ -54,6 +78,7 @@ function check({
   runs = [run],
   jobs = [classifier()],
   contracts = contractJobs,
+  pins = validPins,
   flowsDisabled = false,
   request = async (path) => {
     if (path === `/repos/${repo}/commits/${commit}/pulls`) return pulls;
@@ -74,6 +99,18 @@ function check({
       if (args[0] === "rev-list") return parents;
       if (args[0] === "rev-parse") return tree;
       if (args[0] === "diff") return paths;
+      if (args[0] === "ls-tree") {
+        const ref = args.at(-3);
+        assert.equal(args.at(-1), hostedPinPath);
+        return pins[ref]
+          ? `${pins[ref].mode} blob ${"1".repeat(40)}\t${hostedPinPath}\n`
+          : "";
+      }
+      if (args[0] === "show") {
+        const [ref, path] = args[1].split(":");
+        assert.equal(path, hostedPinPath);
+        return pins[ref].json;
+      }
       assert.fail(`Unexpected git arguments ${args}`);
     },
   });
@@ -180,6 +217,101 @@ test("reuses exact PR validation for local development changes", async () => {
       paths: paths + "\0scripts/another-local-command.sh",
       jobs,
       flowsDisabled: true,
+    }),
+    false,
+  );
+});
+
+test("reuses CI for a hosted revision update after the PR passes every full check", async () => {
+  const paths = `${hostedPinPath}\0apps/admin/src/features/assistant/assistant-bar.tsx\0`;
+  const proof = classifier(`${proofName} (Flows skipped)`);
+  const jobs = [proof, ...hostedPinJobs];
+  assert.equal(await check({ paths, jobs, flowsDisabled: true }), true);
+
+  for (const job of hostedPinJobs) {
+    assert.equal(
+      await check({
+        paths,
+        jobs: jobs.filter((candidate) => candidate !== job),
+        flowsDisabled: true,
+      }),
+      false,
+      job.name,
+    );
+  }
+  assert.equal(
+    await check({
+      paths,
+      jobs: [...jobs, hostedPinJobs[0]],
+      flowsDisabled: true,
+    }),
+    false,
+  );
+  assert.equal(
+    await check({
+      paths: `${paths}.github/workflows/ci.yml\0`,
+      jobs,
+      flowsDisabled: true,
+    }),
+    false,
+  );
+  assert.equal(
+    await check({ paths, jobs: [classifier(), ...hostedPinJobs] }),
+    false,
+  );
+  assert.equal(
+    await check({
+      paths,
+      jobs: [classifier(), ...hostedPinJobs, ...flowsJobs],
+    }),
+    true,
+  );
+  for (const job of flowsJobs) {
+    assert.equal(
+      await check({
+        paths,
+        jobs: [classifier(), ...hostedPinJobs, ...flowsJobs].map((candidate) =>
+          candidate === job ? { ...job, conclusion: "skipped" } : candidate,
+        ),
+      }),
+      false,
+      job.name,
+    );
+  }
+});
+
+test("hosted revision reuse requires the expected manifests on both regular files", async () => {
+  const paths = `${hostedPinPath}\0`;
+  const jobs = [classifier(`${proofName} (Flows skipped)`), ...hostedPinJobs];
+  assert.equal(await check({ paths, jobs, flowsDisabled: true }), true);
+
+  for (const pin of [
+    { mode: "120000", json: validPins[commit].json },
+    { mode: "100644", json: '{"revision":"main"}' },
+    {
+      mode: "100644",
+      json: '{"revision":"' + "f".repeat(40) + '","extra":true}',
+    },
+    { mode: "100644", json: "null" },
+  ]) {
+    for (const ref of [base, commit]) {
+      assert.equal(
+        await check({
+          paths,
+          jobs,
+          flowsDisabled: true,
+          pins: { ...validPins, [ref]: pin },
+        }),
+        false,
+      );
+    }
+  }
+  assert.equal(
+    await check({
+      paths,
+      jobs,
+      flowsDisabled: true,
+      pins: { [base]: validPins[base] },
     }),
     false,
   );

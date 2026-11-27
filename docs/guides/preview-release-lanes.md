@@ -341,6 +341,11 @@ initialization helper and its tests, the local development launcher and its
 contract tests, the README and docs, and the named Admin frontend build paths
 in `scripts/preview-ci-reuse.mjs`. Changes to those build paths also require
 all six Admin test shards and the Core and Apps type check to pass in the PR.
+A hosted plugin revision change qualifies when both pinned manifests are
+regular files with a single exact commit revision. The PR must pass the full
+Admin, API, workspace and type-check jobs, plus the Flows jobs when enabled.
+The protected release fetches that exact private revision and checks the
+hosted assembly before publication.
 CI compares GitHub's associated PR and successful workflow attempt
 with the exact Git tree and first parent recorded by a step in the PR
 classification job. That attempt must complete both contract jobs successfully.

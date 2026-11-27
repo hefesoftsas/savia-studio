@@ -11,6 +11,7 @@ const authInitializerPath =
   /^scripts\/initialize-auth-deployment(?:\.test)?\.mjs$/;
 const localLauncherPath = /^scripts\/dev-local(?:\.sh|\.test\.mjs|-lock\.mjs)$/;
 const docsPath = /^(?:README|docs\/[\w./-]+)\.md$/;
+const hostedPinPath = "deployment/hosted-plugins.json";
 const reusablePaths = [
   appPath,
   pulumiScriptPath,
@@ -33,6 +34,39 @@ const adminBuildJobs = [
   ),
   "Type-check (Core & Apps)",
 ];
+const hostedPinJobs = [
+  ...adminBuildJobs,
+  ...Array.from(
+    { length: 3 },
+    (_, index) => `API unit tests (shard ${index + 1}/3)`,
+  ),
+  "Workspace unit tests (Core packages)",
+  "Workspace unit tests (Studio server 1/2)",
+  "Workspace unit tests (Studio server 2/2)",
+];
+const flowsJobs = [
+  "Flows API tests",
+  "Flows API tests (shard 2/2)",
+  "Flows core tests",
+  "Flows package tests",
+  "Flows types and recovery",
+  "Flows runtime and preview readiness",
+];
+
+async function isHostedPin(git, ref) {
+  const entry = await git(["ls-tree", "--full-tree", ref, "--", hostedPinPath]);
+  const [metadata, path] = entry.trimEnd().split("\t");
+  if (path !== hostedPinPath || !/^100644 blob [0-9a-f]{40}$/.test(metadata))
+    return false;
+  const pin = JSON.parse(await git(["show", `${ref}:${hostedPinPath}`]));
+  return (
+    pin !== null &&
+    typeof pin === "object" &&
+    Object.keys(pin).length === 1 &&
+    typeof pin.revision === "string" &&
+    sha.test(pin.revision)
+  );
+}
 
 export function previewMergeProofName(pull, base, tree, flowsDisabled = false) {
   return `Preview CI proof ${pull} ${base} ${tree}${flowsDisabled ? " (Flows skipped)" : ""}`;
@@ -74,9 +108,18 @@ export async function canReusePreviewCi({
       !paths.length ||
       !paths.every(
         (path) =>
+          path === hostedPinPath ||
           adminBuildPaths.has(path) ||
           reusablePaths.some((scope) => scope.test(path)),
       )
+    )
+      return false;
+    const hostedPinChanged = paths.includes(hostedPinPath);
+    if (
+      hostedPinChanged &&
+      !(
+        await Promise.all([isHostedPin(git, base), isHostedPin(git, commit)])
+      ).every(Boolean)
     )
       return false;
     const tree = (await git(["rev-parse", `${commit}^{tree}`])).trim();
@@ -123,8 +166,12 @@ export async function canReusePreviewCi({
       `${prefix}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
     );
     const requiredJobs = ["Contract suite", "Contract tests"];
-    if (paths.some((path) => adminBuildPaths.has(path)))
+    if (hostedPinChanged) {
+      requiredJobs.push(...hostedPinJobs);
+      if (!flowsDisabled) requiredJobs.push(...flowsJobs);
+    } else if (paths.some((path) => adminBuildPaths.has(path))) {
       requiredJobs.push(...adminBuildJobs);
+    }
     for (const name of requiredJobs) {
       const matches = jobs.filter((job) => job.name === name);
       if (
