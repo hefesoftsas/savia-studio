@@ -117,6 +117,7 @@ export function selectCodeqlLanguages(paths) {
       continue;
     }
     if (
+      path === "scripts/admin-test-durations.json" ||
       DOCUMENT_OR_IMAGE_EXTENSIONS.has(
         path.slice(path.lastIndexOf(".")).toLowerCase(),
       )

@@ -491,9 +491,11 @@ continue to select the full release path.
 It replaces GitHub's default setup: there is no automatic scan on a main push
 and no weekly scan. The selector uses all changed PR paths, including the old
 path of a renamed file, to select Actions, JavaScript/TypeScript, Python and Rust.
-Each selected language still analyzes the complete repository. Documentation
-and image changes alone skip analysis; unknown files and changes to the scanner
-controls select all languages. A newer run cancels the superseded run for that PR.
+Each selected language still analyzes the complete repository. Changes limited
+to documentation, images, and `scripts/admin-test-durations.json` skip analysis.
+The Admin timing data still runs through the regular test workflow. Unknown
+files and changes to scanner controls select all languages. A newer run cancels
+the superseded run for that PR.
 
 Selection runs trusted base-branch code and checks the PR revisions before and
 after reading the paginated file list. API errors, changed revisions and file
@@ -559,11 +561,14 @@ both API shards and readiness checks to succeed. All seven package suites remain
 
 Admin keeps six jobs and one test worker per job. A custom Vitest sequencer
 distributes the complete discovered test list by advisory historical file costs
-in `scripts/admin-test-durations.json`. The initial estimates use the successful
-2026-11-06 CI run plus a fixed per-file setup allowance. Missing measurements get
-a default cost, and obsolete measurements do not add or remove tests. Assignment
-is deterministic and every discovered test belongs to exactly one shard. These
-estimates affect scheduling only; refresh them when timing imbalance returns.
+in `scripts/admin-test-durations.json`. The estimates use the median of six
+successful CI runs on 2026-11-27. Take the time between successive file results
+from the serial worker, with Vitest's reported test time as a lower bound.
+For the first result in each shard, use the reported test time plus a one-second
+setup estimate. Round the median to the nearest 50 ms with a 50 ms minimum.
+Missing measurements get a default cost, and obsolete measurements do not add
+or remove tests. Assignment is deterministic and every discovered test belongs
+to exactly one shard. These estimates affect scheduling only.
 
 The Admin sequencer is enabled only by CI command arguments; normal local test
 commands and application builds are unchanged. Changes to CI helpers do not
