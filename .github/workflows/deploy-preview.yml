@@ -64,6 +64,8 @@ jobs:
       actions: read
       deployments: write
     needs: plan
+    outputs:
+      store_current: ${{ steps.store_current.outputs.current }}
     if: >-
       ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.kind == 'platform' && needs.plan.outputs.runtime_changed == 'true' &&
         github.event_name == 'workflow_run' &&
@@ -437,6 +439,27 @@ jobs:
           SAVIA_FLOWS_BACKUP_KEY: ${{ secrets.SAVIA_FLOWS_BACKUP_KEY }}
           SAVIA_RUNTIME_OPERATION_DIRECTORY: ${{ runner.temp }}/savia-runtime
 
+      - name: Verify the deployed Preview catalog
+        id: store_current
+        if: ${{ success() && !cancelled() && needs.plan.outputs.store_plugins_changed == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if proof=$(mktemp "$RUNNER_TEMP/preview-store-proof.XXXXXX") &&
+            GITHUB_OUTPUT="$proof" timeout 20s pnpm --filter @savia/admin exec tsx ../../scripts/verify-preview-store.mts >/dev/null 2>&1 &&
+            [[ "$(cat "$proof")" == 'current=true' ]]; then
+            printf 'current=true\n' >> "$GITHUB_OUTPUT"
+            printf '%s\n' 'The Preview catalog is current.'
+          else
+            printf '%s\n' 'Preview catalog publication is required.'
+          fi
+        env:
+          SAVIA_DEPLOY_ENVIRONMENT: preview
+          SAVIA_PREVIEW_STORE_EXCLUDED_TENANTS: ${{ vars.SAVIA_PREVIEW_STORE_EXCLUDED_TENANTS }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_DATABASE_ID: ${{ env.SAVIA_DOMAIN_D1_ID }}
+
       - name: Publish sanitized runtime operation timings
         continue-on-error: true
         if: ${{ always() }}
@@ -622,7 +645,8 @@ jobs:
       ${{ always() && !cancelled() && needs.plan.result == 'success' &&
         (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
         (needs.plugins.result == 'success' || needs.plugins.result == 'skipped') &&
-        needs.plan.outputs.store_plugins_changed == 'true' }}
+        needs.plan.outputs.store_plugins_changed == 'true' &&
+        !(needs.deploy.result == 'success' && needs.deploy.outputs.store_current == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -831,7 +855,9 @@ jobs:
       ${{ always() && !cancelled() && needs.plan.result == 'success' &&
         (needs.deploy.result == 'success' || (needs.deploy.result == 'skipped' && (needs.plan.outputs.runtime_changed == 'false' || needs.plan.outputs.kind != 'platform'))) &&
         (needs.office.result == 'success' || (needs.office.result == 'skipped' && needs.plan.outputs.office_runtime_changed == 'false')) &&
-        (needs.store.result == 'success' || (needs.store.result == 'skipped' && needs.plan.outputs.store_plugins_changed == 'false')) &&
+        (needs.store.result == 'success' || (needs.store.result == 'skipped' &&
+          (needs.plan.outputs.store_plugins_changed == 'false' ||
+            (needs.deploy.result == 'success' && needs.deploy.outputs.store_current == 'true')))) &&
         (needs.plugins.result == 'success' || (needs.plugins.result == 'skipped' && needs.plan.outputs.kind != 'plugin')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2

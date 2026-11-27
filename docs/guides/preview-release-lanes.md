@@ -36,6 +36,15 @@ platform deployment cannot be skipped by a later plugin-only commit. Missing
 durable and legacy evidence selects the full lane. A workflow conclusion alone
 does not advance the baseline: publication needs a verified component receipt.
 
+When a runtime release also plans a store publication, Preview compares the
+ZIP digests from the same hosted build with the current catalog of every
+eligible workspace. The check uses the isolated Preview database and the same
+workspace exclusions as the publisher. It also checks required installations
+and their collection requirements. A complete match lets the release skip the
+store job and record verified completion. A missing package, an incomplete
+installation, or a failed verification sends the release through the normal
+store publication. Store-only releases use the normal store job.
+
 The publisher packages only changed plugins and updates their existing enabled
 installations. It does not install optional plugins in new workspaces, reactivate
 disabled installations, apply migrations, upload secrets, replace Workers, or
@@ -332,6 +341,11 @@ initialization helper and its tests, the local development launcher and its
 contract tests, the README and docs, and the named Admin frontend build paths
 in `scripts/preview-ci-reuse.mjs`. Changes to those build paths also require
 all six Admin test shards and the Core and Apps type check to pass in the PR.
+A hosted plugin revision change qualifies when both pinned manifests are
+regular files with a single exact commit revision. The PR must pass the full
+Admin, API, workspace and type-check jobs, plus the Flows jobs when enabled.
+The protected release fetches that exact private revision and checks the
+hosted assembly before publication.
 CI compares GitHub's associated PR and successful workflow attempt
 with the exact Git tree and first parent recorded by a step in the PR
 classification job. That attempt must complete both contract jobs successfully.

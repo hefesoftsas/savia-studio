@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { evaluateContractGate } from "./contract-check-gate.mjs";
 
@@ -974,6 +976,109 @@ test("Preview components can retry independently without repeating runtime publi
   assert.match(promotion, /name: preview-release/);
 });
 
+test("Preview skips store publication only when the successful runtime verified the live catalog", async () => {
+  const preview = await workflow("deploy-preview.yml");
+  const job = (name) =>
+    preview.split(`\n  ${name}:`)[1].split(/\n  [a-z-]+:/)[0];
+  const runtime = job("deploy");
+  const verifier =
+    runtime
+      .split("- name: Verify the deployed Preview catalog")[1]
+      ?.split("- name:")[0] ?? "";
+  assert.match(
+    runtime,
+    /store_current: \$\{\{ steps\.store_current\.outputs\.current \}\}/,
+  );
+  assert.ok(
+    runtime.indexOf("name: Verify the deployed Preview catalog") >
+      runtime.indexOf("name: Apply the exact managed runtime plan"),
+  );
+  assert.match(
+    verifier,
+    /if: \$\{\{ success\(\) && !cancelled\(\) && needs\.plan\.outputs\.store_plugins_changed == 'true' \}\}/,
+  );
+  assert.match(verifier, /GITHUB_OUTPUT="\$proof" timeout 20s/);
+  assert.match(verifier, /\[\[ "\$\(cat "\$proof"\)" == 'current=true' \]\]/);
+  assert.doesNotMatch(verifier, /continue-on-error:/);
+  assert.match(verifier, /SAVIA_DEPLOY_ENVIRONMENT: preview/);
+  assert.match(
+    verifier,
+    /CLOUDFLARE_DATABASE_ID: \$\{\{ env\.SAVIA_DOMAIN_D1_ID \}\}/,
+  );
+  assert.match(
+    verifier,
+    /SAVIA_PREVIEW_STORE_EXCLUDED_TENANTS: \$\{\{ vars\.SAVIA_PREVIEW_STORE_EXCLUDED_TENANTS \}\}/,
+  );
+  assert.match(
+    verifier,
+    /pnpm --filter @savia\/admin exec tsx \.\.\/\.\.\/scripts\/verify-preview-store\.mts/,
+  );
+  assert.doesNotMatch(job("plan"), /verify-preview-store|secrets\./);
+
+  const script = verifier.split("run: |\n")[1].split("\n        env:")[0];
+  const directory = await mkdtemp(join(tmpdir(), "preview-store-proof-"));
+  const output = join(directory, "job-output");
+  try {
+    for (const [proof, status, expected] of [
+      ["current=true", "0", "current=true\n"],
+      ["current=false", "0", ""],
+      ["current=true", "124", ""],
+      ["current=true\nextra=invalid", "0", ""],
+    ]) {
+      await writeFile(output, "");
+      const result = spawnSync(
+        "bash",
+        [
+          "-c",
+          `timeout() { shift; "$@"; }\npnpm() { printf '%s\\n' "$FIXTURE_PROOF" > "$GITHUB_OUTPUT"; return "$FIXTURE_STATUS"; }\n${script}`,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            RUNNER_TEMP: directory,
+            GITHUB_OUTPUT: output,
+            FIXTURE_PROOF: proof,
+            FIXTURE_STATUS: status,
+          },
+        },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(await readFile(output, "utf8"), expected);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+
+  const expression = job("store").split("${{")[1].split("}}")[0];
+  const publishStore = new Function(
+    "needs",
+    "always",
+    "cancelled",
+    `return (${expression});`,
+  );
+  const needs = {
+    plan: { result: "success", outputs: { store_plugins_changed: "true" } },
+    deploy: { result: "success", outputs: {} },
+    plugins: { result: "skipped" },
+  };
+  const publish = () =>
+    publishStore(
+      needs,
+      () => true,
+      () => false,
+    );
+  assert.equal(publish(), true);
+  needs.deploy.outputs.store_current = "false";
+  assert.equal(publish(), true);
+  needs.deploy.outputs.store_current = "true";
+  assert.equal(publish(), false);
+  needs.deploy.result = "skipped";
+  assert.equal(publish(), true);
+  needs.deploy.result = "failure";
+  assert.equal(publish(), false);
+});
+
 test("Preview promotion rejects required components skipped after a dependency failure", async () => {
   const preview = await workflow("deploy-preview.yml");
   const expression = preview
@@ -996,7 +1101,7 @@ test("Preview promotion rejects required components skipped after a dependency f
         store_plugins_changed: "true",
       },
     },
-    deploy: { result: "success" },
+    deploy: { result: "success", outputs: {} },
     office: { result: "success" },
     store: { result: "success" },
     plugins: { result: "skipped" },
@@ -1020,6 +1125,26 @@ test("Preview promotion rejects required components skipped after a dependency f
       `${component} needs a successful result when required`,
     );
   }
+  const reconciled = structuredClone(needs);
+  reconciled.store.result = "skipped";
+  reconciled.deploy.outputs.store_current = "true";
+  assert.equal(
+    evaluate(
+      reconciled,
+      () => true,
+      () => false,
+    ),
+    true,
+  );
+  reconciled.store.result = "failure";
+  assert.equal(
+    evaluate(
+      reconciled,
+      () => true,
+      () => false,
+    ),
+    false,
+  );
   const unchanged = structuredClone(needs);
   unchanged.plan.outputs.runtime_changed = "false";
   unchanged.plan.outputs.office_runtime_changed = "false";
