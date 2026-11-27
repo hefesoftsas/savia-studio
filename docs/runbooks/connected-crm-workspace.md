@@ -195,7 +195,9 @@ Grouped summaries require a complete scan of up to 1,000 matching records and
 return an error if provider pagination ends before the reported total is reached.
 
 HubSpot relation pages follow the provider's association cursor and keep
-association order when loading record details in batches.
+the first occurrence of each related record. Totals count unique records.
+Record details are loaded in batches and returned in association order.
+An incomplete batch returns an upstream error.
 
 Optional CRM picklists with more than 200 active choices appear as read-only
 text fields without a choice list, so existing values stay visible while other

@@ -1130,19 +1130,18 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
             throw e;
           }
           const targetCatalog = hubspotObject(target.resource)!;
-          const ids: string[] = [];
+          const relatedIds = new Set<string>();
           const cursors = new Set<string>();
+          let scanned = 0;
           while (true) {
             const { records, after } = readRecordPage(associations, cursors);
-            ids.push(...records.map((record) => String(record.id)));
-            if (
-              ids.length > 5000 ||
-              (after !== undefined && ids.length === 5000)
-            )
+            scanned += records.length;
+            if (scanned > 5000 || (after !== undefined && scanned === 5000))
               fail(
                 "Esta relación supera el límite de consulta. Ábrela en HubSpot.",
                 422,
               );
+            for (const record of records) relatedIds.add(String(record.id));
             if (after === undefined) break;
             associations = await remote(
               conn,
@@ -1150,7 +1149,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
             );
           }
           const pageIds = includeRecords
-            ? ids.slice((page - 1) * perPage, page * perPage)
+            ? [...relatedIds].slice((page - 1) * perPage, page * perPage)
             : [];
           const batch = pageIds.length
             ? await remote(
@@ -1178,6 +1177,33 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
               );
             recordsById.set(recordId, record);
           }
+          const records = pageIds.map((id) => {
+            const record = recordsById.get(id);
+            if (!record)
+              fail(
+                "HubSpot devolvió una página incompleta de registros relacionados.",
+                502,
+              );
+            return {
+              id,
+              label: record.properties?.[targetCatalog.title] || id,
+              ...(includeRecordData
+                ? {
+                    data: {
+                      id,
+                      ...Object.fromEntries(
+                        Object.keys(targetCatalog.fields).map((key) => [
+                          key,
+                          record.properties?.[key] ?? null,
+                        ]),
+                      ),
+                      created_at: record.createdAt,
+                      updated_at: record.updatedAt,
+                    },
+                  }
+                : {}),
+            };
+          });
           const targetObject = await getObject(db, tenant, row.object_name);
           groups.push({
             definition: {
@@ -1193,41 +1219,17 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
             targetObject: row.object_name,
             targetLabel: targetObject.label,
             label: targetObject.label,
-            records: pageIds.flatMap((id) => {
-              const record = recordsById.get(id);
-              if (!record) return [];
-              return [
-                {
-                  id,
-                  label: record.properties?.[targetCatalog.title] || id,
-                  ...(includeRecordData
-                    ? {
-                        data: {
-                          id,
-                          ...Object.fromEntries(
-                            Object.keys(targetCatalog.fields).map((key) => [
-                              key,
-                              record.properties?.[key] ?? null,
-                            ]),
-                          ),
-                          created_at: record.createdAt,
-                          updated_at: record.updatedAt,
-                        },
-                      }
-                    : {}),
-                },
-              ];
-            }),
+            records,
             targetColumns: Object.entries(targetCatalog.fields).map(
               ([key, label]) => ({ key, label }),
             ),
-            total: ids.length,
+            total: relatedIds.size,
             canEdit:
               defaultAssociation &&
               capabilities(conn.scopes, resource).update &&
               capabilities(conn.scopes, target.resource).update,
             readOnlyReason: "Asociación nativa de HubSpot.",
-            hasNextPage: page * perPage < ids.length,
+            hasNextPage: page * perPage < relatedIds.size,
           });
         }),
       );
