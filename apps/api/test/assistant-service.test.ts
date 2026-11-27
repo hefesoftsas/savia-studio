@@ -547,6 +547,69 @@ describe("SaviaAssistantService action approvals", () => {
     ).toEqual({ state: "unavailable" });
   });
 
+  it.each([
+    [
+      "completed",
+      {
+        content: [{ type: "text" as const, text: "created" }],
+        structuredContent: { document: { id: "102" } },
+      },
+      {
+        state: "completed",
+        result: { structuredContent: { document: { id: "102" } } },
+      },
+    ],
+    [
+      "failed",
+      {
+        content: [{ type: "text" as const, text: "Command rejected" }],
+        isError: true,
+      },
+      { state: "failed" },
+    ],
+  ] as const)(
+    "preserves a %s action when MCP client cleanup rejects",
+    async (expectedState, callToolResult, expectedResult) => {
+      const actionId = `approval-close-error-${expectedState}`;
+      const service = new SaviaAssistantService(
+        {
+          database: env.DB,
+          mcpUrl: "http://mcp:8789/mcp",
+          mcpSharedSecret: "internal-secret",
+          openRouterApiKey: "server-only-key",
+        },
+        {
+          mcpClientFactory: vi.fn(async () => ({
+            callTool: vi.fn(async () => callToolResult),
+            close: vi.fn(async () => {
+              throw new Error("transport close failed");
+            }),
+            tools: async () => ({}),
+          })),
+        },
+      );
+      const repository = new PendingActionRepository(env.DB);
+      await repository.issue({
+        id: actionId,
+        principalId: "test-platform-admin",
+        domain: "agency-network",
+        command: "create-agency-profile",
+        input: { organization: { displayName: "Savia Centro" } },
+      });
+
+      await expect(
+        service.confirmAction({
+          actionId,
+          principalId: "test-platform-admin",
+          authorization: "Bearer current-user-token",
+        }),
+      ).resolves.toMatchObject(expectedResult);
+      await expect(
+        repository.status(actionId, "test-platform-admin"),
+      ).resolves.toMatchObject({ state: expectedState });
+    },
+  );
+
   it("lets the owner cancel a pending command without calling MCP", async () => {
     const mcpClientFactory = vi.fn();
     const service = new SaviaAssistantService(

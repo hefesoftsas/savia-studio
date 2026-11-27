@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppServices } from "@/app-services";
@@ -14,17 +14,17 @@ const action = {
   requiresConfirmation: true as const,
 };
 
-describe("AssistantActionCard", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
+describe("AssistantActionCard", () => {
   it("executes a prepared change only after the user confirms it", async () => {
-    const fetcher = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ state: "completed" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) =>
+      Response.json({
+        state: init?.method === "POST" ? "completed" : "pending",
       }),
     );
     vi.stubGlobal("fetch", fetcher);
@@ -39,7 +39,10 @@ describe("AssistantActionCard", () => {
       </AppServicesProvider>,
     );
 
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ method: "POST" }),
+    );
     expect(screen.getByText("displayName")).toBeVisible();
     expect(screen.getByText("Savia Norte")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Confirmar cambio" }));
@@ -49,6 +52,121 @@ describe("AssistantActionCard", () => {
       expect.objectContaining({ method: "POST" }),
     );
     expect(await screen.findByText("Cambio ejecutado.")).toBeVisible();
+  });
+
+  it.each([
+    {
+      state: "completed",
+      button: "Confirmar cambio",
+      message: "Cambio ejecutado.",
+    },
+    { state: "cancelled", button: "Cancelar", message: "Cambio cancelado." },
+  ])(
+    "recovers a $state change when the response is lost without resending it",
+    async ({ state, button, message }) => {
+      let submitted = false;
+      const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          submitted = true;
+          throw new TypeError("Network request failed");
+        }
+        return Response.json({ state: submitted ? state : "pending" });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      const services = {
+        authSession: { getAccessToken: vi.fn().mockResolvedValue("token-17") },
+      } as unknown as AppServices;
+      render(
+        <AppServicesProvider services={services}>
+          <AssistantActionCard action={action} />
+        </AppServicesProvider>,
+      );
+
+      await userEvent.click(screen.getByRole("button", { name: button }));
+
+      expect(await screen.findByText(message)).toBeVisible();
+      expect(
+        fetcher.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1);
+      expect(
+        screen.queryByRole("button", { name: "Confirmar cambio" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("allows a status check during an interrupted confirmation without offering to resend it", async () => {
+    let submitted = false;
+    let statusAvailable = false;
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        submitted = true;
+        return Response.json({ error: "Gateway timeout" }, { status: 504 });
+      }
+      if (submitted && !statusAvailable)
+        return Response.json({ error: "Unavailable" }, { status: 503 });
+      return Response.json({ state: submitted ? "completed" : "pending" });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const services = {
+      authSession: { getAccessToken: vi.fn().mockResolvedValue("token-17") },
+    } as unknown as AppServices;
+    render(
+      <AppServicesProvider services={services}>
+        <AssistantActionCard action={action} />
+      </AppServicesProvider>,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Confirmar cambio" }),
+    );
+
+    expect(
+      await screen.findByText("No pudimos consultar el estado de la acción."),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Confirmar cambio" }),
+    ).not.toBeInTheDocument();
+    statusAvailable = true;
+    await userEvent.click(
+      screen.getByRole("button", { name: "Verificar estado" }),
+    );
+
+    expect(await screen.findByText("Cambio ejecutado.")).toBeVisible();
+    expect(
+      fetcher.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(1);
+  });
+
+  it("restores a running proposal and shows the saved result when it finishes", async () => {
+    let state = "executing";
+    const fetcher = vi.fn(async (_url: string, _init?: RequestInit) =>
+      Response.json({ state }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const services = {
+      authSession: { getAccessToken: vi.fn().mockResolvedValue("token-17") },
+    } as unknown as AppServices;
+    render(
+      <AppServicesProvider services={services}>
+        <AssistantActionCard action={action} />
+      </AppServicesProvider>,
+    );
+
+    expect(
+      await screen.findByText("Verificando el estado de la acción…"),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Confirmar cambio" }),
+    ).not.toBeInTheDocument();
+    state = "completed";
+
+    expect(
+      await screen.findByText("Cambio ejecutado.", undefined, {
+        timeout: 4_500,
+      }),
+    ).toBeVisible();
+    expect(
+      fetcher.mock.calls.every(([, init]) => init?.method !== "POST"),
+    ).toBe(true);
   });
 
   it("renders friendly CRM action title and flattens data fields", () => {
@@ -93,7 +211,11 @@ it("shows the saved quotation link and evidence-based comparison after confirmat
     pricedOffers: 1,
     lowestPremium: 1000,
     lowestPriceOffers: [
-      { provider: "Example Omega", product: "Example Omega Full", premium: 1000 },
+      {
+        provider: "Example Omega",
+        product: "Example Omega Full",
+        premium: 1000,
+      },
     ],
     tiedOfferCount: 1,
     recommendation: "Faltan detalles para elegir.",
@@ -141,9 +263,7 @@ it("shows the saved quotation link and evidence-based comparison after confirmat
       name: "Ver cotización y comparar ofertas",
     }),
   ).toHaveAttribute("href", quoteResult.url);
-  expect(
-    screen.getByText("Faltan detalles para elegir."),
-  ).toBeVisible();
+  expect(screen.getByText("Faltan detalles para elegir.")).toBeVisible();
   vi.unstubAllGlobals();
 });
 
