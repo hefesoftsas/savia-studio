@@ -170,14 +170,54 @@ test("CI validates main pushes and pull requests without deployment credentials"
   assert.match(ci, /^  runtime-profile:/m);
   assert.match(
     ci,
-    /ci_kind=\(infrastructure\|plugin\|none\|auth\|api\|backup-gate\|assistant-api\|ci-config\|frontend\|frontend-assistant-api\)/,
+    /ci_kind=\(infrastructure\|plugin\|none\|auth\|api\|backup-gate\|assistant-api\|ci-config\|frontend\|frontend-assistant-api\|self-hosted\)/,
   );
   assert.match(ci, /pnpm run test:unit:admin/);
   assert.match(ci, /pnpm run test:unit:api/);
   assert.match(ci, /pnpm run test:unit:workspace/);
   assert.match(ci, /pnpm run test:contracts/);
   assert.match(ci, /pnpm run typecheck/);
-  assert.doesNotMatch(ci, /CLOUDFLARE_API_TOKEN|self-hosted|secrets\./);
+  assert.doesNotMatch(ci, /CLOUDFLARE_API_TOKEN|secrets\./);
+});
+
+test("focused self-hosted changes run package tests and type checks without heavy suites", async () => {
+  const ci = await workflow("ci.yml");
+  const runtime = ci.slice(
+    ci.indexOf("  runtime-profile:"),
+    ci.indexOf("  workspace:"),
+  );
+  assert.match(
+    runtime,
+    /contains\(fromJSON\('\["auth","api","backup-gate","assistant-api","frontend","frontend-assistant-api","self-hosted"\]'\), needs\.changes\.outputs\.ci_kind\)/,
+  );
+  const selfHosted = runtime
+    .split("            self-hosted)")[1]
+    ?.split(";;")[0];
+  assert.ok(selfHosted, "runtime profile must have a self-hosted case");
+  assert.match(selfHosted, /pnpm --filter @savia\/self-hosted test/);
+  assert.match(selfHosted, /pnpm --filter @savia\/self-hosted typecheck/);
+
+  const admin = ci.slice(ci.indexOf("  admin:"), ci.indexOf("  api:"));
+  const api = ci.slice(ci.indexOf("  api:"), ci.indexOf("  runtime-profile:"));
+  const workspace = ci.slice(
+    ci.indexOf("  workspace:"),
+    ci.indexOf("  contract-suite:"),
+  );
+  const flows = ci.slice(
+    ci.indexOf("  flows-api:"),
+    ci.indexOf("  publication-safety:"),
+  );
+  for (const section of [admin, api, workspace, flows])
+    assert.doesNotMatch(section, /self-hosted/);
+
+  const contractSuite = ci.slice(
+    ci.indexOf("  contract-suite:"),
+    ci.indexOf("  contracts:"),
+  );
+  assert.match(contractSuite, /pnpm run test:contracts/);
+  const safety = ci.slice(ci.indexOf("  publication-safety:"));
+  assert.match(safety, /name: Public source safety/);
+  assert.doesNotMatch(safety, /^\s+if:/m);
 });
 
 test("contract suite runs independently and the required gate includes all required lanes", async () => {

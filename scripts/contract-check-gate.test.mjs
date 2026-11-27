@@ -37,6 +37,36 @@ test("contract gate rejects unknown CI kinds", () => {
   );
 });
 
+test("self-hosted contract gate requires its runtime profile and contracts", () => {
+  const complete = needs("self-hosted", "success");
+  complete["runtime-profile"] = { result: "success" };
+  assert.deepEqual(evaluateContractGate(complete), []);
+
+  for (const result of ["failure", "cancelled", "skipped", undefined]) {
+    const incomplete = structuredClone(complete);
+    if (result === undefined) delete incomplete["runtime-profile"];
+    else incomplete["runtime-profile"].result = result;
+    assert.ok(
+      evaluateContractGate(incomplete).some((failure) =>
+        failure.includes(`runtime profile result was ${result ?? "missing"}`),
+      ),
+      `runtime profile=${result ?? "missing"} must fail the gate`,
+    );
+  }
+
+  for (const result of ["failure", "cancelled", "skipped", undefined]) {
+    const incomplete = structuredClone(complete);
+    if (result === undefined) delete incomplete["contract-suite"];
+    else incomplete["contract-suite"].result = result;
+    assert.ok(
+      evaluateContractGate(incomplete).some((failure) =>
+        failure.includes(`contract suite result was ${result ?? "missing"}`),
+      ),
+      `contract suite=${result ?? "missing"} must fail the gate`,
+    );
+  }
+});
+
 test("frontend contract gate requires runtime profile and every admin shard", () => {
   const complete = needs("frontend", "success");
   complete["runtime-profile"] = { result: "success" };
