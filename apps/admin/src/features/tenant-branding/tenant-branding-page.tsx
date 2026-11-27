@@ -398,14 +398,13 @@ function BrandingEditor({
         const value = parseTenantBranding(response.data);
         if (!value) throw new Error("Invalid branding");
         loadedScope.current = { apiClient: services.apiClient, path };
-        const editedDuringRead =
-          sameScope && editRevision.current !== startedRevision;
-        setConflict(editedDuringRead);
-        if (!editedDuringRead) {
+        const draftChanged = editRevision.current !== startedRevision;
+        if (!sameScope || (!draftChanged && !busy.current)) {
+          setConflict(false);
           clearPreviews();
           setDraft(value);
+          setSaved(value);
         }
-        setSaved(value);
         setCanManage(response.canManage === true);
       })
       .catch((cause) => {
@@ -434,19 +433,18 @@ function BrandingEditor({
     setNotice("");
   }
   const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(saved);
-  const remoteBranding = useRealtimeRefresh({
+  useRealtimeRefresh({
     topics: ["settings"],
     tenantId: Number(tenantId),
     enabled: Number.isSafeInteger(Number(tenantId)),
     blocked: dirty || Boolean(pending),
+    accepts: (event) =>
+      event.collection === "branding" && event.type === "updated",
     refresh: () => {
       setReload((value) => value + 1);
       void refetch({ reload: true });
     },
   });
-  useEffect(() => {
-    if (remoteBranding.changed) setConflict(true);
-  }, [remoteBranding.changed]);
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!draft || !canManage || !dirty || busy.current || conflict) return;
@@ -472,6 +470,7 @@ function BrandingEditor({
       if (!alive.current) return;
       const value = parseTenantBranding(response.data);
       if (!value) throw new Error("Invalid branding");
+      editRevision.current += 1;
       setSaved(value);
       setDraft(value);
       clearPreviews();
@@ -529,19 +528,11 @@ function BrandingEditor({
     const body = new FormData();
     body.append("file", file);
     try {
-      const response = await services.apiClient.requestResponse(
-        `${path}/assets/${kind}`,
-        { method: "POST", body, signal: controller.signal },
-      );
-      if (!response.ok)
-        throw new ApiClientError(
-          response.status,
-          "upload_failed",
-          "Upload failed",
-        );
-      const result = (await response.json()) as { data?: { url?: unknown } };
+      const result = await services.apiClient.postForm<{
+        data?: { url?: unknown };
+      }>(`${path}/assets/${kind}`, body, { signal: controller.signal });
       if (!alive.current || controller.signal.aborted) return;
-      const url = result.data?.url;
+      const url = result?.data?.url;
       const urlKey =
         kind === "login-animation" ? "loginAnimationUrl" : `${kind}Url`;
       if (

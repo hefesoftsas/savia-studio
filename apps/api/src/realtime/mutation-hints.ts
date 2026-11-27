@@ -30,8 +30,9 @@ function mutationType(method: string): "created" | "updated" | "deleted" {
 }
 
 function tenantPathId(path: string): number | undefined {
+  // Asset uploads stage files. Only a save changes the published branding.
   const match =
-    /^\/v1\/tenants\/(\d+)\/branding(?:\/|$)/.exec(path) ??
+    /^\/v1\/tenants\/(\d+)\/branding$/.exec(path) ??
     /^\/v1\/assistant\/configuration\/tenants\/(\d+)$/.exec(path);
   if (!match) return undefined;
   const id = Number(match[1]);
