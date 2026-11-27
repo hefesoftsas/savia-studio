@@ -65,6 +65,7 @@ const RUNTIME_IGNORED_PATHS = new Set([
   "apps/self-hosted/scripts/account-email-smoke.ts",
   "apps/self-hosted/scripts/saml-keycloak-smoke.ts",
   "apps/self-hosted/scripts/saml-smoke-form.ts",
+  "apps/self-hosted/src/hook-worker.ts",
 ]);
 
 function documentationOrTestPath(path) {
