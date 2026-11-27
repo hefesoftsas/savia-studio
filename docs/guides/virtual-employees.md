@@ -29,6 +29,11 @@ collections or explicitly enable all collections. Switching from text-only mode
 starts with no workspace grants, and the editor asks for an explicit scope before
 saving. Employees cannot grant access to another tenant's collections.
 
+Knowledge files show as indexed once Savia has saved searchable text. Empty
+text or an indexing error puts the file in the failed state. Employee responses
+use only indexed files and look up relevant passages by keyword in Savia's
+database. Document lookup does not require an embedding provider.
+
 Existing employees with a nonempty collection allowlist remain in Workspace tools
 mode with their current scope when edited. A Spanish-to-English translator
 template in employee management opens a text-only draft with an active status,

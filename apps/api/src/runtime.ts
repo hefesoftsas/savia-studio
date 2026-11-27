@@ -354,12 +354,6 @@ function assistantServiceFromEnvironment(
     {
       configurationResolver: configuration,
       virtualEmployeesRepo: new VirtualEmployeesRepository(environment.DB),
-      ragEnv: {
-        DB: environment.DB,
-        DOCUMENTS: environment.DOCUMENTS,
-        AI: (environment as any).AI,
-        VECTORIZE: (environment as any).VECTORIZE,
-      },
     },
   );
 }

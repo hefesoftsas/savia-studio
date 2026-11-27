@@ -660,4 +660,47 @@ describe("Virtual Employees API Routes", () => {
       headers: { authorization: "Bearer admin-token" },
     });
   });
+
+  it("records an uploaded document without indexable text as failed", async () => {
+    const app = createTestApp();
+    const createRes = await app.request("/api/assistant/employees", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer admin-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Source checks",
+        handle: "source-checks",
+        systemPrompt: "Read the attached documentation.",
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const { data: employee } = await createRes.json<{ data: { id: string } }>();
+
+    const uploadRes = await app.request(
+      `/api/assistant/employees/${employee.id}/files`,
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer admin-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          name: "blank.txt",
+          contentType: "text/plain",
+          content: " \n\t ",
+        }),
+      },
+    );
+
+    expect(uploadRes.status).toBe(201);
+    const { data: file } = await uploadRes.json<{
+      data: { id: string; ragStatus: string };
+    }>();
+    expect(file.ragStatus).toBe("failed");
+    expect(
+      await new VirtualEmployeesRepository(env.DB).getFile(file.id),
+    ).toMatchObject({ employeeId: employee.id, ragStatus: "failed" });
+  });
 });

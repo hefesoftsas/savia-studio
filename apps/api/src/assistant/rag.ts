@@ -9,35 +9,7 @@ export type DocumentChunk = {
 
 export type RagEnvironment = {
   DB: D1Database;
-  DOCUMENTS?: R2Bucket;
-  AI?: {
-    run(
-      model: string,
-      input: { text: string[] | string },
-    ): Promise<{ data: number[][] | number[] }>;
-  };
   VECTORIZE?: {
-    insert(
-      vectors: Array<{
-        id: string;
-        values: number[];
-        metadata?: Record<string, unknown>;
-      }>,
-    ): Promise<unknown>;
-    query(
-      vector: number[],
-      options?: {
-        topK?: number;
-        filter?: Record<string, unknown>;
-        returnMetadata?: "all" | "indexed" | "none";
-      },
-    ): Promise<{
-      matches: Array<{
-        id: string;
-        score: number;
-        metadata?: Record<string, unknown>;
-      }>;
-    }>;
     deleteByIds(ids: string[]): Promise<unknown>;
   };
 };
@@ -161,14 +133,12 @@ export function extractTextFromFile(
 }
 
 /**
- * Index a document into Cloudflare RAG (Workers AI Embeddings + Vectorize)
- * and persist chunks in D1 for local fallback & provenance.
+ * Saves document chunks for keyword retrieval.
  */
 export async function indexDocument(
   env: RagEnvironment,
   employeeId: string,
   fileId: string,
-  filename: string,
   text: string,
 ): Promise<{ chunksCount: number }> {
   const chunks = chunkText(text);
@@ -185,7 +155,6 @@ export async function indexDocument(
     text: chunk,
   }));
 
-  // 1. Persist to D1 chunks table (guarantees local testing & backup)
   for (const chunk of chunkRecords) {
     await env.DB.prepare(
       `INSERT INTO assistant_virtual_employee_chunks (id, employee_id, file_id, chunk_index, text, vector_id, created_at)
@@ -203,39 +172,11 @@ export async function indexDocument(
       .run();
   }
 
-  // 2. If Cloudflare Workers AI and Vectorize are bound, generate vectors and insert
-  if (env.AI && env.VECTORIZE) {
-    try {
-      const embeddingsResponse = await env.AI.run(CLOUDFLARE_EMBEDDING_MODEL, {
-        text: chunks,
-      });
-
-      const vectors = (embeddingsResponse.data as number[][]).map((vec, i) => ({
-        id: chunkRecords[i].id,
-        values: vec,
-        metadata: {
-          employee_id: employeeId,
-          file_id: fileId,
-          filename,
-          chunk_index: i,
-          text: chunks[i],
-        },
-      }));
-
-      await env.VECTORIZE.insert(vectors);
-    } catch (error) {
-      console.warn(
-        "[Cloudflare RAG] Vector indexing failed, falling back to D1 storage:",
-        error,
-      );
-    }
-  }
-
   return { chunksCount: chunks.length };
 }
 
 /**
- * Retrieves the most relevant context chunks for a query using Cloudflare RAG or local fallback.
+ * Ranks chunks from fully indexed employee files by keyword matches.
  */
 export async function retrieveRelevantChunks(
   env: RagEnvironment,
@@ -246,43 +187,13 @@ export async function retrieveRelevantChunks(
   const trimmedQuery = query.trim();
   if (!trimmedQuery) return [];
 
-  // 1. Try Cloudflare Vectorize + Workers AI if available
-  if (env.AI && env.VECTORIZE) {
-    try {
-      const queryEmbResp = await env.AI.run(CLOUDFLARE_EMBEDDING_MODEL, {
-        text: [trimmedQuery],
-      });
-      const queryVector = Array.isArray(queryEmbResp.data[0])
-        ? (queryEmbResp.data[0] as number[])
-        : (queryEmbResp.data as unknown as number[]);
-
-      const searchResult = await env.VECTORIZE.query(queryVector, {
-        topK,
-        filter: { employee_id: employeeId },
-        returnMetadata: "all",
-      });
-
-      if (searchResult.matches && searchResult.matches.length > 0) {
-        return searchResult.matches.map((match) => ({
-          id: match.id,
-          employeeId,
-          fileId: (match.metadata?.file_id as string) ?? "",
-          chunkIndex: (match.metadata?.chunk_index as number) ?? 0,
-          text: (match.metadata?.text as string) ?? "",
-          score: match.score,
-        }));
-      }
-    } catch (error) {
-      console.warn(
-        "[Cloudflare RAG] Vector search failed, using D1 fallback:",
-        error,
-      );
-    }
-  }
-
-  // 2. Local Fallback: Keyword and phrase matching from D1 chunks
   const rows = await env.DB.prepare(
-    'SELECT id, employee_id AS "employeeId", file_id AS "fileId", chunk_index AS "chunkIndex", text\n     FROM assistant_virtual_employee_chunks\n     WHERE employee_id = ?',
+    `SELECT c.id, c.employee_id AS "employeeId", c.file_id AS "fileId",
+            c.chunk_index AS "chunkIndex", c.text
+       FROM assistant_virtual_employee_chunks c
+       JOIN assistant_virtual_employee_files f
+         ON f.id = c.file_id AND f.employee_id = c.employee_id
+      WHERE c.employee_id = ? AND f.rag_status = 'indexed'`,
   )
     .bind(employeeId)
     .all<DocumentChunk>();

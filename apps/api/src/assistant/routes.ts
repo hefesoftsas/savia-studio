@@ -908,7 +908,6 @@ export function registerAssistantRoutes(
     // Clean up RAG vectors for all files of this employee
     const ragEnv = dependencies.ragEnv ?? {
       DB: dependencies.db,
-      DOCUMENTS: dependencies.documents,
     };
     if (existing.files) {
       for (const file of existing.files) {
@@ -925,7 +924,7 @@ export function registerAssistantRoutes(
     return context.json({ data: { success: true } });
   });
 
-  // --- Virtual Employee Files & Cloudflare RAG ---
+  // --- Virtual Employee Files ---
 
   app.post("/api/assistant/employees/:id/files", async (context) => {
     if (!dependencies?.db) return unavailableResponse();
@@ -1022,23 +1021,27 @@ export function registerAssistantRoutes(
       contentType: fileType,
       sizeBytes: fileBuffer.byteLength,
       r2Key,
-      ragStatus: "indexed",
+      ragStatus: "pending",
     });
 
-    // 4. Index in Cloudflare RAG (Workers AI Embeddings + Vectorize, with D1 chunk persistence)
     const ragEnv = dependencies.ragEnv ?? {
       DB: dependencies.db,
-      DOCUMENTS: dependencies.documents,
     };
+    let ragStatus: "indexed" | "failed" = "failed";
     try {
-      await indexDocument(ragEnv, employeeId, fileId, filename, text);
+      const { chunksCount } = await indexDocument(
+        ragEnv,
+        employeeId,
+        fileId,
+        text,
+      );
+      if (chunksCount > 0) ragStatus = "indexed";
     } catch (error) {
-      console.warn("[Cloudflare RAG] Error indexing file:", error);
-      await repo.updateFileStatus(fileId, "failed");
-      fileRecord.ragStatus = "failed";
+      console.warn("[Assistant RAG] Error indexing file:", error);
     }
+    await repo.updateFileStatus(fileId, ragStatus);
 
-    return context.json({ data: fileRecord }, 201);
+    return context.json({ data: { ...fileRecord, ragStatus } }, 201);
   });
 
   app.delete("/api/assistant/employees/:id/files/:fileId", async (context) => {
@@ -1076,7 +1079,6 @@ export function registerAssistantRoutes(
 
     const ragEnv = dependencies.ragEnv ?? {
       DB: dependencies.db,
-      DOCUMENTS: dependencies.documents,
     };
     await deleteFileVectors(ragEnv, employeeId, fileId);
 
