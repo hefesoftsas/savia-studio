@@ -574,6 +574,21 @@ test("self-hosted smoke scripts publish no Preview runtime unless hosted code al
   }
 });
 
+test("the Self-hosted hook worker does not publish the Cloudflare Preview runtime", () => {
+  const dockerChanges = [
+    "apps/self-hosted/src/hook-worker.ts",
+    "apps/self-hosted/test/hooks.test.ts",
+    "docs/guides/self-hosted-docker.md",
+  ];
+  assert.equal(releaseRuntimeChanged(dockerChanges), false);
+  for (const runtimePath of [
+    "apps/hook-executor/src/executor.ts",
+    "apps/savia-request/src/server/hooks.ts",
+  ]) {
+    assert.equal(releaseRuntimeChanged([...dockerChanges, runtimePath]), true);
+  }
+});
+
 test("VS Code validation changes skip Preview while extension source updates still publish", () => {
   const workflowPath = ".github/workflows/build-vscode-extension.yml";
   assert.equal(releaseRuntimeChanged([workflowPath]), false);

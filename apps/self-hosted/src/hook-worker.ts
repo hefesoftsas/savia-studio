@@ -14,8 +14,14 @@ try {
   runtime.setInterruptHandler(() => Date.now() >= deadline);
   const context = runtime.newContext();
   try {
-    const source = `(async()=>{const data=JSON.parse(${JSON.stringify(JSON.stringify(payload))});${hookExecutionSource(code)}})()`;
-    const evaluated = context.evalCode(source, "hook.js");
+    // Match the Cloudflare executor by passing JSON as a guest string.
+    context.newString(JSON.stringify(payload)).consume((input) => {
+      context.setProp(context.global, "__hookInput", input);
+    });
+    const evaluated = context.evalCode(
+      `(async()=>{const data=JSON.parse(globalThis.__hookInput);delete globalThis.__hookInput;${hookExecutionSource(code)}})()`,
+      "hook.js",
+    );
     if (evaluated.error) {
       evaluated.error.dispose();
       throw new Error("Hook rejected");

@@ -38,6 +38,10 @@ The default ports bind to localhost. A different configuration file can be selec
 | MCP assistant tools                   | Private loopback MCP with delegated user authorization                                     |
 | Frontend and Office                   | Built static assets, same local-first collection replica and Office WASM runtime           |
 
+Request hooks receive serialized input as data inside the QuickJS worker. This
+avoids the additional escaping and heap usage of inserting the input into the
+script.
+
 This release supports **one Savia application process on one host**. Do not scale the app replicas or share its SQLite volume over NFS. WebSocket tickets/connections and rate-limit windows are process-local; a restart closes connections, and clients reconnect. Scheduled durable work and data remain in SQLite. This is not a high-availability deployment.
 
 ## Public domains and TLS

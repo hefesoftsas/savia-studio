@@ -19,6 +19,26 @@ describe("isolated hooks", () => {
       variables: { answer: "42" },
     });
   });
+  it("passes a large escaped request body to the hook within the configured heap", async () => {
+    const note = '<note label="Example">C:\\Example\\Inbox\n</note>\n';
+    const body = JSON.stringify({ notes: note.repeat(9_500) });
+    const response = JSON.stringify({ note });
+    const limited = createNodeHookExecutor({
+      memoryBytes: 704 * 1024,
+      cpuMs: 500,
+      timeoutMs: 3_000,
+    });
+
+    await expect(
+      limited.execute(
+        'bru.setVar("length", req.getBody().length); bru.setVar("note", bru.getEnvVar("note")); req.setBody(res.getBody());',
+        { body, values: { note }, response },
+      ),
+    ).resolves.toEqual({
+      body: response,
+      variables: { length: String(body.length), note },
+    });
+  });
   it("uses the private hook service on Cloudflare", async () => {
     const fetch = vi.fn(async () =>
       Response.json({ body: "done", variables: { x: "1" } }),

@@ -393,6 +393,9 @@ For verified compatible code changes, the existing Preview-only code lane skips
 maintenance, backups, migrations and secret updates. Schema/configuration or
 unknown changes retain the full recovery path. Known orchestration-only and
 asset-only changes do not republish unchanged Workers.
+With a verified baseline, Preview also skips runtime publication for changes
+limited to the Self-hosted Docker hook worker and its tests. Changes to the
+hosted executor or shared Request hook source still select runtime publication.
 
 The Preview store job opts into preserving newer optional catalog versions. It
 preflights all workspace catalogs before uploading: a newer optional version is
