@@ -42,6 +42,10 @@ Request hooks receive serialized input as data inside the QuickJS worker. This
 avoids the additional escaping and heap usage of inserting the input into the
 script.
 
+Static assets honor explicit preferences for Brotli, gzip, and uncompressed
+responses. Self-hosted returns HTTP 406 when the client excludes every available
+encoding. [HTTP content negotiation](https://www.rfc-editor.org/rfc/rfc9110.html#field.accept-encoding)
+
 This release supports **one Savia application process on one host**. Do not scale the app replicas or share its SQLite volume over NFS. WebSocket tickets/connections and rate-limit windows are process-local; a restart closes connections, and clients reconnect. Scheduled durable work and data remain in SQLite. This is not a high-availability deployment.
 
 ## Public domains and TLS

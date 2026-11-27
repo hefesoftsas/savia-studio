@@ -126,9 +126,13 @@ export async function startHttpServer(options: Options) {
         const quality = parameters.find((value) =>
           value.trim().startsWith("q="),
         );
-        return [name, quality ? Number(quality.trim().slice(2)) : 1] as const;
+        return [
+          name.trim(),
+          quality ? Number(quality.trim().slice(2)) : 1,
+        ] as const;
       }),
     );
+    const identityQuality = accepted.get("identity");
     if (
       [".js", ".mjs", ".css", ".json", ".svg", ".html", ".wasm"].includes(
         extname(path),
@@ -139,7 +143,9 @@ export async function startHttpServer(options: Options) {
           name,
           quality: accepted.get(name) ?? accepted.get("*") ?? 0,
         }))
-        .filter((item) => item.quality > 0)
+        .filter(
+          (item) => item.quality > 0 && item.quality >= (identityQuality || 0),
+        )
         .sort((a, b) => b.quality - a.quality);
       for (const preference of preferences) {
         const compressed = await file(
@@ -151,6 +157,12 @@ export async function startHttpServer(options: Options) {
           break;
         }
       }
+    }
+    if (!encoding && (identityQuality ?? accepted.get("*")) === 0) {
+      return new Response(null, {
+        status: 406,
+        headers: { Vary: "Accept-Encoding", "Cache-Control": "no-store" },
+      });
     }
     const cache =
       extname(path) === ".html" ||

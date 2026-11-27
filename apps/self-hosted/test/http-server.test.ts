@@ -233,8 +233,11 @@ it("negotiates precompressed assets, honors q=0, and varies its response", async
   expect(br.headers["vary"]).toBe("Accept-Encoding");
   expect(brotliDecompressSync(br.raw)).toEqual(source);
   expect(
-    (await get("/assets/app-abcdef12.js", { "accept-encoding": "br;q=0,gzip" }))
-      .headers["content-encoding"],
+    (
+      await get("/assets/app-abcdef12.js", {
+        "accept-encoding": "br;q=0,gzip,identity;q=0",
+      })
+    ).headers["content-encoding"],
   ).toBe("gzip");
   expect(
     (
@@ -243,6 +246,28 @@ it("negotiates precompressed assets, honors q=0, and varies its response", async
       })
     ).headers["content-encoding"],
   ).toBeUndefined();
+
+  const identity = await get("/assets/app-abcdef12.js", {
+    "accept-encoding": "br;q=0.4, gzip;q=0.7, identity ; q=0.8",
+  });
+  expect(identity.status).toBe(200);
+  expect(identity.headers["content-encoding"]).toBeUndefined();
+  expect(identity.raw).toEqual(source);
+  expect(identity.headers["vary"]).toBe("Accept-Encoding");
+});
+
+it("rejects unavailable encodings when the client excludes uncompressed assets", async () => {
+  const { get } = await fixture();
+  const path = "/assets/app-abcdef12.js";
+  for (const encoding of ["gzip, identity;q=0", "*;q=0"]) {
+    const result = await get(path, { "accept-encoding": encoding });
+    expect(result.status, encoding).toBe(406);
+    expect(result.headers["vary"]).toBe("Accept-Encoding");
+    expect(result.raw).toHaveLength(0);
+  }
+  expect(
+    (await get(path, { "accept-encoding": "*;q=0, identity" })).status,
+  ).toBe(200);
 });
 
 it("trusts only a valid final client IP from an explicitly allowed proxy socket", async () => {
