@@ -81,6 +81,38 @@ function compatible(
   }
 }
 
+/** Checks whether a collection meets the extension's requirements and identifies optional fields to add. */
+export function extensionObjectProvisioningState(
+  configValue: unknown,
+  requirement: ExtensionObjectRequirement,
+) {
+  let parsed = configValue;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return { compatible: false, optionalFieldAdditions: [] as string[] };
+    }
+  }
+  const isCompatible = fieldsAreCompatible(parsed, requirement);
+  if (!isCompatible || !parsed || typeof parsed !== "object")
+    return { compatible: false, optionalFieldAdditions: [] as string[] };
+  const config = parsed as { fields?: Record<string, unknown> };
+  if (!config.fields || typeof config.fields !== "object")
+    return { compatible: false, optionalFieldAdditions: [] as string[] };
+  const optionalFieldAdditions = Object.entries(
+    requirement.object.config.fields,
+  )
+    .filter(
+      ([name, field]) =>
+        !Object.hasOwn(config.fields!, name) &&
+        !field.required &&
+        !field.config?.requiredWhen,
+    )
+    .map(([name]) => name);
+  return { compatible: true, optionalFieldAdditions };
+}
+
 export async function prepareExtensionObjectProvisioning(
   db: D1Database,
   tenant: string,
@@ -111,7 +143,11 @@ async function prepareObjectProvisioning(
 ): Promise<PreparedProvisioning> {
   const existing = await storedObject(db, tenant, requirement.object.name);
   if (existing) {
-    if (!compatible(existing, requirement))
+    const state = extensionObjectProvisioningState(
+      existing.config,
+      requirement,
+    );
+    if (!state.compatible)
       return fail(
         `La colección ${requirement.object.name} no cumple el contrato de la extensión.`,
         409,
@@ -129,11 +165,8 @@ async function prepareObjectProvisioning(
       ],
     );
     const config = JSON.parse(existing.config);
-    const additions = Object.entries(requirement.object.config.fields).filter(
-      ([name, field]) =>
-        !Object.hasOwn(config.fields, name) &&
-        !field.required &&
-        !field.config?.requiredWhen,
+    const additions = state.optionalFieldAdditions.map(
+      (name) => [name, requirement.object.config.fields[name]] as const,
     );
     if (!additions.length)
       return { starts: [unchanged.start], writes: [], ends: [unchanged.end] };
