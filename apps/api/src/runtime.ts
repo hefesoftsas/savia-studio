@@ -5,7 +5,6 @@ import { cleanupWhatsappMedia } from "./whatsapp/media-input";
 import { CompanionSessions } from "./companion/sessions";
 import { CompanionSessionJobs } from "./companion/session-jobs";
 import { CompanionService, CompanionError } from "./companion/service";
-import type { PagesSearchBindings } from "./pages/cloudflare-search";
 import { runJiraPrivacyMaintenance } from "./personal-integrations/jira-privacy-runtime";
 import { runtimePluginRegistryForTenant } from "./studio/plugin-registry-config";
 import { createCollectionGateway } from "./studio/collection-gateway";
@@ -237,7 +236,6 @@ function whatsappChannelOptions(
         undefined,
         undefined,
         undefined,
-        undefined,
         {
           service: environment.SAVIA_FLOWS,
           bridgeSecret: environment.SAVIA_FLOWS_BRIDGE_SECRET,
@@ -413,7 +411,6 @@ export type RuntimeOverrides = {
   publicForms?: import("./public-forms/routes").PublicFormsOptions;
   signing?: R2SigningCredentials;
   collectionGatewayFactory?: typeof import("./studio/collection-gateway").createCollectionGateway;
-  pagesSearchSchedule?: PagesSearchBindings["schedule"];
 };
 export function createApiRuntime(
   environment: RuntimeEnvironment,
@@ -479,8 +476,6 @@ const runtime = {
       environment.SAVIA_INTERNAL_BRIDGE_KEY,
       environment.SAVIA_MCP_SHARED_SECRET,
     );
-    const pagesSearchSchedule =
-      overrides.pagesSearchSchedule ?? context?.waitUntil.bind(context);
     const response = await createApp(
       environment.DB,
       environment.DOCUMENTS,
@@ -551,16 +546,6 @@ const runtime = {
         storage: environment.DOCUMENTS,
         sttModel: environment.COMPANION_STT_MODEL,
         configuration: assistant.configuration,
-      },
-      {
-        AI: (environment as RuntimeEnvironment & PagesSearchBindings).AI,
-        PAGES_SEARCH_RATE_LIMITER: (
-          environment as RuntimeEnvironment & PagesSearchBindings
-        ).PAGES_SEARCH_RATE_LIMITER,
-        PAGES_VECTORIZE: (
-          environment as RuntimeEnvironment & PagesSearchBindings
-        ).PAGES_VECTORIZE,
-        ...(pagesSearchSchedule ? { schedule: pagesSearchSchedule } : {}),
       },
       whatsappRoutesFromEnvironment(environment),
       {

@@ -30,7 +30,7 @@ database migration.
 Safari and Firefox do not offer this installed-app share target. Open **Work →
 Pages → Save link** to enter a link manually there.
 
-**Work → Pages** expands directly in the main sidebar. It contains your page and folder tree; there is no second navigation panel. Select Pages itself to search the workspace, create a root page or folder, or browse its contents. The document breadcrumb returns to a parent or the workspace. Create a page, edit its title and body, and wait for **Saved** before navigating away. One search box offers up to nine accessible title and content matches as you type. When tenant semantic search is enabled and available, semantic matches are added after text matches, with duplicates removed. Suggestions show a short excerpt, highlight the literal search phrase, and include the last update date. Use the arrow keys and Enter to open a suggestion, or Escape to close the list. Searching does not filter the root folder listing. Pages are private until their owner grants member access or explicitly creates a public link. Subpages inherit the root's reader/editor permissions for member access. Administrators do not automatically receive private document access.
+**Work → Pages** expands directly in the main sidebar. It contains your page and folder tree; there is no second navigation panel. Select Pages itself to search the workspace, create a root page or folder, or browse its contents. The document breadcrumb returns to a parent or the workspace. Create a page, edit its title and body, and wait for **Saved** before navigating away. One search box offers up to nine accessible title and content matches as you type. Suggestions show a short excerpt, highlight the literal search phrase, and include the last update date. Use the arrow keys and Enter to open a suggestion, or Escape to close the list. Searching does not filter the root folder listing. Pages are private until their owner grants member access or explicitly creates a public link. Subpages inherit the root's reader/editor permissions for member access. Administrators do not automatically receive private document access.
 
 ## Folders and navigation
 
@@ -176,7 +176,7 @@ cache. Authorization failures evict cached reads. Page reads time out after 15
 seconds (including authentication lookup), allowing the existing Reload action
 to recover instead of displaying loading indefinitely.
 
-### Cloudflare semantic search
+### Semantic search availability
 
 Local FlexSearch search has been removed. Existing derived browser indexes are
 removed on a best-effort basis when Pages opens; page content remains canonical
@@ -190,21 +190,12 @@ Ordinary members cannot change either setting. These controls do not provide a
 search backend or enable indexing and queries while semantic search is
 unavailable.
 
-Semantic Pages search is currently unavailable in managed Cloudflare and
-self-hosted deployments. The runtime does not attach native Cloudflare inference,
-and no supported OpenRouter-backed embedding path is implemented yet. The tenant
-grant and activation controls remain visible, but enabling them does not make
-semantic indexing or queries available. Any future implementation must route
-inference through the configured OpenRouter provider and preserve its price cap.
-Text search remains available. Although the semantic-search design enforces
-current page permissions and indexed-version checks, those protections do not
-provide an inference path. Worker rendering does not invent a preview Vectorize
-index; an explicitly configured index may be bound only when its identity is
-present in the reviewed environment manifest. That binding provides storage
-only and does not enable inference or semantic search. Do not add native Workers
-AI bindings to enable this feature. A future implementation must route embeddings
-through OpenRouter under the configured model and price cap before tenant
-activation can make semantic search available.
+Semantic Pages search is currently unavailable in managed and self-hosted
+deployments. The search box continues to match titles and content through the
+standard Pages API. A workspace with the capability activated receives a
+service-unavailable response when it requests semantic indexing or queries.
+Semantic search requires an OpenRouter embedding model within the configured
+price cap. Legacy inference bindings cannot enable semantic search.
 
 The new editor dependencies (`platejs`, `@platejs/basic-nodes`, `@platejs/link`) use MIT licenses. Their attribution notice ships at `/licenses/plate.txt`. Existing Nango is an external service accepted for this integration; this implementation does not claim that Nango itself is MIT/Apache licensed.
 

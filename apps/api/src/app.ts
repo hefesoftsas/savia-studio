@@ -6,7 +6,6 @@ import { PersonalApiKeys } from "./auth/personal-api-keys";
 import { registerPagesSearchSettingsRoutes } from "./routes/pages-search-settings";
 import { registerBookingRoutes } from "./bookings/routes";
 import { registerPagesSearchRoutes } from "./routes/pages-search";
-import type { PagesSearchBindings } from "./pages/cloudflare-search";
 import { PersonalIntegrationOperations } from "./personal-integrations/operations";
 import { createPersonalIntegrationRepository } from "./personal-integrations/repository";
 import { createPersonalIntegrationProviderRegistry } from "./personal-integrations/providers";
@@ -160,7 +159,6 @@ export function createApp(
   collectionGatewayFactory: typeof createCollectionGateway = createCollectionGateway,
   identityBridgeKey?: string,
   companion?: CompanionOptions,
-  pagesSearch?: PagesSearchBindings,
   whatsapp?: WhatsappRouteDependencies,
   whatsappWebhook?: WhatsappWebhookDependencies,
   saviaFlows?: SaviaFlowsOptions,
@@ -352,8 +350,8 @@ export function createApp(
     secret: personalIntegrations?.calendarSecret,
   });
   registerPagesSearchSettingsRoutes(app, db);
-  registerPagesSearchRoutes(app, db, pagesSearch);
-  registerPagesRoutes(app, db, documents, pagesSearch);
+  registerPagesSearchRoutes(app, db);
+  registerPagesRoutes(app, db, documents);
   registerOfficeDocumentRoutes(app, db, documents);
   registerConnectedOfficeDocumentRoutes(
     app,

@@ -7,6 +7,7 @@ import {
   openRouterModelCatalog,
 } from "../src/assistant/configuration";
 import type { AssistantService } from "../src/assistant/contracts";
+import { PendingActionRepository } from "../src/assistant/pending-actions";
 import { createOAuthResourceAuthenticator } from "../src/auth/oauth-resource";
 import {
   agencyAdministratorAuthenticator,
@@ -443,6 +444,24 @@ describe("assistant routes", () => {
       actionId: "approval-1",
       principalId: "test-platform-admin",
     });
+  });
+
+  it("returns an owned action status with no-store caching", async () => {
+    await new PendingActionRepository(env.DB).issue({
+      id: "assistant-action-status-no-store",
+      principalId: "test-platform-admin",
+      domain: "agency-network",
+      command: "create-agency-profile",
+      input: { organization: { displayName: "Savia Centro" } },
+    });
+    const response = await createAssistantApp().request(
+      "http://api.savia.test/api/assistant/actions/assistant-action-status-no-store",
+      { headers: { authorization: "Bearer current-user-token" } },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({ state: "pending" });
   });
 
   it("returns a configuration error instead of exposing an unconfigured assistant", async () => {

@@ -21,6 +21,12 @@ organization saved with the proposal. This scope stays fixed between preparation
 and confirmation, and the API checks access again when executing the action.
 Earlier proposals without a saved organization require a new proposal.
 
+The confirmation card restores the proposal's saved status when a conversation
+opens. If a confirmation or cancellation response is interrupted, the card
+checks the saved status before offering another attempt. **Check status** reads
+the result of the original request, including a result saved after the
+connection was interrupted.
+
 The employee editor has two explicit modes. **Text only** processes the supplied
 text and employee instructions without workspace collections, documents, MCP
 tools, employee knowledge-file retrieval, or workspace business guidance. The

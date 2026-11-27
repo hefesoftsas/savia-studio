@@ -27,7 +27,7 @@ export type TestAppOptions = {
   assistantConfiguration?: Param<12>;
   assistantModelCatalog?: Param<13>;
   saviaRequestService?: Param<14>;
-  saviaFlows?: Param<29>;
+  saviaFlows?: Param<28>;
   personalIntegrations?: Param<15>;
   studioIntegrationKey?: Param<16>;
   externalCollections?: Param<17>;
@@ -39,8 +39,7 @@ export type TestAppOptions = {
   collectionGatewayFactory?: Param<23>;
   identityBridgeKey?: Param<24>;
   companion?: Param<25>;
-  pagesSearch?: Param<26>;
-  realtimeOutboxRecoveryEnabled?: Param<30>;
+  realtimeOutboxRecoveryEnabled?: Param<29>;
 };
 
 /**
@@ -77,7 +76,6 @@ export function createTestApp(options: TestAppOptions = {}) {
     options.collectionGatewayFactory,
     options.identityBridgeKey,
     options.companion,
-    options.pagesSearch,
     undefined,
     undefined,
     options.saviaFlows,

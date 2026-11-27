@@ -778,7 +778,7 @@ export class SaviaAssistantService implements AssistantService {
       });
       return { state: "failed" };
     } finally {
-      await mcpClient?.close();
+      await mcpClient?.close().catch(() => undefined);
     }
   }
 

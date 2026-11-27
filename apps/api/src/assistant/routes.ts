@@ -683,9 +683,11 @@ export function registerAssistantRoutes(
       context.req.param("id"),
       actor.principal.id,
     );
-    return status
+    const response = status
       ? context.json(status)
       : context.json({ state: "unavailable" }, 404);
+    response.headers.set("Cache-Control", "no-store");
+    return response;
   });
 
   app.post("/api/assistant/actions/:id/confirm", async (context) => {

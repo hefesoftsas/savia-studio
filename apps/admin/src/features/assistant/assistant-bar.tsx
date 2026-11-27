@@ -724,10 +724,15 @@ type ActionState =
   | "idle"
   | "confirming"
   | "cancelling"
+  | "checking"
   | "confirmed"
   | "cancelled"
   | "error"
   | "unavailable";
+
+type AssistantActionStatus = { state?: string; result?: unknown };
+
+const assistantActionStatusIntervalMs = 3_000;
 
 function assistantApiUrl(apiUrl: string): string {
   return new URL("/api/assistant/chat", apiUrl).toString();
@@ -784,76 +789,154 @@ export function AssistantActionCard({ action }: { action: PreparedAction }) {
   const isQuote =
     action.domain === "service" && action.command === "quote-auto";
   const [error, setError] = useState<string | null>(null);
+  const [statusCheck, setStatusCheck] = useState(0);
+  const statusRead = useRef<AbortController | null>(null);
+  const submitting = useRef(false);
   const apiUrl = import.meta.env.VITE_SAVIA_API_URL ?? window.location.origin;
   const busy = state === "confirming" || state === "cancelling";
+  const resolved =
+    state === "confirmed" || state === "cancelled" || state === "unavailable";
+  const checking = state === "checking";
+  const canDecide = !resolved && !checking;
+
+  const applyOutcome = useCallback(
+    (status: AssistantActionStatus | null | undefined) => {
+      switch (status?.state) {
+        case "completed":
+          if (isQuote) setQuoteResult(parseQuoteResult(status.result));
+          setState("confirmed");
+          setError(null);
+          return true;
+        case "cancelled":
+          setState("cancelled");
+          setError(null);
+          return true;
+        case "unavailable":
+          setState("unavailable");
+          setError("Esta propuesta ya no está disponible.");
+          return true;
+        case "expired":
+          setState("unavailable");
+          setError("La confirmación venció. Pide una nueva propuesta.");
+          return true;
+        case "failed":
+          setState("unavailable");
+          setError(
+            isQuote
+              ? "La cotización no pudo completarse. Revisa el historial del cotizador antes de solicitarla nuevamente."
+              : "El cambio no pudo completarse. Revisa el registro antes de pedir otra propuesta.",
+          );
+          return true;
+        default:
+          return false;
+      }
+    },
+    [isQuote],
+  );
 
   useEffect(() => {
-    if (
-      !isQuote ||
-      state === "confirmed" ||
-      state === "cancelled" ||
-      state === "unavailable"
-    )
-      return;
-    let active = true;
+    if (busy || resolved) return;
+    const controller = new AbortController();
+    statusRead.current = controller;
+    const { signal } = controller;
     let restoring = false;
+    let retryTimer: number | undefined;
     const restore = async () => {
-      if (restoring) return;
+      if (restoring || signal.aborted || document.visibilityState === "hidden")
+        return;
+      window.clearTimeout(retryTimer);
       restoring = true;
       try {
         const token = await authSession.getAccessToken();
-        if (!token) return;
+        if (signal.aborted) return;
+        if (!token) {
+          if (checking)
+            setError(
+              "Vuelve a iniciar sesión para consultar el estado de la acción.",
+            );
+          return;
+        }
         const response = await fetch(
           new URL(
             `/api/assistant/actions/${encodeURIComponent(action.actionId)}`,
             apiUrl,
           ),
           {
+            cache: "no-store",
             headers: { Authorization: `Bearer ${token}` },
             credentials: "include",
+            signal,
           },
         );
-        if (!response.ok || !active) return;
-        const saved = await response.json();
-        if (!active) return;
-        if (saved.state === "completed") {
-          setQuoteResult(parseQuoteResult(saved.result));
-          setState("confirmed");
-        } else if (saved.state === "executing") setState("confirming");
-        else if (saved.state === "cancelled") setState("cancelled");
-        else if (saved.state === "expired" || saved.state === "failed") {
-          setState("unavailable");
-          setError(
-            saved.state === "expired"
-              ? "La confirmación venció sin enviar la solicitud. Pide a Alice que la prepare nuevamente."
-              : "La cotización no pudo completarse. Revisa el historial del cotizador antes de solicitarla nuevamente: algunos proveedores pudieron recibir los datos.",
-          );
+        if (signal.aborted) return;
+        if (response.status === 404) {
+          applyOutcome({ state: "unavailable" });
+          return;
+        }
+        if (!response.ok) throw new Error("Action status unavailable");
+        const saved: AssistantActionStatus | null = await response.json();
+        if (signal.aborted || applyOutcome(saved)) return;
+        if (saved?.state === "executing") {
+          setError(null);
+          if (checking) {
+            retryTimer = window.setTimeout(
+              () => void restore(),
+              assistantActionStatusIntervalMs,
+            );
+          } else setState("checking");
+        } else if (saved?.state === "pending") {
+          if (checking) {
+            setState("idle");
+            setError(
+              "La propuesta sigue pendiente. Puedes volver a intentarlo.",
+            );
+          }
+        } else {
+          throw new Error("Invalid action status");
         }
       } catch {
-        /* Confirmation remains protected by the server's consume-once guard. */
+        if (!signal.aborted && checking)
+          setError("No pudimos consultar el estado de la acción.");
       } finally {
         restoring = false;
       }
     };
     const restoreVisible = () => {
-      if (document.visibilityState !== "hidden") void restore();
+      void restore();
     };
     void restore();
-    window.addEventListener("focus", restoreVisible);
-    window.addEventListener("online", restoreVisible);
+    if (checking || isQuote) {
+      window.addEventListener("focus", restoreVisible);
+      window.addEventListener("online", restoreVisible);
+    }
     document.addEventListener("visibilitychange", restoreVisible);
     return () => {
-      active = false;
+      controller.abort();
+      window.clearTimeout(retryTimer);
       window.removeEventListener("focus", restoreVisible);
       window.removeEventListener("online", restoreVisible);
       document.removeEventListener("visibilitychange", restoreVisible);
     };
-  }, [isQuote, action.actionId, apiUrl, authSession, state]);
+  }, [
+    action.actionId,
+    apiUrl,
+    applyOutcome,
+    authSession,
+    busy,
+    checking,
+    isQuote,
+    resolved,
+    statusCheck,
+  ]);
 
   const resolveAction = async (operation: "confirm" | "cancel") => {
+    if (submitting.current) return;
+    submitting.current = true;
+    statusRead.current?.abort();
     setState(operation === "confirm" ? "confirming" : "cancelling");
     setError(null);
 
+    let submitted = false;
     try {
       const accessToken = await authSession.getAccessToken();
       if (!accessToken) {
@@ -861,33 +944,28 @@ export function AssistantActionCard({ action }: { action: PreparedAction }) {
           "Tu sesión ya no está disponible. Vuelve a iniciar sesión.",
         );
       }
+      submitted = true;
       const response = await requestAssistantAction({
         apiUrl,
         actionId: action.actionId,
         operation,
         accessToken,
       });
-      const nextState = (response as { state?: unknown }).state;
-      const expectedState = operation === "confirm" ? "completed" : "cancelled";
-      if (nextState !== expectedState) {
-        throw new Error(
-          nextState === "unavailable"
-            ? "Esta acción ya no está disponible. Solicita una nueva propuesta."
-            : "El cambio no pudo completarse. Revisa los datos y solicita una nueva propuesta.",
-        );
+      if (!applyOutcome(response as AssistantActionStatus | null | undefined)) {
+        setState("checking");
       }
-      if (isQuote && operation === "confirm")
-        setQuoteResult(
-          parseQuoteResult((response as { result?: unknown }).result),
-        );
-      setState(operation === "confirm" ? "confirmed" : "cancelled");
     } catch (exception) {
-      setError(
-        exception instanceof Error
-          ? exception.message
-          : "No fue posible completar esta acción.",
-      );
-      setState("error");
+      if (submitted) setState("checking");
+      else {
+        setError(
+          exception instanceof Error
+            ? exception.message
+            : "No fue posible completar esta acción.",
+        );
+        setState("error");
+      }
+    } finally {
+      submitting.current = false;
     }
   };
 
@@ -905,7 +983,7 @@ export function AssistantActionCard({ action }: { action: PreparedAction }) {
   ).trim();
 
   let actionTitle = isQuote
-    ? "consultar los proveedores habilitados"
+    ? "Consultar los proveedores habilitados"
     : `${action.domain}.${action.command}`;
   if (isStudioAction && studioCollection) {
     const cmd = action.command.toLowerCase();
@@ -950,17 +1028,9 @@ export function AssistantActionCard({ action }: { action: PreparedAction }) {
         <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" />
         <div className="min-w-0 flex-1">
           <p className="font-semibold text-foreground">
-            {isQuote
-              ? "Cotización lista para enviar"
-              : "Cambio pendiente de confirmación"}
+            {isQuote ? "Solicitud de cotización" : "Solicitud de cambio"}
           </p>
-          <p className="mt-1 leading-5 text-muted-foreground">
-            {isQuote ? "La solicitud para " : "La actualización para "}
-            <span className="font-medium text-foreground">
-              {actionTitle}
-            </span>{" "}
-            solo se ejecutará si la confirmas.
-          </p>
+          <p className="mt-1 leading-5 text-muted-foreground">{actionTitle}</p>
           <dl className="mt-3 space-y-1 rounded-lg border bg-background/80 p-2.5 text-xs">
             {flattenedEntries.map(({ key: name, value }) => (
               <div
@@ -984,9 +1054,7 @@ export function AssistantActionCard({ action }: { action: PreparedAction }) {
       {state === "confirmed" ? (
         <p className="mt-3 flex items-center gap-2 font-medium text-primary">
           <Check className="size-4" />{" "}
-          {isQuote
-            ? "Consulta a proveedores completada."
-            : "Cambio ejecutado."}
+          {isQuote ? "Consulta a proveedores completada." : "Cambio ejecutado."}
         </p>
       ) : null}
       {quoteResult ? <AssistantQuoteResult result={quoteResult} /> : null}
@@ -995,11 +1063,32 @@ export function AssistantActionCard({ action }: { action: PreparedAction }) {
           <X className="size-4" /> Cambio cancelado.
         </p>
       ) : null}
-      {error ? <p className="mt-3 text-destructive">{error}</p> : null}
+      {error ? (
+        <p role="status" className="mt-3 text-destructive">
+          {error}
+        </p>
+      ) : null}
 
-      {state !== "confirmed" &&
-      state !== "cancelled" &&
-      state !== "unavailable" ? (
+      {checking ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {!error ? (
+            <p role="status" className="text-muted-foreground">
+              Verificando el estado de la acción…
+            </p>
+          ) : null}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setError(null);
+              setStatusCheck((attempt) => attempt + 1);
+            }}
+          >
+            Verificar estado
+          </Button>
+        </div>
+      ) : null}
+      {canDecide ? (
         <div className="mt-3 flex flex-wrap gap-2">
           <Button
             size="sm"
@@ -1012,7 +1101,7 @@ export function AssistantActionCard({ action }: { action: PreparedAction }) {
               <Check />
             )}
             {isQuote
-              ? busy
+              ? state === "confirming"
                 ? "Consultando proveedores…"
                 : "Confirmar y cotizar"
               : "Confirmar cambio"}
@@ -1028,7 +1117,7 @@ export function AssistantActionCard({ action }: { action: PreparedAction }) {
             ) : (
               <X />
             )}
-            Cancelar
+            {state === "cancelling" ? "Cancelando…" : "Cancelar"}
           </Button>
         </div>
       ) : null}
@@ -1120,7 +1209,7 @@ function AssistantToolCall({
     (toolName === "savia_prepare_command" ||
       toolName === "tool-savia_prepare_command")
   ) {
-    return <AssistantActionCard action={action} />;
+    return <AssistantActionCard key={action.actionId} action={action} />;
   }
   if (
     presentation &&
