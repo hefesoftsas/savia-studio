@@ -63,6 +63,22 @@ test("ignores documentation and image-only changes", () => {
   );
 });
 
+test("ignores the Admin shard timing data while keeping scans for changed code and unknown data", () => {
+  const timings = "scripts/admin-test-durations.json";
+  assert.deepEqual(
+    selectCodeqlLanguages([timings, "docs/guides/preview-release-lanes.md"]),
+    [],
+  );
+  assert.deepEqual(
+    selectCodeqlLanguages([timings, "src/app.ts", "crates/core/src/lib.rs"]),
+    ["javascript-typescript", "rust"],
+  );
+  assert.deepEqual(
+    selectCodeqlLanguages([timings, "scripts/other-durations.json"]),
+    allLanguages,
+  );
+});
+
 test("detects source files under docs and treats unknown docs files conservatively", () => {
   assert.deepEqual(
     selectCodeqlLanguages(["docs/examples/app.ts", "docs/examples/tool.py"]),
@@ -109,6 +125,10 @@ test("PR resolution paginates, includes renamed prior paths, and validates base 
       );
     return response([
       { filename: "new/renamed.md", previous_filename: "src/legacy.py" },
+      {
+        filename: "scripts/admin-test-durations.json",
+        previous_filename: "crates/legacy.rs",
+      },
       { filename: "docs/last.md" },
     ]);
   };
@@ -130,7 +150,7 @@ test("PR resolution paginates, includes renamed prior paths, and validates base 
   });
 
   assert.deepEqual(plan, {
-    languages: ["python"],
+    languages: ["python", "rust"],
     shouldScan: true,
   });
   const fileCalls = calls.filter(({ parsed }) =>

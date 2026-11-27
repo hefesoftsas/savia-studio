@@ -491,9 +491,11 @@ continue to select the full release path.
 It replaces GitHub's default setup: there is no automatic scan on a main push
 and no weekly scan. The selector uses all changed PR paths, including the old
 path of a renamed file, to select Actions, JavaScript/TypeScript, Python and Rust.
-Each selected language still analyzes the complete repository. Documentation
-and image changes alone skip analysis; unknown files and changes to the scanner
-controls select all languages. A newer run cancels the superseded run for that PR.
+Each selected language still analyzes the complete repository. Changes limited
+to documentation, images, and `scripts/admin-test-durations.json` skip analysis.
+The Admin timing data still runs through the regular test workflow. Unknown
+files and changes to scanner controls select all languages. A newer run cancels
+the superseded run for that PR.
 
 Selection runs trusted base-branch code and checks the PR revisions before and
 after reading the paginated file list. API errors, changed revisions and file
