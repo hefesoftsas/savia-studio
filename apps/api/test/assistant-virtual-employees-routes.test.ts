@@ -806,4 +806,86 @@ describe("Virtual Employees API Routes", () => {
       expect(await stored?.text()).toBe(content);
     },
   );
+
+  it.each([
+    { outcome: "insert rejected", commit: false, readable: true, status: 500 },
+    { outcome: "confirmation lost", commit: true, readable: true, status: 201 },
+    {
+      outcome: "database unavailable",
+      commit: true,
+      readable: false,
+      status: 500,
+    },
+  ])(
+    "handles $outcome without losing document consistency",
+    async (scenario) => {
+      const repo = new VirtualEmployeesRepository(env.DB);
+      const employee = await repo.create({
+        name: "Document registration",
+        handle: `registration-${crypto.randomUUID()}`,
+        systemPrompt: "Read workspace documents.",
+      });
+      const prepare = env.DB.prepare.bind(env.DB);
+      const fault = vi.spyOn(env.DB, "prepare").mockImplementation((sql) => {
+        if (
+          !scenario.readable &&
+          sql.includes("FROM assistant_virtual_employee_files WHERE id =")
+        ) {
+          throw new Error("File metadata unavailable");
+        }
+        const statement = prepare(sql);
+        if (!sql.includes("INSERT INTO assistant_virtual_employee_files")) {
+          return statement;
+        }
+        return {
+          bind: (...args: unknown[]) => ({
+            async run() {
+              if (scenario.commit) await statement.bind(...args).run();
+              throw new Error(
+                "File registration did not acknowledge the insert",
+              );
+            },
+          }),
+        } as D1PreparedStatement;
+      });
+
+      try {
+        const response = await createTestApp().request(
+          `/api/assistant/employees/${employee.id}/files`,
+          {
+            method: "POST",
+            headers: {
+              authorization: "Bearer admin-token",
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              name: "notes.txt",
+              content: "Workspace notes",
+            }),
+          },
+        );
+        expect(response.status).toBe(scenario.status);
+      } finally {
+        fault.mockRestore();
+      }
+
+      const files = await repo.listFiles(employee.id);
+      const { objects } = await env.DOCUMENTS.list({
+        prefix: `assistant/employees/${employee.id}/files/`,
+      });
+      expect(objects.map((object) => object.key)).toEqual(
+        files.map((file) => file.r2Key),
+      );
+      if (scenario.commit) {
+        expect(files).toHaveLength(1);
+        expect(files[0].ragStatus).toBe(
+          scenario.readable ? "indexed" : "pending",
+        );
+        const stored = await env.DOCUMENTS.get(files[0].r2Key);
+        expect(await stored?.text()).toBe("Workspace notes");
+      } else {
+        expect(files).toEqual([]);
+      }
+    },
+  );
 });

@@ -1021,27 +1021,38 @@ export function registerAssistantRoutes(
 
     const fileId = crypto.randomUUID();
     const r2Key = `assistant/employees/${employeeId}/files/${fileId}-${filename}`;
+    const text = extractTextFromFile(fileBuffer, fileType, filename);
+    const documents = dependencies.documents;
 
-    // 1. Upload to R2 if available
-    if (dependencies.documents) {
-      await dependencies.documents.put(r2Key, fileBuffer, {
+    if (documents) {
+      await documents.put(r2Key, fileBuffer, {
         httpMetadata: { contentType: fileType },
       });
     }
 
-    // 2. Extract text from file
-    const text = extractTextFromFile(fileBuffer, fileType, filename);
-
-    // 3. Register in D1
-    const fileRecord = await repo.addFile({
-      id: fileId,
-      employeeId,
-      name: filename,
-      contentType: fileType,
-      sizeBytes: fileBuffer.byteLength,
-      r2Key,
-      ragStatus: "pending",
-    });
+    const fileRecord = await repo
+      .addFile({
+        id: fileId,
+        employeeId,
+        name: filename,
+        contentType: fileType,
+        sizeBytes: fileBuffer.byteLength,
+        r2Key,
+        ragStatus: "pending",
+      })
+      .catch(async (error: unknown) => {
+        // A failed acknowledgement can follow a committed insert.
+        const saved = await repo.getFile(fileId).catch(() => undefined);
+        if (saved?.employeeId === employeeId && saved.r2Key === r2Key) {
+          return saved;
+        }
+        if (documents && saved === null) {
+          await documents.delete(r2Key).catch(() => {
+            console.warn("Unable to clean up an unregistered employee file");
+          });
+        }
+        throw error;
+      });
 
     const ragEnv = dependencies.ragEnv ?? {
       DB: dependencies.db,
