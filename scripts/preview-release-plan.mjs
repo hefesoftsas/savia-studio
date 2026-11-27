@@ -12,6 +12,7 @@ const COMPONENTS = {
 };
 
 const RUNTIME_IGNORED_PATHS = new Set([
+  ".github/workflows/build-vscode-extension.yml",
   ".github/workflows/deploy-preview.yml",
   ".github/workflows/preview-frontend-warmup.yml",
   ".github/workflows/inspect-preview-backup-gate.yml",
@@ -60,6 +61,9 @@ const RUNTIME_IGNORED_PATHS = new Set([
   "scripts/prepare-office-runtime.mjs",
   "scripts/package-office-runtime.mjs",
   "scripts/upload-office-runtime.mjs",
+  "apps/self-hosted/scripts/account-email-smoke.ts",
+  "apps/self-hosted/scripts/saml-keycloak-smoke.ts",
+  "apps/self-hosted/scripts/saml-smoke-form.ts",
 ]);
 
 function documentationOrTestPath(path) {

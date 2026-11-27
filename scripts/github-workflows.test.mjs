@@ -643,6 +643,17 @@ test("coverage remains manually available without automatic repeated tests", asy
   assert.doesNotMatch(ci, /paths-ignore:|continue-on-error: true/);
 });
 
+test("native VS Code validation uses current JavaScript actions and verifies the minimum host", async () => {
+  const source = await workflow("build-vscode-extension.yml");
+  assert.doesNotMatch(
+    source,
+    /uses: (?:actions\/(?:checkout|setup-node|upload-artifact)|pnpm\/action-setup)@v[1-4](?:[.\s]|$)/,
+  );
+  assert.match(source, /node-version: 22/);
+  assert.match(source, /xvfb-run -a pnpm --filter @savia\/vscode test:host/);
+  assert.match(source, /if-no-files-found: error/);
+});
+
 test("CodeQL scans affected PR languages or manual selections without push or schedule triggers", async () => {
   const source = await workflow("codeql.yml");
   assert.match(source, /^  pull_request:\n    branches: \[main\]/m);

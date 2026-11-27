@@ -9,6 +9,20 @@ const source = {
   baseUrl: "https://catalog.savia.dev/api",
   token: "private-token",
 };
+function requestUrl(input: RequestInfo | URL): URL {
+  return new URL(
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url,
+  );
+}
+function isDnsEndpoint(url: URL): boolean {
+  return (
+    url.origin === "https://cloudflare-dns.com" && url.pathname === "/dns-query"
+  );
+}
 function fixture(
   response: Response | (() => Response),
   dnsAddress = "8.8.8.8",
@@ -16,15 +30,9 @@ function fixture(
   const calls: Array<{ url: URL; init?: RequestInit }> = [];
   const fetcher = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : input.url,
-      );
+      const url = requestUrl(input);
       calls.push({ url, init });
-      if (url.hostname === "cloudflare-dns.com")
+      if (isDnsEndpoint(url))
         return Response.json({
           Status: 0,
           Answer:
@@ -95,18 +103,18 @@ describe("isolated JSON:API adapter", () => {
         },
       ],
     });
-    const request = f.calls.find(
-      (c) => c.url.hostname !== "cloudflare-dns.com",
-    )!;
+    const request = f.calls.find((c) => !isDnsEndpoint(c.url))!;
     expect(request.url.searchParams.get("page[number]")).toBe("1");
     expect(request.url.searchParams.get("filter[title]")).toBe("A & B");
     expect(new Headers(request.init?.headers).get("authorization")).toBe(
       "Bearer private-token",
     );
     expect(request.init?.redirect).toBe("manual");
-    for (const dns of f.calls.filter(
-      (c) => c.url.hostname === "cloudflare-dns.com",
-    ))
+    const dnsCalls = f.calls.filter((c) => isDnsEndpoint(c.url));
+    expect(
+      dnsCalls.map(({ url }) => url.searchParams.get("type")).sort(),
+    ).toEqual(["A", "AAAA"]);
+    for (const dns of dnsCalls)
       expect(new Headers(dns.init?.headers).has("authorization")).toBe(false);
   });
   it("never invents total or completion when links and configured totals are absent", async () => {
@@ -137,9 +145,7 @@ describe("isolated JSON:API adapter", () => {
         },
         f.fetcher,
       );
-      const request = f.calls.find(
-        (c) => c.url.hostname !== "cloudflare-dns.com",
-      )!;
+      const request = f.calls.find((c) => !isDnsEndpoint(c.url))!;
       expect(request.init?.method).toBe(
         operation === "create" ? "POST" : "PATCH",
       );
@@ -216,9 +222,9 @@ describe("isolated JSON:API adapter", () => {
         privateDns.fetcher,
       ),
     ).rejects.toMatchObject({ code: "JSONAPI_INVALID_URL" });
-    expect(
-      privateDns.calls.filter((c) => c.url.hostname !== "cloudflare-dns.com"),
-    ).toHaveLength(0);
+    expect(privateDns.calls.filter((c) => !isDnsEndpoint(c.url))).toHaveLength(
+      0,
+    );
     const redirect = fixture(
       new Response(null, {
         status: 302,
@@ -308,31 +314,40 @@ describe("isolated JSON:API adapter", () => {
     );
     expect(result.data).toMatchObject({ id: "9", title: "Persisted" });
     expect(
-      f.calls
-        .filter((c) => c.url.hostname !== "cloudflare-dns.com")
-        .map((c) => c.init?.method),
+      f.calls.filter((c) => !isDnsEndpoint(c.url)).map((c) => c.init?.method),
     ).toEqual(["PATCH", "GET"]);
   });
   it("times out and aborts a stalled remote request without retrying", async () => {
     vi.useFakeTimers();
     try {
       const f = fixture(document([]));
-      let remoteSignal: AbortSignal | undefined;
+      const remoteCalls: Array<{ url: URL; signal?: AbortSignal | null }> = [];
       const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
-        if (String(input).includes("cloudflare-dns.com"))
-          return f.fetcher(input, init);
-        remoteSignal = init?.signal ?? undefined;
+        const url = requestUrl(input);
+        if (isDnsEndpoint(url)) return f.fetcher(input, init);
+        remoteCalls.push({ url, signal: init?.signal });
         return new Promise<Response>(() => {});
       }) as typeof fetch;
       const assertion = expect(
         executeJsonApi(
-          { source, resource: "articles", operation: "list" },
+          {
+            source: {
+              ...source,
+              baseUrl: `${source.baseUrl}/cloudflare-dns.com`,
+            },
+            resource: "articles",
+            operation: "list",
+          },
           fetcher,
         ),
       ).rejects.toMatchObject({ code: "JSONAPI_TIMEOUT", status: 504 });
-      await vi.advanceTimersByTimeAsync(10_001);
-      await assertion;
-      expect(remoteSignal?.aborted).toBe(true);
+      await Promise.all([assertion, vi.advanceTimersByTimeAsync(10_001)]);
+      expect(remoteCalls).toHaveLength(1);
+      expect(remoteCalls[0].url).toMatchObject({
+        origin: "https://catalog.savia.dev",
+        pathname: "/api/cloudflare-dns.com/articles",
+      });
+      expect(remoteCalls[0].signal?.aborted).toBe(true);
     } finally {
       vi.useRealTimers();
     }

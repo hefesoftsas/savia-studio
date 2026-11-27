@@ -417,6 +417,7 @@ test("CI classification isolates only infrastructure and documentation changes",
 test("CI selects ci-config only for the explicit orchestration path allowlist", (t) => {
   const f = fixture(t);
   const allowedPaths = [
+    ".github/workflows/build-vscode-extension.yml",
     ".github/workflows/ci.yml",
     ".github/workflows/codeql.yml",
     ".github/workflows/coverage.yml",
