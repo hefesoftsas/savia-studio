@@ -46,7 +46,7 @@ export function RecordsCommandToolbar({
   filters,
   onFiltersChange,
   canExportCsv,
-  csvSearchPending,
+  csvExportBlocked,
   exportingCsv,
   onExportCsv,
   trash,
@@ -58,8 +58,7 @@ export function RecordsCommandToolbar({
   onStageChange,
   pipelineFieldLabel,
   stageOptions,
-  supportsLocalRecordTools,
-  showDelete,
+  showTrash,
 }: {
   object: StudioObject;
   capabilities: CollectionCapabilities;
@@ -71,7 +70,7 @@ export function RecordsCommandToolbar({
   filters: RecordsFilters;
   onFiltersChange: (next: RecordsFilters) => void;
   canExportCsv: boolean;
-  csvSearchPending: boolean;
+  csvExportBlocked: boolean;
   exportingCsv: boolean;
   onExportCsv: () => void;
   trash: boolean;
@@ -83,8 +82,7 @@ export function RecordsCommandToolbar({
   onStageChange: (stage: string) => void;
   pipelineFieldLabel?: string;
   stageOptions: Array<{ value: string; label: string }>;
-  supportsLocalRecordTools: boolean;
-  showDelete: boolean;
+  showTrash: boolean;
 }) {
   const t = useMessages(recordsMessages);
 
@@ -270,7 +268,7 @@ export function RecordsCommandToolbar({
                 size="icon"
                 aria-label={t("Exportar a CSV")}
                 aria-busy={exportingCsv}
-                disabled={exportingCsv || csvSearchPending}
+                disabled={exportingCsv || csvExportBlocked}
                 onClick={onExportCsv}
               >
                 {exportingCsv ? (
@@ -288,7 +286,7 @@ export function RecordsCommandToolbar({
             </TooltipContent>
           </Tooltip>
         )}
-        {supportsLocalRecordTools && showDelete && (
+        {showTrash && (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -296,6 +294,7 @@ export function RecordsCommandToolbar({
                 variant={trash ? "secondary" : "ghost"}
                 size="icon"
                 aria-label={t("Papelera")}
+                aria-pressed={trash}
                 onClick={onTrashToggle}
               >
                 <Trash2 size={15} />

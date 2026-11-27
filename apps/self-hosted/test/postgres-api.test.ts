@@ -1,4 +1,16 @@
 import { createHmac } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import {
+  ensureBootstrapAdministrator,
+  findPrincipal,
+  findPrincipalBySubject,
+  grantMembership,
+  listGlobalRoles,
+  listMemberships,
+  readIdentityDirectoryRevision,
+  setPlatformAdministrator,
+  upsertPrincipal,
+} from "../../api/src/auth/identity-repository";
 import { deactivateTenantForDeletion } from "../../api/src/tenant-branding/service";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +20,8 @@ import { expect, it, vi } from "vitest";
 import { createApplication } from "../src/application";
 import { loadConfiguration } from "../src/config";
 import { makeConfig } from "../../../packages/studio-shared/src/metadata";
+import { migratePostgres } from "../src/postgres/migrations";
+import { closePostgresPool, createPostgresPool } from "../src/postgres/pool";
 import { postgresTestUrl, withPostgresFixture } from "./postgres-fixture";
 function totp(uri: string) {
   const url = new URL(uri);
@@ -303,17 +317,38 @@ it.skipIf(!postgresTestUrl)(
         });
         expect((await json(brandingPath)).data).toEqual(saved);
         await expect(
-          deactivateTenantForDeletion(db, tenant.id, "Stale name"),
+          deactivateTenantForDeletion(db, tenant.id, {
+            confirmedName: "Stale name",
+          }),
         ).resolves.toBe(false);
         expect((await json(`/v1/tenants/${tenant.id}`)).data.isActive).toBe(
           true,
         );
         await expect(
-          deactivateTenantForDeletion(db, tenant.id, tenant.name),
+          deactivateTenantForDeletion(db, tenant.id, {
+            confirmedName: tenant.name,
+          }),
         ).resolves.toBe(true);
         expect((await json(`/v1/tenants/${tenant.id}`)).data.isActive).toBe(
           false,
         );
+        await db
+          .prepare(
+            "INSERT INTO tenant_deletion_leases(tenant_id,lease_token,lease_until) VALUES(?,'cleanup',?)",
+          )
+          .bind(tenant.id, Date.now() + 60_000)
+          .run();
+        const endpoint = `/v1/tenants/${tenant.id}`;
+        expect(
+          await json(endpoint, "PATCH", { isActive: true }, 409),
+        ).toMatchObject({ error: { code: "TENANT_PURGE_IN_PROGRESS" } });
+        await db
+          .prepare("DELETE FROM tenant_deletion_leases WHERE tenant_id=?")
+          .bind(tenant.id)
+          .run();
+        expect(
+          (await json(endpoint, "PATCH", { isActive: true })).data,
+        ).toMatchObject({ isActive: true });
       } finally {
         vi.restoreAllMocks();
         await app?.close();
@@ -322,4 +357,153 @@ it.skipIf(!postgresTestUrl)(
     });
   },
   180_000,
+);
+
+it.skipIf(!postgresTestUrl)(
+  "rechecks the directory revision after waiting for a concurrent principal deletion",
+  async () => {
+    await withPostgresFixture(async (db, connectionString) => {
+      await migratePostgres({
+        connectionString,
+        schema: "savia_core",
+        directory: fileURLToPath(
+          new URL("../../../packages/db/postgres", import.meta.url),
+        ),
+        seed: false,
+      });
+      const account = {
+        issuer: "test-directory",
+        subject: "test-directory-user",
+        email: "directory-user@example.test",
+        displayName: "Directory User",
+      };
+      const revision = await readIdentityDirectoryRevision(db);
+      const original = await upsertPrincipal(db, account);
+      await expect(
+        upsertPrincipal(
+          db,
+          { ...account, displayName: "Current User" },
+          revision,
+        ),
+      ).resolves.toMatchObject({
+        id: original.id,
+        displayName: "Current User",
+      });
+
+      const pool = createPostgresPool({ connectionString, max: 2 });
+      const transaction = await pool.connect();
+      let syncing: Promise<unknown> | undefined;
+      try {
+        await transaction.query("BEGIN");
+        const backend = await transaction.query<{ pid: number }>(
+          "SELECT pg_backend_pid() AS pid",
+        );
+        await transaction.query(
+          "UPDATE savia_core.identity_directory_revision SET revision=revision+1 WHERE id=1",
+        );
+        await transaction.query(
+          "DELETE FROM savia_core.identity_principal WHERE id=$1",
+          [original.id],
+        );
+        syncing = upsertPrincipal(
+          db,
+          { ...account, displayName: "Stale User" },
+          revision,
+        );
+        void syncing.catch(() => undefined);
+        await expect
+          .poll(async () => {
+            const result = await pool.query<{ waiting: boolean }>(
+              `SELECT EXISTS (
+               SELECT 1 FROM pg_stat_activity
+               WHERE datname=current_database() AND $1::int=ANY(pg_blocking_pids(pid))
+             ) AS waiting`,
+              [backend.rows[0].pid],
+            );
+            return result.rows[0].waiting;
+          })
+          .toBe(true);
+        await transaction.query("COMMIT");
+        await expect(syncing).resolves.toBeUndefined();
+        await expect(
+          findPrincipalBySubject(db, account.issuer, account.subject),
+        ).resolves.toBeUndefined();
+      } finally {
+        await transaction.query("ROLLBACK");
+        await syncing?.catch(() => undefined);
+        transaction.release();
+        await closePostgresPool(pool);
+      }
+    });
+  },
+  30_000,
+);
+
+it.skipIf(!postgresTestUrl)(
+  "keeps a platform revocation and commercial membership when an explicit grant rolls back",
+  async () => {
+    await withPostgresFixture(async (db, connectionString) => {
+      await migratePostgres({
+        connectionString,
+        schema: "savia_core",
+        directory: fileURLToPath(
+          new URL("../../../packages/db/postgres", import.meta.url),
+        ),
+        seed: true,
+      });
+      await db
+        .prepare(
+          "INSERT INTO tenants(id,id_slug,name,created_at,updated_at) VALUES(42,'role-revocation-test','Role revocation test','now','now')",
+        )
+        .run();
+      const createPrincipal = (name: string) =>
+        upsertPrincipal(db, {
+          issuer: "role-test",
+          subject: name,
+          email: name + "@example.test",
+          displayName: name,
+        });
+      const target = await createPrincipal("target");
+      const administrator = await createPrincipal("administrator");
+      const member = await createPrincipal("member");
+      await ensureBootstrapAdministrator(db, target.id);
+      await ensureBootstrapAdministrator(db, administrator.id);
+      await grantMembership(db, member.id, 42, "viewer");
+      await setPlatformAdministrator(db, target.id, false, 42, "viewer");
+      await expect(ensureBootstrapAdministrator(db, target.id)).resolves.toBe(
+        false,
+      );
+
+      await db.exec(`CREATE FUNCTION savia_core.reject_platform_role_test() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test refused role grant'; END; $$`);
+      await db.exec(`CREATE TRIGGER reject_platform_role_test
+        BEFORE INSERT ON savia_core.identity_global_role
+        FOR EACH ROW EXECUTE FUNCTION savia_core.reject_platform_role_test()`);
+      await expect(
+        setPlatformAdministrator(db, target.id, true),
+      ).rejects.toThrow("test refused role grant");
+      await expect(findPrincipal(db, target.id)).resolves.toMatchObject({
+        platformAdminRevoked: true,
+      });
+      await expect(listGlobalRoles(db, target.id)).resolves.toEqual([]);
+      await expect(listMemberships(db, target.id)).resolves.toMatchObject([
+        { tenantId: 42, role: "viewer" },
+      ]);
+
+      await db.exec(
+        "DROP TRIGGER reject_platform_role_test ON savia_core.identity_global_role",
+      );
+      await setPlatformAdministrator(db, target.id, true);
+      await expect(findPrincipal(db, target.id)).resolves.toMatchObject({
+        platformAdminRevoked: false,
+      });
+      await expect(listGlobalRoles(db, target.id)).resolves.toEqual([
+        "platform_admin",
+      ]);
+      await expect(listMemberships(db, target.id)).resolves.toMatchObject([
+        { tenantId: 0, role: "tenant_admin" },
+      ]);
+    });
+  },
+  30_000,
 );

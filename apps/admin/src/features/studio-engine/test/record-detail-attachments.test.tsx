@@ -49,7 +49,7 @@ it("shows persisted file metadata and download under its attachment field", asyn
       } as never;
     return { data: [], total: 0 } as never;
   });
-  vi.mocked(downloadCrm).mockResolvedValue(undefined);
+  vi.mocked(downloadCrm).mockResolvedValue(true);
   render(
     <QueryClientProvider
       client={

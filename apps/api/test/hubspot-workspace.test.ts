@@ -5,6 +5,7 @@ import {
   capabilities,
 } from "../src/external-crm/hubspot-workspace";
 import { hubspotObjects } from "../src/external-crm/hubspot-workspace-catalog";
+import { createNangoClient } from "../src/external-crm/nango";
 import { createCollectionSourceApp } from "../src/studio/collection-sources";
 let conn: any = {
   id: "connection",
@@ -567,29 +568,208 @@ describe("HubSpot record pagination", () => {
   });
 
   it.each([
+    "/api/records/hubspot_contacts",
+    "/api/records/hubspot_contacts/summary",
+    "/api/export/hubspot_contacts",
+  ])("accepts only empty structured filters for %s", async (path) => {
+    const proxy = vi.fn(async () =>
+      Response.json({
+        results: [{ id: "1", properties: { firstname: "Ana" } }],
+      }),
+    );
+    const app = createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    });
+    const request = (filters: string) =>
+      app.request(`${path}?${new URLSearchParams({ filters })}`);
+    const condition = { field: "firstname", op: "eq", value: "Ana" };
+    expect(
+      (await request(JSON.stringify({ conditions: [condition] }))).status,
+    ).toBe(422);
+    expect((await request('{"conditions":[]}')).status).toBe(200);
+    expect((await request("[ ]")).status).toBe(200);
+    expect((await request("{")).status).toBe(422);
+    expect(proxy).toHaveBeenCalledTimes(2);
+  });
+
+  it("continues from the previous page and preserves the exact total without replaying it", async () => {
+    const proxy = vi.fn(async ({ path }: { path: string }) => {
+      const after = new URL(path, "https://hubspot.test").searchParams.get(
+        "after",
+      );
+      return after
+        ? Response.json({ results: [{ id: "3" }] })
+        : Response.json({
+            results: [{ id: "1" }],
+            paging: { next: { after: "second-page" } },
+          });
+    });
+    const app = () =>
+      createHubspotWorkspaceApp({ ...pageContext, crm: { nango: { proxy } } });
+    const path = "/api/records/hubspot_contacts?perPage=2";
+    const first = await app().request(path);
+    const { nextCursor } = (await first.json()) as { nextCursor?: string };
+    expect(nextCursor).toEqual(expect.any(String));
+    expect(nextCursor).not.toBe("second-page");
+    const cursor = encodeURIComponent(nextCursor!);
+
+    const wrongPage = await app().request(`${path}&page=3&cursor=${cursor}`);
+    expect(await wrongPage.json()).toMatchObject({
+      data: [],
+      total: 2,
+      meta: { recordOffset: 2 },
+    });
+    expect(proxy).toHaveBeenCalledTimes(3);
+
+    proxy.mockClear();
+    const wrongLimit = await app().request(
+      `/api/records/hubspot_contacts?perPage=3&page=2&cursor=${cursor}`,
+    );
+    expect(await wrongLimit.json()).toMatchObject({
+      data: [{ id: "3" }],
+      total: 2,
+    });
+    expect(proxy).toHaveBeenCalledTimes(2);
+    expect(proxy.mock.calls[0]?.[0].path).not.toContain("after=");
+
+    proxy.mockClear();
+    const second = await app().request(`${path}&page=2&cursor=${cursor}`);
+    expect(second.status).toBe(200);
+    const response = await second.json();
+    expect(response).toMatchObject({
+      data: [{ id: "3" }],
+      total: 2,
+      meta: { recordOffset: 1 },
+      pageInfo: { hasNextPage: false },
+    });
+    expect(response).not.toHaveProperty("nextCursor");
+    expect(proxy).toHaveBeenCalledOnce();
+    expect(proxy.mock.calls[0]?.[0].path).toContain("after=second-page");
+
+    proxy.mockClear();
+    const retry = await app().request(`${path}&page=2&cursor=${cursor}`);
+    expect(await retry.json()).toEqual(response);
+    expect(proxy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { failure: "rate limit", providerStatus: 429, status: 429 },
+    { failure: "cancellation", status: 499 },
+    { failure: "provider error", providerStatus: 503, status: 502 },
+    { failure: "connection error", status: 502 },
+  ])(
+    "resumes a HubSpot page after $failure",
+    async ({ providerStatus, status }) => {
+      const abort = new AbortController();
+      let interrupt = true;
+      const proxy = vi.fn(async ({ path }: { path: string }) => {
+        const after = new URL(path, "https://hubspot.test").searchParams.get(
+          "after",
+        );
+        if (!after)
+          return Response.json({
+            results: [{ id: "1" }, { id: "2" }],
+            paging: { next: { after: "second-page" } },
+          });
+        if (interrupt) {
+          interrupt = false;
+          if (status === 499) abort.abort();
+          else if (providerStatus)
+            return new Response(null, {
+              status: providerStatus,
+              headers:
+                providerStatus === 429 ? { "Retry-After": "1" } : undefined,
+            });
+          else throw new TypeError("The HubSpot connection closed");
+        }
+        return Response.json({ results: [{ id: "3" }] });
+      });
+      const app = createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy } },
+      });
+      const path = "/api/records/hubspot_contacts?perPage=2";
+      const first = await app.request(path);
+      const { nextCursor } = await first.json<{ nextCursor: string }>();
+      expect(nextCursor).toEqual(expect.any(String));
+      const second = `${path}&page=2&cursor=${encodeURIComponent(nextCursor)}`;
+      const interrupted = await app.request(second, { signal: abort.signal });
+      expect(interrupted.status).toBe(status);
+      if (status === 429)
+        expect(interrupted.headers.get("Retry-After")).toBe("1");
+
+      proxy.mockClear();
+      const retry = await app.request(second);
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toMatchObject({
+        data: [{ id: "3" }],
+        total: 3,
+      });
+      expect(proxy).toHaveBeenCalledOnce();
+      expect(proxy.mock.calls[0]?.[0].path).toContain("after=second-page");
+    },
+  );
+
+  it("rejects a duplicate record on a continued HubSpot page", async () => {
+    const proxy = vi.fn(async ({ path }: { path: string }) => {
+      const after = new URL(path, "https://hubspot.test").searchParams.get(
+        "after",
+      );
+      return Response.json({
+        results: [{ id: "1" }],
+        ...(after ? {} : { paging: { next: { after: "second-page" } } }),
+      });
+    });
+    const app = createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    });
+    const path = "/api/records/hubspot_contacts?perPage=1";
+    const { nextCursor } = (await (await app.request(path)).json()) as {
+      nextCursor?: string;
+    };
+    expect(nextCursor).toEqual(expect.any(String));
+    const response = await app.request(
+      `${path}&page=2&cursor=${encodeURIComponent(nextCursor!)}`,
+    );
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: "HubSpot devolvió registros repetidos durante la paginación.",
+    });
+    expect(proxy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
     { label: "missing records", body: JSON.stringify({ status: "unknown" }) },
     { label: "an invalid record", body: JSON.stringify({ results: [null] }) },
     {
       label: "an inconsistent total",
       body: JSON.stringify({ results: [{ id: "1" }], total: 0 }),
     },
-    { label: "invalid JSON", body: "<html>Gateway unavailable</html>" },
-  ])(
-    "rejects a successful HubSpot response with $label instead of returning a count",
-    async ({ body }) => {
-      const app = createHubspotWorkspaceApp({
-        ...pageContext,
-        crm: { nango: { proxy: vi.fn(async () => new Response(body)) } },
-      });
-      for (const path of [
-        "/api/records/hubspot_contacts",
-        "/api/records/hubspot_contacts/summary",
-      ]) {
-        const response = await app.request(path);
-        expect(response.status).toBe(502);
-      }
+    {
+      label: "a string in place of pagination",
+      body: JSON.stringify({ results: [{ id: "1" }], paging: "next" }),
     },
-  );
+    {
+      label: "an array in place of pagination",
+      body: JSON.stringify({ results: [{ id: "1" }], paging: [] }),
+    },
+    { label: "invalid JSON", body: "<html>Gateway unavailable</html>" },
+  ])("rejects a successful HubSpot response with $label", async ({ body }) => {
+    const app = createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy: vi.fn(async () => new Response(body)) } },
+    });
+    for (const path of [
+      "/api/records/hubspot_contacts",
+      "/api/records/hubspot_contacts/summary",
+      "/api/export/hubspot_contacts",
+    ]) {
+      const response = await app.request(path);
+      expect(response.status).toBe(502);
+    }
+  });
 
   it("stops fetching contacts when HubSpot repeats a pagination cursor", async () => {
     const proxy = vi.fn(async () =>
@@ -798,17 +978,62 @@ describe("HubSpot record pagination", () => {
     },
   );
 
-  it("retains the HubSpot search total when the requested page is beyond the cursor", async () => {
-    const proxy = vi.fn(async () =>
-      Response.json({ results: [{ id: "1" }], total: 10_001 }),
-    );
-    const response = await createHubspotWorkspaceApp({
-      ...pageContext,
-      crm: { nango: { proxy } },
-    }).request("/api/records/hubspot_contacts?q=contact&page=2");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ data: [], total: 10_001 });
-  });
+  it.each([false, true])(
+    "does not report a contradictory unfiltered total after the last cursor (multiple pages: %s)",
+    async (multiplePages) => {
+      const proxy = vi.fn(async ({ path }: { path: string }) => {
+        const after = new URL(path, "https://hubspot.test").searchParams.has(
+          "after",
+        );
+        if (multiplePages && !after)
+          return Response.json({
+            results: [{ id: "1" }],
+            paging: { next: { after: "last-page" } },
+          });
+        return Response.json({ results: [{ id: "2" }], total: 6 });
+      });
+      const app = createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy } },
+      });
+      const list = await app.request(
+        `/api/records/hubspot_contacts?page=${multiplePages ? 2 : 1}`,
+      );
+      expect(list.status).toBe(200);
+      const result = await list.json();
+      expect(result).toMatchObject({
+        data: [{ id: "2" }],
+        pageInfo: { hasNextPage: false, hasPreviousPage: multiplePages },
+      });
+      expect(result).not.toHaveProperty("total");
+
+      const summary = await app.request(
+        "/api/records/hubspot_contacts/summary",
+      );
+      expect(summary.status).toBe(502);
+      expect(await summary.json()).toEqual({
+        error: "El total de HubSpot no coincide con los registros del resumen.",
+      });
+    },
+  );
+
+  it.each([
+    "/api/records/hubspot_contacts?q=contact&page=2",
+    "/api/records/hubspot_contacts/summary?q=contact",
+  ])(
+    "retains the HubSpot search total beyond the available cursor for %s",
+    async (path) => {
+      const proxy = vi.fn(async () =>
+        Response.json({ results: [{ id: "1" }], total: 10_001 }),
+      );
+      const response = await createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy } },
+      }).request(path);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ data: [], total: 10_001 });
+    },
+  );
 
   it("preserves the total but stops navigation at the supported page limit", async () => {
     let current = 0;
@@ -876,6 +1101,73 @@ describe("HubSpot record pagination", () => {
     expect(await response.json()).toEqual({ data: [], total: 2 });
     expect(proxy).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    "/api/records/hubspot_contacts/summary",
+    "/api/records/hubspot_contacts?page=3&perPage=1",
+    "/api/records/hubspot_contacts?q=Ana&page=3&perPage=1",
+    "/api/export/hubspot_contacts",
+    "/api/export/hubspot_contacts?q=Ana",
+  ])(
+    "cancels the provider request when a HubSpot read is abandoned (%s)",
+    async (path) => {
+      const abort = new AbortController();
+      let providerSignal: AbortSignal | null | undefined;
+      let releasePage!: () => void;
+      const unfinishedPage = new Promise<void>((resolve) => {
+        releasePage = resolve;
+      });
+      let startRequest!: () => void;
+      const started = new Promise<void>((resolve) => {
+        startRequest = resolve;
+      });
+      const fetcher = vi.fn(
+        async (_url: RequestInfo | URL, options?: RequestInit) => {
+          providerSignal = options?.signal;
+          startRequest();
+          await unfinishedPage;
+          return Response.json({
+            results: [{ id: "1" }],
+            paging: { next: { after: "2" } },
+          });
+        },
+      );
+      const nango = createNangoClient(
+        {
+          baseUrl: "https://nango.example.test",
+          apiKey: "test-key",
+          hubspotIntegrationId: "test-hubspot",
+        },
+        fetcher,
+      );
+      const request = new Request(`https://savia.test${path}`, {
+        signal: abort.signal,
+      });
+      const result = createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: {
+          nango: {
+            proxy: (input: Parameters<typeof nango.proxy>[0]) =>
+              nango.proxy({
+                ...input,
+                connection: {
+                  ...input.connection,
+                  provider: "hubspot",
+                  nangoIntegrationId: "test-hubspot",
+                },
+              }),
+          },
+        },
+      }).fetch(request);
+      await started;
+      abort.abort();
+      releasePage();
+
+      expect((await result).status).toBe(499);
+      expect(providerSignal?.aborted).toBe(true);
+      expect(fetcher).toHaveBeenCalledOnce();
+    },
+  );
 
   it("omits a zero total for a list with a next cursor", async () => {
     const proxy = vi.fn(async () =>
@@ -1018,6 +1310,91 @@ it("groups a fully paginated HubSpot summary and supports total-only scans", asy
   expect(totalOnly.status).toBe(200);
   expect(await totalOnly.json()).toEqual({ data: [], total: 3 });
 });
+
+it.each([
+  ["not-a-number", "10"],
+  ["1e309", "10"],
+  [false, "10"],
+  ["1e308", "1e308"],
+])(
+  "retains the verified HubSpot count when amounts %j and %j cannot be summed",
+  async (firstAmount, nextAmount) => {
+    const summaryContext = {
+      ...context,
+      tenant: "tenant:hubspot-summary-invalid-amount",
+    };
+    const proxy = vi.fn(async ({ path }: { path: string }) => {
+      if (path.startsWith("/crm/v3/properties/"))
+        return Response.json({
+          results: [
+            { name: "dealname", type: "string" },
+            { name: "pipeline", type: "enumeration" },
+            { name: "dealstage", type: "enumeration" },
+            { name: "amount", type: "number" },
+          ],
+        });
+      if (path.startsWith("/crm/v3/pipelines/"))
+        return Response.json({
+          results: [
+            {
+              id: "sales",
+              label: "Sales",
+              stages: [
+                { id: "Qualified", label: "Qualified" },
+                { id: "Won", label: "Won" },
+              ],
+            },
+          ],
+        });
+      const after = new URL(`https://hubspot.test${path}`).searchParams.get(
+        "after",
+      );
+      return Response.json({
+        total: 3,
+        results: after
+          ? [
+              {
+                id: "3",
+                properties: { dealstage: "Qualified", amount: nextAmount },
+              },
+            ]
+          : [
+              {
+                id: "1",
+                properties: { dealstage: "Qualified", amount: firstAmount },
+              },
+              { id: "2", properties: { dealstage: "Won", amount: "20.50" } },
+            ],
+        ...(after ? {} : { paging: { next: { after: "next" } } }),
+      });
+    });
+    const app = createHubspotWorkspaceApp({
+      ...summaryContext,
+      crm: { nango: { proxy } },
+    });
+    const installed = await app.request("/api/crm-workspace/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resources: ["deals"] }),
+    });
+    expect(installed.status, await installed.text()).toBe(200);
+    proxy.mockClear();
+
+    const response = await app.request(
+      "/api/records/hubspot_deals/summary?group=dealstage&amountField=amount",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [
+        { value: "Qualified", count: 2 },
+        { value: "Won", count: 1, amount: 20.5 },
+      ],
+      total: 3,
+    });
+    expect(proxy).toHaveBeenCalledTimes(2);
+  },
+);
+
 it("groups only HubSpot records that match the search across pages", async () => {
   const summaryContext = {
     ...context,
@@ -1534,14 +1911,20 @@ it("lets a tenant member read the shared connection but blocks writes, inactive 
   member.actor.memberships[0].isActive = true;
   const before = conn;
   conn = { ...conn, status: "disconnected" };
-  expect(
-    (
-      await createHubspotWorkspaceApp(member as any).request(
-        "/api/records/hubspot_contacts",
-      )
-    ).status,
-  ).toBe(409);
-  conn = before;
+  try {
+    const app = createHubspotWorkspaceApp(member as any);
+    for (const suffix of ["", "/summary"]) {
+      const response = await app.request(
+        `/api/records/hubspot_contacts${suffix}`,
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: { code: "HUBSPOT_CONNECTION_UNAVAILABLE" },
+      });
+    }
+  } finally {
+    conn = before;
+  }
 });
 
 it("shares related records while excluding private targets and auditing batch reads as reads", async () => {

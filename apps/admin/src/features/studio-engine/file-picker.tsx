@@ -2,19 +2,22 @@ import { intlLocale, useAppLocale } from "@/i18n/core";
 import { useMessages } from "@/i18n/core";
 import { recordsMessages } from "@/i18n/locales/records";
 import { useId, useRef, useState } from "react";
-import { FileUp, Paperclip, X } from "lucide-react";
+import { CircleAlert, FileUp, Paperclip, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import type { AttachmentUploadFailure } from "./attachment-queue";
 
 export type FilePickerProps = {
   accept: string[];
   disabled?: boolean;
+  failures?: AttachmentUploadFailure[];
   files: File[];
   inputId?: string;
   maxFiles: number;
   maxSize: number;
   onFilesChange(files: File[]): void;
+  onRetry?(file: File): void;
   uploadedFiles?: File[];
-  uploadingFile?: File;
+  uploadingFiles?: File[];
 };
 
 function acceptedType(file: File, accepted: string[]) {
@@ -38,13 +41,15 @@ function formatBytes(size: number, locale = "es-CO") {
 export function FilePicker({
   accept,
   disabled = false,
+  failures,
   files,
   inputId,
   maxFiles,
   maxSize,
   onFilesChange,
+  onRetry,
   uploadedFiles = [],
-  uploadingFile,
+  uploadingFiles = [],
 }: FilePickerProps) {
   const uiLocale = intlLocale(useAppLocale());
 
@@ -154,12 +159,14 @@ export function FilePicker({
       {files.length > 0 && (
         <ul className="grid gap-2" aria-label={t("Archivos pendientes")}>
           {files.map((file, index) => {
-            const uploading = file === uploadingFile;
+            const uploading = uploadingFiles.includes(file);
             const uploaded = uploadedFiles.includes(file);
+            const failure = failures?.find((entry) => entry.file === file);
             return (
               <li
                 className="grid min-w-0 gap-2 rounded-md border bg-background px-3 py-2"
                 key={`${file.name}-${file.lastModified}-${index}`}
+                tabIndex={-1}
               >
                 <div className="flex min-w-0 items-center gap-3">
                   <Paperclip
@@ -188,43 +195,78 @@ export function FilePicker({
                     <X aria-hidden="true" size={16} />
                   </Button>
                 </div>
-                <div className="grid gap-1">
-                  <p
-                    aria-live={uploading ? "polite" : undefined}
-                    className="text-xs text-muted-foreground"
-                  >
-                    {uploading
-                      ? t("Cargando archivo…")
-                      : uploaded
-                        ? t("Archivo cargado")
-                        : t("Pendiente de subir")}
-                  </p>
-                  <div
-                    aria-label={t("Carga de %{p0}", { p0: file.name })}
-                    aria-valuemax={100}
-                    aria-valuemin={0}
-                    aria-valuenow={uploaded ? 100 : uploading ? undefined : 0}
-                    aria-valuetext={
-                      uploading
-                        ? t("Cargando archivo")
+                {failure ? (
+                  <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p
+                      className="flex min-w-0 flex-1 items-start gap-2 text-sm text-foreground"
+                      role="alert"
+                    >
+                      <CircleAlert
+                        aria-hidden="true"
+                        className="mt-0.5 shrink-0 text-destructive"
+                        size={16}
+                      />
+                      <span className="[overflow-wrap:anywhere]">
+                        {failure.message || t("No se pudo cargar el archivo.")}
+                      </span>
+                    </p>
+                    {onRetry && (
+                      <Button
+                        aria-label={t("Reintentar carga de %{p0}", {
+                          p0: file.name,
+                        })}
+                        disabled={disabled}
+                        onClick={(event) => {
+                          event.currentTarget.closest("li")?.focus();
+                          onRetry(file);
+                        }}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        {t("Reintentar")}
+                      </Button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="grid gap-1">
+                    <p
+                      aria-live={uploading ? "polite" : undefined}
+                      className="text-xs text-muted-foreground"
+                    >
+                      {uploading
+                        ? t("Cargando archivo…")
                         : uploaded
                           ? t("Archivo cargado")
-                          : t("Pendiente de subir")
-                    }
-                    className="h-1.5 overflow-hidden rounded-full bg-muted"
-                    role="progressbar"
-                  >
+                          : t("Pendiente de subir")}
+                    </p>
                     <div
-                      className={
-                        uploaded
-                          ? "h-full w-full rounded-full bg-primary"
-                          : uploading
-                            ? "h-full w-2/3 animate-pulse rounded-full bg-primary"
-                            : "h-full w-0 rounded-full bg-primary"
+                      aria-label={t("Carga de %{p0}", { p0: file.name })}
+                      aria-valuemax={100}
+                      aria-valuemin={0}
+                      aria-valuenow={uploaded ? 100 : uploading ? undefined : 0}
+                      aria-valuetext={
+                        uploading
+                          ? t("Cargando archivo")
+                          : uploaded
+                            ? t("Archivo cargado")
+                            : t("Pendiente de subir")
                       }
-                    />
+                      className="h-1.5 overflow-hidden rounded-full bg-muted"
+                      role="progressbar"
+                    >
+                      <div
+                        className={
+                          uploaded
+                            ? "h-full w-full rounded-full bg-primary"
+                            : uploading
+                              ? "h-full w-2/3 animate-pulse rounded-full bg-primary"
+                              : "h-full w-0 rounded-full bg-primary"
+                        }
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
               </li>
             );
           })}

@@ -42,17 +42,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const notificationClient = {
-  async inbox(filter: InboxFilter, cursor?: string): Promise<InboxPage> {
+  async inbox(
+    filter: InboxFilter,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<InboxPage> {
     const params = new URLSearchParams({ filter });
     if (cursor) params.set("cursor", cursor);
     const { data } = await request<{ data: InboxPage }>(
       `/notifications?${params}`,
+      { signal },
     );
     return data;
   },
-  async unreadCount(): Promise<number> {
+  async unreadCount(signal?: AbortSignal): Promise<number> {
     const { data } = await request<{ data: { count: number } }>(
       "/notifications/count?filter=unread",
+      { signal },
     );
     return data.count;
   },

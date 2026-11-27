@@ -50,6 +50,25 @@ export function isSectionVisible(
   return evaluateCondition(section?.visibleWhen, values);
 }
 
+export function calculateFormulaValue(
+  op: string,
+  numbers: number[],
+): number | null {
+  const result =
+    op === "sum"
+      ? numbers.reduce((a, b) => a + b, 0)
+      : op === "product"
+        ? numbers.reduce((a, b) => a * b, 1)
+        : op === "difference"
+          ? numbers[0] - numbers[1]
+          : numbers[1] === 0
+            ? null
+            : numbers[0] / numbers[1];
+  return result !== null && Number.isFinite(result)
+    ? Math.round(result * 1e8) / 1e8
+    : null;
+}
+
 export function prepareRecord(
   object: StudioObject,
   values: Record<string, unknown>,
@@ -77,23 +96,7 @@ export function prepareRecord(
       )
     )
       data[name] = null;
-    else {
-      const numbers = raw as number[];
-      const result =
-        formula.op === "sum"
-          ? numbers.reduce((a, b) => a + b, 0)
-          : formula.op === "product"
-            ? numbers.reduce((a, b) => a * b, 1)
-            : formula.op === "difference"
-              ? numbers[0] - numbers[1]
-              : numbers[1] === 0
-                ? null
-                : numbers[0] / numbers[1];
-      data[name] =
-        result !== null && Number.isFinite(result)
-          ? Math.round(result * 1e8) / 1e8
-          : null;
-    }
+    else data[name] = calculateFormulaValue(formula.op, raw as number[]);
     visiting.delete(name);
     done.add(name);
   }

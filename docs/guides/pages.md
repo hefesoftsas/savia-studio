@@ -85,6 +85,7 @@ Links from a page to Studio preserve punctuation in supported record identifiers
 If a board's grouping field is hidden or removed, the block uses an available pipeline field or dropdown. It displays a table if no grouping field is available. Empty group values appear under **No group**, independently of named groups.
 
 **Image or file** uploads PNG, JPEG, GIF, WebP, PDF or plain text, up to 10 MB, through the authenticated API into the configured document bucket. Access to attachments follows the page permissions. Browser object URLs are temporary and revoked when unmounted.
+If a private attachment download stalls, use **Retry** in that block to try again.
 
 ## Saving, sharing and history
 

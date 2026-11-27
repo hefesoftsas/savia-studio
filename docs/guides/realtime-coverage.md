@@ -17,6 +17,22 @@ Components share a socket per room within each browser tab. The personal room su
 
 Assistant conversation and generated request-page hints use the self-only principal room. They contain only the thread/run identifier and, for request pages, the page name. Each consumer refetches its existing authenticated API; initial connection, change events, reconnects, and returning to the tab perform catch-up reads. The admin client sends no periodic WebSocket heartbeat. Transport close/error events still trigger exponential reconnect attempts.
 
+A successful request-page history read clears a previous history error. A
+submission error stays visible until the user starts another submission.
+If the response to a quote submission is lost, retrying the same form values,
+mode, and operations in the open page reuses the pending execution IDs. The
+page skips executions it has already confirmed and recovers known results from
+history when available. Changing the order of fields in the payload preserves
+the retry ID, including when the API compares values from older saved runs.
+A history read started before a new receipt triggers a fresh read when it
+returns. A delayed running receipt preserves any completed or failed result
+already present in history for that execution.
+Request-page history, catalog reads, and execution receipts use Studio's
+15-second JSON body deadline. A timed-out receipt can still be recovered from
+history or by retrying with the pending execution ID.
+Authorization failures clear protected run results and invalidate responses
+from work already in flight. A later authorized request can show results again.
+
 These private writes now create transactional outbox rows in the same D1 commit as the thread or run change. The API tries the Durable Object immediately after commit, then scheduled repair retries pending rows every minute and marks them published only after the hub accepts them. `/v1/realtime/events?after=<cursor>&limit=1..100` returns events for the authenticated principal only. Consumers that use this replay API must advance `nextCursor` and deduplicate by `eventId`. The current assistant and request-page screens do not consume replay; they refetch authoritative state on change hints and reconnects. The WebSocket is a wakeup hint, not a receipt for every socket.
 
 The API returns `durable: true` only when `REALTIME_OUTBOX_RECOVERY_ENABLED=true` is configured and `REALTIME_HUB` exists. That flag is an operator assertion that scheduled repair is enabled and monitored; it defaults to false. Older backends return 404. If the event cursor is older than retained history, the API returns 410 `REALTIME_CURSOR_EXPIRED` with `resyncRequired: true` and `resetCursor`; clients must refetch current state and then resume from that cursor.

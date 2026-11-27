@@ -1,0 +1,26 @@
+diff --git a/dist/introspect-CbYi2MJT.mjs b/dist/introspect-CbYi2MJT.mjs
+index c41408fff2544b24d5e2666209f45b0833fe0853..e404f533e94b45609301b179ecc909642cbf4d97 100644
+--- a/dist/introspect-CbYi2MJT.mjs
++++ b/dist/introspect-CbYi2MJT.mjs
+@@ -377,7 +377,7 @@ async function extractRepeatedResourceFromForm(request) {
+ 	if (!(request.headers.get("content-type")?.toLowerCase() ?? "").includes("application/x-www-form-urlencoded")) return;
+ 	let text;
+ 	try {
+-		text = await request.clone().text();
++		text = new TextDecoder().decode(await request.clone().arrayBuffer());
+ 	} catch {
+ 		return;
+ 	}
+diff --git a/dist/utils-CoqjzHuU.mjs b/dist/utils-CoqjzHuU.mjs
+index 85f0c693772df5cb5582c51056ae817d9e0a8365..5a20b1f8bd17879493901ffe3f716a73b5112e36 100644
+--- a/dist/utils-CoqjzHuU.mjs
++++ b/dist/utils-CoqjzHuU.mjs
+@@ -555,7 +555,7 @@ async function normalizeClientAuthenticationParameters(request, body = {}) {
+ 	const hasAuthorizationHeader = Boolean(authorization);
+ 	if (request) {
+ 		if ((request.headers.get("content-type")?.toLowerCase() ?? "").includes("application/x-www-form-urlencoded")) {
+-			const params = new URLSearchParams(await request.clone().text());
++			const params = new URLSearchParams(new TextDecoder().decode(await request.clone().arrayBuffer()));
+ 			const clientIds = params.getAll("client_id").filter((value) => value.length > 0);
+ 			if (clientIds.length > 1) throwInvalidAuthenticationRequest("client_id must not be repeated");
+ 			clientId = clientIds[0];

@@ -1,9 +1,13 @@
 import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
 import { matchTenantApiBasePath } from "@/features/studio/studio-navigation";
 import { Component, useEffect, useMemo, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import type { ApiClient } from "@/api/api-client";
+import { useSessionReadsPaused } from "@/auth/logout-progress";
+import { useSessionGeneration } from "@/auth/session-scope";
 import { useAppLocale, useMessages } from "@/i18n/core";
 import type { MyDayWidget } from "@savia/studio-shared/my-day-widgets";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -79,71 +83,90 @@ export function PluginWidgetBody({
 }) {
   const locale = useAppLocale();
   const t = useMessages(widgetMessages);
-  const [extensions, setExtensions] = useState<
-    ExtensionInstallation[] | undefined
-  >(undefined);
-  const [failed, setFailed] = useState(false);
+  const sessionGeneration = useSessionGeneration();
+  const readsPaused = useSessionReadsPaused();
+  const { apiBasePath } = widget;
+  const scope = useMemo(
+    () => ({ apiClient, apiBasePath, sessionGeneration, readsPaused }),
+    [apiClient, apiBasePath, sessionGeneration, readsPaused],
+  );
+  const [verification, setVerification] = useState<
+    { scope: typeof scope } & (
+      | { status: "ready"; extensions: ExtensionInstallation[] }
+      | { status: "failed"; revision: number }
+    )
+  >();
   const [revision, setRevision] = useState(0);
-  const tenantId = matchTenantApiBasePath(widget.apiBasePath);
+  const retry = () => setRevision((value) => value + 1);
+  const tenantId = matchTenantApiBasePath(apiBasePath);
   useRealtimeRefresh({
     topics: ["studio"],
     tenantId: Number(tenantId),
-    enabled: tenantId !== undefined,
-    refresh: () => setRevision((value) => value + 1),
+    enabled: tenantId !== undefined && Boolean(apiClient) && !readsPaused,
+    refreshScope: scope,
+    refresh: retry,
   });
 
   const ref = useMemo(() => parsePluginKind(widget.kind), [widget.kind]);
-  const contribution = ref ? pluginContributionFor(ref) : undefined;
-  // Lo subido al store prevalece sobre lo compilado (sombra por tenant).
-  const storeWidget = ref ? storeWidgetFor(ref, extensions) : undefined;
-  const storeDeclared = ref
-    ? storeWidgetDeclarationFor(ref, extensions)
-    : undefined;
-
   useEffect(() => {
-    if (!apiClient || !ref) return;
-    let active = true;
-    setFailed(false);
-    void listWidgetExtensions(apiClient, widget.apiBasePath).then(
-      (result) => {
-        if (active) setExtensions(result);
+    const { apiClient, apiBasePath, readsPaused } = scope;
+    if (!apiClient || !ref || readsPaused) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    void listWidgetExtensions(apiClient, apiBasePath, { signal }).then(
+      (extensions) => {
+        if (!signal.aborted)
+          setVerification({ scope, status: "ready", extensions });
       },
       () => {
-        if (active) setFailed(true);
+        if (!signal.aborted)
+          setVerification({ scope, status: "failed", revision });
       },
     );
-    return () => {
-      active = false;
-    };
-  }, [apiClient, ref, widget.apiBasePath, revision]);
+    return () => controller.abort();
+  }, [scope, ref, revision]);
 
   const savia = useMemo(
     () =>
       apiClient && ref
-        ? pluginApiFor(ref.extensionId, apiClient, widget.apiBasePath)
+        ? pluginApiFor(ref.extensionId, apiClient, apiBasePath)
         : undefined,
-    [apiClient, ref, widget.apiBasePath],
+    [apiClient, ref, apiBasePath],
   );
 
-  if (!apiClient) return <PluginWidgetSkeleton />;
-  if (failed) {
+  const current = verification?.scope === scope ? verification : undefined;
+  if (!ref || !current) return <PluginWidgetSkeleton />;
+  if (current.status === "failed") {
+    if (current.revision !== revision) return <PluginWidgetSkeleton />;
+    const message = t("Could not verify this widget extension.");
     return (
-      <p className="text-sm text-muted-foreground">
-        {t("Could not verify this widget extension. Try refreshing.")}
-      </p>
+      <Alert aria-label={message}>
+        <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+          <span>{message}</span>
+          <Button type="button" variant="outline" size="sm" onClick={retry}>
+            <RefreshCw className="size-3.5" aria-hidden="true" />
+            {t("Retry")}
+          </Button>
+        </AlertDescription>
+      </Alert>
     );
   }
+  const { extensions } = current;
+  const contribution = pluginContributionFor(ref);
+  // Tenant store installations take precedence over bundled contributions.
+  const storeWidget = storeWidgetFor(ref, extensions);
+  const storeDeclared = storeWidgetDeclarationFor(ref, extensions);
   if (storeWidget) {
     return (
       <CustomPluginFrame
         pluginId={storeWidget.extensionId}
         installationVersion={
-          extensions?.find(
+          extensions.find(
             (entry) => entry.manifest.id === storeWidget.extensionId,
           )?.installed?.version
         }
         title={storeWidget.title[locale] ?? storeWidget.title.es}
-        src={`${widget.apiBasePath}/api/plugin-store/${encodeURIComponent(storeWidget.extensionId)}/widget?widget=${encodeURIComponent(storeWidget.id)}&collection=${encodeURIComponent(storeWidget.collection)}`}
+        src={`${apiBasePath}/api/plugin-store/${encodeURIComponent(storeWidget.extensionId)}/widget?widget=${encodeURIComponent(storeWidget.id)}&collection=${encodeURIComponent(storeWidget.collection)}`}
         heightClassName="h-[320px]"
       />
     );
@@ -157,8 +180,7 @@ export function PluginWidgetBody({
       </p>
     );
   }
-  if (!ref || !contribution) {
-    if (extensions === undefined) return <PluginWidgetSkeleton />;
+  if (!contribution) {
     return (
       <p className="text-sm text-muted-foreground">
         {t(
@@ -167,7 +189,7 @@ export function PluginWidgetBody({
       </p>
     );
   }
-  if (extensions === undefined || !savia) return <PluginWidgetSkeleton />;
+  if (!savia) return <PluginWidgetSkeleton />;
   const enabled = isPluginWidgetEnabled(contribution, extensions);
   if (!enabled) {
     return (

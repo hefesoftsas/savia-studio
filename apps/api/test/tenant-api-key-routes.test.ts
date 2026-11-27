@@ -11,7 +11,7 @@ import {
   upsertPrincipal,
   grantMembership,
   loadActor,
-  ensureBootstrapAdministrator,
+  setPlatformAdministrator,
 } from "../src/auth/identity-repository";
 import { seedTenantAgency } from "./tenant-fixtures";
 import { AuthenticationError, type AppActor } from "../src/auth/types";
@@ -240,7 +240,7 @@ describe("tenant API key administration", () => {
   it("permits platform administration without making the administrator the owner", async () => {
     const owner = await member(),
       platform = await member();
-    await ensureBootstrapAdministrator(env.DB, platform.principal.id);
+    await setPlatformAdministrator(env.DB, platform.principal.id, true);
     const actor = await loadActor(env.DB, platform.principal);
     const response = await post(app(actor), owner);
     expect(response.status).toBe(201);

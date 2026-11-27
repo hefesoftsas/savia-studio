@@ -56,6 +56,23 @@ it("imports the selected immutable version without activating it", async () => {
   );
   expect(await screen.findByText("Añadido al espacio")).toBeInTheDocument();
 });
+it("reports a conflicting workspace copy without marking the release as added", async () => {
+  const message =
+    "El espacio ya tiene esta versión con otro archivo. Revisa la copia en Mis plugins.";
+  vi.mocked(api)
+    .mockResolvedValueOnce({ configured: true, data: [release], cursor: null })
+    .mockRejectedValueOnce(Object.assign(new Error(message), { status: 409 }));
+  const refresh = vi.fn();
+  render(<PluginRegistry onImported={refresh} />);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Añadir al espacio Shared demo 1.2.0",
+    }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  expect(screen.queryByText("Añadido al espacio")).not.toBeInTheDocument();
+  expect(refresh).not.toHaveBeenCalled();
+});
 it("provides retry without replacing the local store on a registry outage", async () => {
   vi.mocked(api)
     .mockRejectedValueOnce(new Error("offline"))
@@ -65,6 +82,33 @@ it("provides retry without replacing the local store on a registry outage", asyn
   expect(
     await screen.findByText("No hay versiones publicadas."),
   ).toBeInTheDocument();
+});
+
+it("keeps a confirmed import when the workspace refresh fails and retries only the refresh", async () => {
+  vi.mocked(api).mockImplementation(async (path) =>
+    path === "/plugin-store/registry"
+      ? { configured: true, data: [release], cursor: null }
+      : { data: { id: release.id } },
+  );
+  const refresh = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("revalidation failed"))
+    .mockResolvedValue(undefined);
+  render(<PluginRegistry onImported={refresh} />);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Añadir al espacio Shared demo 1.2.0",
+    }),
+  );
+  expect(await screen.findByText("Añadido al espacio")).toBeVisible();
+  expect(screen.queryByText(/No se pudo añadir/)).not.toBeInTheDocument();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Actualizar lista de plugins" }),
+  );
+  await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+  expect(
+    vi.mocked(api).mock.calls.filter(([, method]) => method === "POST"),
+  ).toHaveLength(1);
 });
 
 it("installs the imported pinned version explicitly", async () => {
@@ -88,7 +132,7 @@ it("installs the imported pinned version explicitly", async () => {
     expect(api).toHaveBeenCalledWith(
       "/extensions/custom.demo/install",
       "POST",
-      { version: "1.2.0" },
+      { version: release.version, sha256: release.sha256 },
     ),
   );
   expect(await screen.findByText("Versión instalada")).toBeInTheDocument();

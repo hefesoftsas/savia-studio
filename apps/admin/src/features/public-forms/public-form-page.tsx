@@ -223,6 +223,7 @@ function SubmissionForm({
     retryVerification,
     error,
     pending,
+    retryBlocked,
     uncertain,
     duplicate,
     receipt,
@@ -404,7 +405,7 @@ function SubmissionForm({
                 : visibleError}
             </p>
           )}
-          <Button type="submit" disabled={!captcha || pending}>
+          <Button type="submit" disabled={!captcha || pending || retryBlocked}>
             {pending
               ? t("Enviando…")
               : uncertain

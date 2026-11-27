@@ -52,7 +52,9 @@ describe("currency field type", () => {
       discount: -50,
     });
     expect(invalid.errors.price).toBe("Precio: debe ser un número");
-    expect(invalid.errors.discount).toBe("Descuento: fuera del rango permitido");
+    expect(invalid.errors.discount).toBe(
+      "Descuento: fuera del rango permitido",
+    );
   });
 
   it("supports Currency in pipeline amountField", () => {
@@ -63,7 +65,11 @@ describe("currency field type", () => {
       config: {
         ...makeConfig({
           name: { type: "Textbox", label: "Nombre" },
-          amount: { type: "Currency", label: "Monto", config: { currency: "USD" } },
+          amount: {
+            type: "Currency",
+            label: "Monto",
+            config: { currency: "USD" },
+          },
           stage: {
             type: "Dropdown",
             label: "Etapa",
@@ -87,15 +93,45 @@ describe("currency field type", () => {
     expect(parsed.success).toBe(true);
   });
 
-  it("parses currency in CSV import", () => {
+  it.each([
+    ["1500000", "50000"],
+    ["COP 1.500.000,00", "50.000,00 COP"],
+    ["$ 1,500,000.00", "50 000,00"],
+  ])("parses currency in CSV import from %s and %s", (price, discount) => {
     const result = mapCsvRow(
       object,
       ["Nombre", "Precio", "Descuento"],
-      ["Contrato Auto", "1500000", "50000"],
+      ["Contrato Auto", price, discount],
       { Nombre: "name", Precio: "price", Descuento: "discount" },
     );
     expect(result.errors).toEqual({});
     expect(result.data.price).toBe(1500000);
     expect(result.data.discount).toBe(50000);
+    expect(result.data.total).toBe(1450000);
+  });
+
+  it.each(["USD 1500000", "COP 1USD500000", "COP 1.234", "COP"])(
+    "reports an error for the amount %s",
+    (price) => {
+      const result = mapCsvRow(
+        object,
+        ["Nombre", "Precio"],
+        ["Contrato Auto", price],
+        { Nombre: "name", Precio: "price" },
+      );
+      expect(result.errors.price).toBeDefined();
+      expect(result.data.price).toBeNull();
+    },
+  );
+
+  it("imports an unambiguous decimal comma into a number field", () => {
+    const measurements: StudioObject = {
+      ...object,
+      config: makeConfig({ measure: { type: "Number", label: "Measure" } }),
+    };
+    const result = mapCsvRow(measurements, ["Measure"], ["-12,5"], {
+      Measure: "measure",
+    });
+    expect(result).toEqual({ data: { measure: -12.5 }, errors: {} });
   });
 });

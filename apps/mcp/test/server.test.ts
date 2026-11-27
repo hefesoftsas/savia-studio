@@ -131,6 +131,89 @@ describe("Savia FastMCP server", () => {
       await client.close();
     }
   });
+  it("preserves Studio cursors and provider errors through the MCP tools", async () => {
+    const token = "opaque+cursor/==";
+    const retryAfter = new Date(Date.now() + 60_000).toUTCString();
+    const recordQueries: URLSearchParams[] = [];
+    const server = createSaviaMcpServer(
+      new SaviaApiClient("https://api.test", "caller", async (input, init) => {
+        const url = new URL(String(input));
+        expect(new Headers(init?.headers).get("authorization")).toBe(
+          "Bearer caller",
+        );
+        if (url.pathname.endsWith("/active-tenant"))
+          return Response.json({ activeTenantId: 14 });
+        if (url.pathname.endsWith("/objects"))
+          return Response.json({ data: [{ name: "hubspot_contacts" }] });
+        expect(url.pathname).toBe("/v1/studio/14/api/records/hubspot_contacts");
+        if (url.searchParams.get("q") === "Limited")
+          return Response.json(
+            { error: "HubSpot alcanzó el límite de solicitudes." },
+            { status: 429, headers: { "Retry-After": retryAfter } },
+          );
+        recordQueries.push(url.searchParams);
+        return Response.json(
+          url.searchParams.get("page") === "1"
+            ? {
+                data: [{ id: "1" }],
+                pageInfo: { hasNextPage: true },
+                nextCursor: token,
+              }
+            : {
+                data: [{ id: "2" }],
+                pageInfo: { hasNextPage: false },
+                total: 2,
+              },
+        );
+      }),
+    );
+    const client = await Client.connect(server);
+    try {
+      const options = {
+        object: "hubspot_contacts",
+        perPage: 1,
+        query: "Example",
+      };
+      const first = await client.callTool("savia_list_studio_records", options);
+      expect(first.structuredContent).toMatchObject({
+        nextCursor: token,
+        total: null,
+      });
+      for (const tool of [
+        "savia_list_studio_records",
+        "savia_list_crm_records",
+      ]) {
+        const next = await client.callTool(tool, {
+          ...options,
+          page: 2,
+          cursor: token,
+        });
+        expect(next.structuredContent).toMatchObject({
+          data: [{ id: "2" }],
+          total: 2,
+        });
+      }
+      expect(recordQueries.map((query) => query.get("cursor"))).toEqual([
+        null,
+        token,
+        token,
+      ]);
+      expect(recordQueries.every((query) => query.get("q") === "Example")).toBe(
+        true,
+      );
+      await expect(
+        client.callTool("savia_list_studio_records", {
+          ...options,
+          query: "Limited",
+        }),
+      ).rejects.toThrow(
+        `429 API_ERROR: HubSpot alcanzó el límite de solicitudes. Retry after ${new Date(retryAfter).toISOString()}.`,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
   it("exposes the domain API as tools, a resource, and an operating prompt", async () => {
     const apiUrl = await startApi(async (request) => {
       if (request.url === "/v1/domains") {

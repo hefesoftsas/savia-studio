@@ -524,6 +524,9 @@ D1 batch transaction. Separate drop/create requests race across Worker isolates
 and can fail with "trigger already exists", even when each isolate caches its
 own initialization promise. Exercise concurrent login requests on a newly
 published Auth version to cover this startup path.
+The Auth migration type check accepts `TEXT` columns for JSON-encoded arrays
+in SQLite and D1, matching the storage Better Auth generates for OAuth scopes,
+resource lists and redirect URLs.
 The Auth Worker must also reuse its initialized handler while all environment
 bindings and configuration values remain unchanged. Constructing Better Auth on
 every request repeats its OAuth resource merge initialization, including guarded

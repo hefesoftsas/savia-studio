@@ -9,12 +9,21 @@ Booking is a native, optional tenant capability. It starts disabled and unpublis
 When you open **Bookings** from the Savia platform, choose an organization to open **Bookings** in its workspace. If Savia asks you to sign in to that workspace, it opens **Bookings** after sign-in. The picker lists active commercial organizations you can access. If the list is empty, ask an administrator for access.
 Platform administrators can open **Bookings** from the menu even without a
 membership in a commercial organization.
+If a background refresh fails temporarily, the selector keeps the last
+confirmed organization list for the current session and offers a retry.
+When the server denies access, the selector clears the list.
 The sign-in return also works for links with a trailing slash or a
 case-insensitive match of the Bookings route.
 Signing in from the platform portal or local Admin also resumes Bookings on
 the configured callback origin, including any requested tab and date.
+Local development and branch Previews without dedicated workspace domains
+list accessible organizations in the same deployment. Selecting one opens
+Bookings on that origin. The selection survives signing in again, and the
+API checks access to the selected organization on every Bookings request.
 Changing the reservations date or leaving its tab cancels the pending list
 request so its response cannot replace the current view.
+When the date changes, the agenda hides the previous day's reservations and
+pagination while the selected date is being read.
 
 If a Bookings link specifies a tab or date, both the organization picker and
 sign-in preserve those selections. Switching tabs updates the URL, so the
@@ -33,7 +42,14 @@ exception dates and keeps pending additions, edits, and removals in the draft.
 Changing workspaces resets the booking form and its saving state. Leaving Bookings
 or choosing another workspace cancels any pending settings read. A response
 from the previous workspace applies only to the request that sent it.
-If your session expires in Bookings, signing in again opens the same view.
+When sign-out starts, Bookings hides the organization picker and agenda,
+cancels pending reads, and pauses new reads until the session is available.
+If the organization list, workspace lookup, booking settings or reservations
+require a new session, **Sign in again** returns to the same Bookings view with
+its workspace, tab and date preserved. This also applies if the session expires
+while saving booking settings, availability, calendar preferences, or My Day
+access, or while cancelling a reservation or requesting a video link. After
+signing in, review the current state before submitting the change again.
 On a dedicated hostname, Bookings waits for a valid workspace. If the server
 reports that the workspace is missing or inaccessible, **Retry** resolves it
 again from the current tab and date.
@@ -44,6 +60,10 @@ booking settings or reservations after the workspace initially resolved.
 If the identity provider returns an error during authorization or during the
 code exchange for a valid Bookings transaction, **Sign in again** starts a new
 transaction for the same workspace, tab, and date.
+If the authentication page restarts access because the authorization or its MFA
+challenge expired, the new sign-in also retains the selected tab and date.
+When the final callback arrives within five minutes after the login transaction
+expires, **Sign in again** preserves the same workspace and Bookings view.
 
 Open **Bookings** in the tenant navigation. Administrators use a five-step setup wizard: **Details → Team → Services → Hours → Review and publish**. Details include the public title, description and IANA time zone; expand **Booking rules** to configure advance notice, booking horizon, cancellation cutoff and reminders. Add professionals from the tenant's users, assign them to services, then configure their weekly schedules. Moving between steps preserves unsaved edits. A service specifies its duration and trailing buffer. Durations, buffers and availability boundaries use five-minute increments; offered start times use fifteen-minute increments.
 
@@ -70,6 +90,11 @@ Publish when booking is enabled and an enabled service has an enabled profession
 
 ### Personal and team public links
 
+If your session expires while loading or managing links, **Sign in again**
+returns to the **Booking links** tab in the same workspace. The tab reloads
+the current list, so you can review it before trying the action again.
+Leaving this tab cancels the pending list request.
+
 New links default to a 30-day expiry and 25 admitted booking submissions per UTC day. Choose 24 hours, 7 days, 30 days, or explicitly no expiry; the daily budget can be configured from 1 to 1,000. Copy the canonical URL, use the device's share action, or show a QR code. Each link also receives a Savia short URL; when Shlink is configured, the short URL action uses it and falls back to the Savia URL if the provider is unavailable. Shortening does not grant different booking permissions.
 
 Each link has independent revocation and deletion. Delete permanently removes the public link from the panel and invalidates its canonical and short URLs, including legacy team links; it does not delete reservations or their private management links. Personal links expose only enabled services assigned to their fixed professional; optional service-scoped links expose only that service. The server enforces this scope for the catalog, challenge, availability and reservation, including caller-submitted identifiers. Disabled professionals/services, removed membership, inactive tenants, expiry and unpublishing stop new bookings. Existing tenant-wide URLs remain team links and can be revoked or deleted through the same panel; they are never silently converted into personal links.
@@ -90,10 +115,18 @@ A successful retry shows the stored time and status, including changes or
 cancellation made after the initial request.
 If you go back to the calendar after a request whose outcome is unknown,
 **Retry previous booking** uses the original details and request key even when
-the selected time now appears occupied.
+the selected time now appears occupied. If that retry needs fresh verification,
+complete it in the previous booking panel and retry the same request.
 
 When the per-minute request limit is reached, the public calendar and booking
 form show when to retry if the server supplies a reset time.
+Savia preserves the error status and retry deadline from the headers even
+if the response body times out.
+Opening or reloading the public link shares the calendar's read deadline. The
+customer can retry loading the link once the deadline passes.
+The booking form pauses new submissions until the advertised minute or daily
+deadline passes. A rate-limited retry keeps any unconfirmed booking available
+for recovery with the original request key.
 
 When the form reloads its CAPTCHA after a language change or a return from the calendar, complete the new verification before submitting. If verification fails to load, **Retry verification** reloads the CAPTCHA and keeps the selected time and contact details.
 When verification is rejected or the daily booking limit is reached, the form
@@ -102,6 +135,10 @@ After a timeout or server error, retrying from the review step also uses fresh
 verification and preserves the original request key.
 
 Returning from the review step refreshes availability for the selected month. If availability cannot be loaded, retry to check the previously selected time. The form only lets you continue once it confirms that the time is still available.
+If an availability request reaches the rate limit, the calendar keeps the
+selected month and display time zone. It pauses availability requests until
+the server's retry time. On a private link, the calendar and appointment
+refresh share the same read deadline.
 
 The selected date and its available times use the booking display time zone, which you can change in the calendar.
 The last bookable date reflects the elapsed booking horizon in that time zone.
@@ -121,7 +158,18 @@ The management page closes the reschedule form and disables cancellation when th
 
 If saving or rescheduling an appointment returns an HTTP conflict, the form rechecks the appointment or refreshes available times as needed, even when the error response has no JSON details.
 If the connection drops or the server returns a 5xx response while rescheduling, the management page checks whether the new time was saved. If the time is unchanged and the appointment can still be rescheduled, the customer can confirm the same selection again using the latest appointment version. If the appointment now has a different time, the page shows that time and closes the previous review.
-If a cancellation request fails, the management page checks the appointment's current status. It displays a completed cancellation and uses the latest version if the customer chooses to retry an active appointment. If the appointment moved, the page shows the new time and closes any open reschedule review before the customer can retry.
+The management page checks the appointment's current status to recover from cancellation failures such as a dropped connection or a version conflict. It displays a completed cancellation and uses the latest version if the customer chooses to retry an active appointment. If the appointment moved, the page shows the new time and closes any open reschedule review before the customer can retry.
+When a cancellation or reschedule request is rate-limited, the page preserves
+the appointment and any selected time. It displays the retry time supplied by
+the server, pauses both actions until then, and waits for the customer to
+confirm another attempt.
+The private link also pauses retries when the server rate-limits opening or
+refreshing the appointment. If a change is still unverified, the customer must
+refresh the appointment successfully before making another change.
+If an appointment refresh reports that the private management link is no longer
+available, the page hides the previous appointment details and actions and asks
+the customer to contact the booking owner. The same applies when the page checks
+the appointment after a failed cancellation or reschedule.
 
 Expiry and revocation do not delete reservations or invalidate their distinct private management links. Deleting a public link has the same preservation behavior. Management and cancellation policies below continue to apply.
 

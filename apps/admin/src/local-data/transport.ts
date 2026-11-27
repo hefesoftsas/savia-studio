@@ -2,7 +2,7 @@ import { localRecordLinks } from "./link-snapshots";
 import { embeddedApiPathname } from "@/api/embedded-transport";
 import { isOfflineError } from "@/offline/offline-error";
 import { validateRecord } from "@savia/studio-shared/metadata";
-import type { LocalStore } from "./store";
+import { LocalDeleteConflict, type LocalStore } from "./store";
 import type { SyncTransport } from "./contracts";
 import { queryRecords, querySummary, queryRecordDetail } from "./query";
 import {
@@ -14,7 +14,7 @@ import {
 const response = (error: string, status = 503) =>
   Response.json({ error }, { status });
 const revalidatedMetadata = new Map<string, number>();
-/** CRM transport whose record read/write critical path is always IndexedDB. */
+/** Routes replicated CRM operations through the local store. */
 export function createLocalTransport(
   store: LocalStore,
   network: SyncTransport,
@@ -65,28 +65,45 @@ export function createLocalTransport(
         segments[2],
         segments[3],
       );
-    if (
+    const historyRestore =
       segments[1] === "record-history" &&
       segments.length === 6 &&
       segments[5] === "restore" &&
-      ["GET", "PUT"].includes(method)
-    ) {
+      ["GET", "PUT"].includes(method);
+    const trashRestore =
+      method === "POST" &&
+      segments[1] === "records" &&
+      segments.length === 5 &&
+      segments[4] === "restore";
+    const restoring = historyRestore || trashRestore;
+    const bulkWrite =
+      method === "POST" &&
+      segments[1] === "records" &&
+      segments.length === 4 &&
+      segments[3] === "bulk";
+    if (restoring || bulkWrite) {
       const collection = segments[2],
         id = segments[3];
       if (
-        (await store.db.outbox
+        restoring &&
+        ((await store.db.outbox
           .where("[collection+id]")
           .equals([collection, id])
+          .filter((mutation) => !mutation.quarantined)
           .count()) ||
-        (await store.getPendingBundle(collection, id))
+          (await store.getPendingBundle(collection, id)))
       )
-        return response(
-          "Hay cambios locales pendientes. Sincroniza o resuelve los conflictos antes de restaurar.",
-          409,
+        return Response.json(
+          {
+            error:
+              "Hay cambios locales pendientes. Sincroniza o resuelve los conflictos antes de restaurar.",
+            code: "LOCAL_RECORD_CHANGES_PENDING",
+          },
+          { status: 409 },
         );
       const result = await network(path, init);
-      if (method === "PUT" && result.ok) {
-        // The commit already succeeded; a failed refresh must not be reported as a failed write.
+      if (method !== "GET" && result.ok) {
+        // Keep the server outcome if refreshing the replica fails.
         try {
           await syncNow(collection, true);
         } catch {
@@ -116,6 +133,15 @@ export function createLocalTransport(
         definition = await store.db.collections.get(collection);
       }
       if (definition && definition.capability !== "remote") {
+        if (
+          method === "GET" &&
+          segments[1] === "records" &&
+          segments.length === 3 &&
+          url.searchParams.get("trash") === "true" &&
+          definition.object.config.studio?.capabilities
+        )
+          // Scoped replicas receive removals for deleted records, not their data.
+          return network(path, { ...init, cache: "no-store" });
         const state = await store.db.syncState.get(collection);
         if (!state?.hydrated) {
           await syncNow(collection);
@@ -195,8 +221,10 @@ export function createLocalTransport(
               return response("Registro no encontrado.", 404);
             const deleteVersion =
               action === "delete" ? url.searchParams.get("version") : null;
+            const expectsLocalDraft = deleteVersion === "local";
             if (
               deleteVersion !== null &&
+              !expectsLocalDraft &&
               (!/^\d+$/.test(deleteVersion) ||
                 !Number.isSafeInteger(Number(deleteVersion)) ||
                 Number(deleteVersion) < 1)
@@ -204,9 +232,7 @@ export function createLocalTransport(
               return response("La versión del registro no es válida.", 422);
             const input =
               action === "delete"
-                ? deleteVersion === null
-                  ? {}
-                  : { _version: Number(deleteVersion) }
+                ? {}
                 : (JSON.parse(String(init.body ?? "{}")) as Record<
                     string,
                     unknown
@@ -225,9 +251,11 @@ export function createLocalTransport(
             if (Object.keys(validated.errors).length)
               return response(Object.values(validated.errors).join(" "), 422);
             const baseVersion =
-              action === "create"
-                ? undefined
-                : typeof input._version === "number"
+              deleteVersion !== null
+                ? expectsLocalDraft
+                  ? null
+                  : Number(deleteVersion)
+                : action === "update" && typeof input._version === "number"
                   ? input._version
                   : existing?._version;
             const { data, mutationId } = await store.mutateWithReceipt(
@@ -244,6 +272,11 @@ export function createLocalTransport(
             );
           }
         } catch (error) {
+          if (error instanceof LocalDeleteConflict)
+            return response(
+              "El registro cambió; recarga antes de eliminar.",
+              409,
+            );
           return response(
             error instanceof Error
               ? error.message

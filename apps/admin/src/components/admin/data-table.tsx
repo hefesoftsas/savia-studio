@@ -105,6 +105,7 @@ export function DataTable<RecordType extends RaRecord = RaRecord>(
     rowClassName,
     bulkActionButtons = defaultBulkActionButtons,
     bulkActionsToolbar,
+    hasBulkActions = Boolean(bulkActionsToolbar) || bulkActionButtons !== false,
     scrollViewportRef,
     virtualize = false,
     rowOffset = 0,
@@ -119,7 +120,6 @@ export function DataTable<RecordType extends RaRecord = RaRecord>(
     },
     [scrollViewportRef],
   );
-  const hasBulkActions = !!bulkActionsToolbar || bulkActionButtons !== false;
   const resourceFromContext = useResourceContext(props);
   const storeKey = props.storeKey || `${resourceFromContext}.datatable`;
   const [columnRanks] = useStore<number[]>(`${storeKey}_columnRanks`);

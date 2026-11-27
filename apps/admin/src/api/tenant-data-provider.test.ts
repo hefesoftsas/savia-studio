@@ -192,6 +192,25 @@ describe("tenant data provider", () => {
     });
   });
 
+  it.each([
+    null,
+    { data: null },
+    { data: { ...tenant, id: 0 } },
+    { data: { ...tenant, id: "101" } },
+    { data: { ...tenant, idSlug: "" } },
+  ])(
+    "does not report an incomplete tenant receipt as a successful creation",
+    async (receipt) => {
+      const { client, provider } = setup();
+      client.post.mockResolvedValue(receipt);
+
+      await expect(
+        provider.create("tenants", { data: { name: tenant.name } }),
+      ).rejects.toMatchObject({ code: "TENANT_CREATION_UNCONFIRMED" });
+      expect(client.post).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each([undefined, "", "  "])(
     "rejects a transfer without a selected user (%j) before calling the API",
     async (existingUserId) => {

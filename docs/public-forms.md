@@ -229,7 +229,9 @@ If a link is revoked or its workspace deactivated during verification, the
 request is rejected as unavailable without consuming a submission slot.
 An HTTP 408 also preserves the original submission identifier and values.
 Once a daily limit is reached, the API returns the next UTC midnight in
-`Retry-After`. The form shows the reset time in the visitor's browser time zone.
+`Retry-After`. The form shows the reset time in the visitor's browser time
+zone and preserves the draft. The visitor can submit again once that deadline
+passes and verification is complete.
 Replay conflicts are identified separately from other HTTP 409 responses. If
 configuration changes invalidate a link, the form asks for a replacement link.
 
@@ -257,7 +259,7 @@ customer forms are required for verification.
 
 ## Self-hosted Docker CAPTCHA
 
-The native Docker runtime uses ALTCHA instead of requiring Turnstile credentials. Challenges are generated and verified locally, expire after five minutes, and are bound to the form, public origin and submission action. The receipt stores a canonical proof identity to prevent replay via alternate encodings. An uncertain retry keeps the exact original proof and submission ID so a saved receipt can be returned after expiry. The widget and its worker are bundled locally. The existing submission-only API, field validation, rate limits and quotas remain enforced. Cloudflare keeps Turnstile as its default. See the [Docker deployment guide](guides/self-hosted-docker.md).
+The native Docker runtime uses ALTCHA instead of requiring Turnstile credentials. Challenges are generated and verified locally, expire after five minutes, and are bound to the form, public origin and submission action. The receipt stores a canonical proof identity to prevent replay via alternate encodings. An uncertain retry keeps the exact original proof and submission ID so a saved receipt can be returned after expiry, including when a retry was temporarily rate-limited. The widget and its worker are bundled locally. The existing submission-only API, field validation, rate limits and quotas remain enforced. Cloudflare keeps Turnstile as its default. See the [Docker deployment guide](guides/self-hosted-docker.md).
 
 ### Public form brand layout
 
@@ -280,6 +282,9 @@ A late POST response cannot replace the receipt recovered from status.
 After a lost submission response, the visible wizard checks the same
 submission a bounded number of times while it waits for a receipt, including
 after temporary failures in the status connection.
+If a status check is rate-limited, the wizard honors `Retry-After` or waits
+15 seconds when the server gives no deadline. Returning to the tab during
+that pause keeps the deadline for the current submission.
 Each status check times out after five seconds so a stalled response cannot
 prevent those recovery attempts.
 The final screen keeps completed provider results and failures already exposed

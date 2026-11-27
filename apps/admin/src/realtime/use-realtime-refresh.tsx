@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRealtimeTopics, type RealtimeChangeEvent } from "./use-realtime";
+import { useSessionGeneration } from "@/auth/session-scope";
 import { Button } from "@/components/ui/button";
 import { useMessages } from "@/i18n/core";
 import { accessMessages } from "@/i18n/locales/access";
@@ -19,13 +20,14 @@ export function useRealtimeRefresh({
   tenantId?: number;
   enabled?: boolean;
   blocked?: boolean;
-  /** Discard queued refreshes and notices when the displayed data changes within a room. */
-  refreshScope?: string;
+  /** Stable key or object identifying the displayed data within a room. */
+  refreshScope?: string | object;
   /** Catch up cache-first opening reads without refreshing every global listener. */
   refreshOnInitialConnect?: boolean;
   refresh: () => void | Promise<unknown>;
   accepts?: (event: RealtimeChangeEvent) => boolean;
 }) {
+  const sessionGeneration = useSessionGeneration();
   const [changed, setChanged] = useState(false);
   const latest = useRef({ blocked, refresh, accepts });
   latest.current = { blocked, refresh, accepts };
@@ -38,16 +40,18 @@ export function useRealtimeRefresh({
     promise: Promise<boolean>;
   } | null>(null);
   const followUp = useRef<number | undefined>(undefined);
+  const wasBlocked = useRef(blocked);
   useEffect(() => {
     generation.current++;
     connected.current = false;
     followUp.current = undefined;
+    wasBlocked.current = latest.current.blocked;
     setChanged(false);
     return () => {
       generation.current++;
       clearTimeout(timer.current);
     };
-  }, [scope, refreshScope]);
+  }, [scope, refreshScope, sessionGeneration]);
   const reload = useCallback(async function reload() {
     clearTimeout(timer.current);
     const token = generation.current;
@@ -77,7 +81,6 @@ export function useRealtimeRefresh({
     })();
     return task.promise;
   }, []);
-  const wasBlocked = useRef(blocked);
   useEffect(() => {
     const released = wasBlocked.current && !blocked;
     wasBlocked.current = blocked;

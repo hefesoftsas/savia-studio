@@ -1016,7 +1016,7 @@ live("access revision invalidation", () => {
             await capture();
             await db
               .prepare(
-                "INSERT INTO identity_global_role VALUES('p','platform_admin','now')",
+                "INSERT INTO identity_global_role(principal_id,role,created_at) VALUES('p','platform_admin','now')",
               )
               .run();
             await capture();

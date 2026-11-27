@@ -9,7 +9,7 @@ declare module "virtual:savia-plugin-ide-runtime" {
   export default runtime;
 }
 
-declare module "virtual:savia-plugin-ide-vendors" {
-  const vendors: Record<string, string>;
-  export default vendors;
+declare module "virtual:savia-plugin-ide-vendor/*" {
+  const bundle: string;
+  export default bundle;
 }

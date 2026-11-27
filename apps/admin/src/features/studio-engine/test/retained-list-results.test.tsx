@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "@testing-library/react";
 import { render } from "./locale-test-render";
 import { cleanup, screen } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { ListContextProvider, useListContext } from "ra-core";
 import { RetainedListResults } from "../retained-list-results";
 afterEach(cleanup);
@@ -19,9 +19,11 @@ function Rows() {
 let client = new QueryClient();
 function View({
   scope = "people",
+  refetch = async () => {},
   ...value
 }: {
   scope?: string;
+  refetch?: () => Promise<unknown>;
   data?: { id: string; name: string }[];
   error?: Error;
   isPending?: boolean;
@@ -35,7 +37,7 @@ function View({
           {
             ...value,
             resource: scope,
-            refetch: async () => {},
+            refetch,
             total: 1,
           } as never
         }
@@ -56,19 +58,35 @@ it("keeps successful rows visible after an interrupted page change and exposes r
   expect(screen.getByRole("alert")).toHaveTextContent("No connection");
   expect(screen.getByRole("button", { name: "Reintentar" })).toBeVisible();
 });
-it("shows the earliest retry time on a rate-limit error", () => {
-  render(
-    <View
-      error={Object.assign(new Error("Rate limit"), {
-        status: 429,
-        retryAt: Date.parse("2031-01-01T12:00:30Z"),
-      })}
-    />,
-  );
-  expect(screen.getByRole("alert")).toHaveTextContent(
-    "Puedes reintentar a partir de",
-  );
-  expect(screen.getByRole("button", { name: "Reintentar" })).toBeEnabled();
+it("blocks a manual retry until the rate limit expires", () => {
+  vi.useFakeTimers();
+  const refetch = vi.fn(async () => {});
+  try {
+    render(
+      <View
+        error={Object.assign(new Error("Rate limit"), {
+          status: 429,
+          retryAt: Date.now() + 30_000,
+        })}
+        refetch={refetch}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Puedes reintentar a partir de",
+    );
+    const retry = screen.getByRole("button", { name: "Reintentar" });
+    act(() => vi.advanceTimersByTime(29_999));
+    expect(retry).toBeDisabled();
+    retry.click();
+    expect(refetch).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(retry).toBeEnabled();
+    expect(refetch).not.toHaveBeenCalled();
+    retry.click();
+    expect(refetch).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 it("does not reuse another collection or retain records after access is denied", () => {
   const { rerender } = render(<View data={[{ id: "1", name: "Ana" }]} />);
@@ -80,6 +98,33 @@ it("does not reuse another collection or retain records after access is denied",
   );
   expect(screen.queryByText("Ana")).not.toBeInTheDocument();
 });
+
+it.each(["reset", "remove"])(
+  "keeps the visible page during a cache %s of an older page",
+  async (operation) => {
+    client = new QueryClient();
+    const oldPage = ["people", "getList", { pagination: { page: 1 } }];
+    const currentPage = ["people", "getList", { pagination: { page: 2 } }];
+    const data = [{ id: "2", name: "Person on this page" }];
+    client.setQueryData(oldPage, {
+      data: [{ id: "1", name: "Earlier person" }],
+      total: 2,
+    });
+    client.setQueryData(currentPage, { data, total: 2 });
+    const { rerender } = render(<View data={data} />);
+    expect(screen.getByText("Person on this page")).toBeVisible();
+
+    await act(async () => {
+      if (operation === "reset")
+        await client.resetQueries({ queryKey: oldPage, exact: true });
+      else client.removeQueries({ queryKey: oldPage, exact: true });
+    });
+
+    expect(screen.getByText("Person on this page")).toBeVisible();
+    rerender(<View isFetching isPending />);
+    expect(screen.getByText("Person on this page")).toBeVisible();
+  },
+);
 
 it("clears retained and placeholder rows when the resource cache is reset or removed", async () => {
   for (const operation of ["reset", "remove"] as const) {

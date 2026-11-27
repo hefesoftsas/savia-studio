@@ -411,6 +411,21 @@ export const automationMessages = {
     "Record unavailable",
     "Registro indisponível",
   ],
+  "Colección no disponible": [
+    "Colección no disponible",
+    "Collection unavailable",
+    "Coleção indisponível",
+  ],
+  "No se pudo abrir el registro de este enlace.": [
+    "No se pudo abrir el registro de este enlace.",
+    "This link could not open the record.",
+    "Não foi possível abrir o registro deste link.",
+  ],
+  "El formulario ya no está abierto.": [
+    "El formulario ya no está abierto.",
+    "The form is no longer open.",
+    "O formulário não está mais aberto.",
+  ],
   "La colección del enlace ya no está disponible.": [
     "La colección del enlace ya no está disponible.",
     "The collection linked here is no longer available.",
@@ -1336,6 +1351,11 @@ export const automationMessages = {
     "Exportar CSV completo",
     "Export complete CSV",
     "Exportar CSV completo",
+  ],
+  "Cancelar descarga": [
+    "Cancelar descarga",
+    "Cancel download",
+    "Cancelar download",
   ],
   "Seleccionar CSV": ["Seleccionar CSV", "Select CSV", "Selecionar CSV"],
   "UTF-8, separado por comas o punto y coma. Relaciones: ID; múltiples: arreglo JSON.":
@@ -3084,6 +3104,16 @@ export const automationMessages = {
     "Saved on this device · sync pending",
     "Salvo neste dispositivo · sincronização pendente",
   ],
+  "Sincroniza el registro antes de asociar sus archivos.": [
+    "Sincroniza el registro antes de asociar sus archivos.",
+    "Sync this record before attaching its files.",
+    "Sincronize o registro antes de anexar os arquivos.",
+  ],
+  "No se pudo conectar con Savia. Reintenta.": [
+    "No se pudo conectar con Savia. Reintenta.",
+    "Could not connect to Savia. Try again.",
+    "Não foi possível conectar ao Savia. Tente novamente.",
+  ],
   "Cambios guardados": [
     "Cambios guardados",
     "Changes saved",
@@ -3098,6 +3128,11 @@ export const automationMessages = {
     "Registro movido a la papelera",
     "Record moved to trash",
     "Registro movido para a lixeira",
+  ],
+  "Movido a la papelera en este dispositivo · sincronización pendiente": [
+    "Movido a la papelera en este dispositivo · sincronización pendiente",
+    "Moved to trash on this device · sync pending",
+    "Movido para a lixeira neste dispositivo · sincronização pendente",
   ],
   " %{value0} no disponibles con esta conexión.": [
     " %{value0} no disponibles con esta conexión.",

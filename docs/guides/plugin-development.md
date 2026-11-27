@@ -88,6 +88,12 @@ The parent document, credentials, and internal React state are not exposed.
 Operations cross the existing host bridge and the authenticated backend. Use
 `savia.ui` for supported panels, `savia.settings` for versioned settings,
 `savia.files` for attachments, and `savia.actions` for configured server actions.
+In Studio and My Day, `savia.files.download(id)` stops after 15 seconds without
+receiving file data. Downloads continue while bytes arrive within that limit.
+Handle a stalled download as a failed request and let the user retry it.
+An upload also fails if its confirmation stalls. The server may have saved the
+attachment before its response was interrupted, so refresh the attachment list
+before offering to upload the file again.
 Check optional capabilities before using them. Keep external-service secrets in
 backend-managed connections.
 
@@ -190,6 +196,12 @@ code stays unchanged until applied. Saved-project status appears in the bottom
 status bar.
 
 **Run** validates and opens preview; **Publish** releases the validated revision.
+The browser downloads the preview runtime when compilation starts. It loads the
+bundled Zod or PDF-lib dependency when an archived project imports that library.
+Use **Stop preview** during compilation to return to editing. The editor ignores
+late results and errors from a stopped compilation.
+If the preview frame does not report readiness within 15 seconds, Savia closes
+the frame and shows an error. Run the preview again to start a fresh frame.
 The project options menu contains import/export and the optional publication
 destination. This bounded Savia plugin workspace starts with the four files
 below and supports the reviewed web extension catalog described at the end of

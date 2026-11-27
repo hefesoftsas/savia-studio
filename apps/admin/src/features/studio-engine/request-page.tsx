@@ -26,9 +26,12 @@ import {
 } from "./request-page-api";
 import { getStudioRuntime } from "./runtime";
 import { jsonPointer } from "@savia/studio-shared/collection-operations";
+import { canonicalJson } from "@savia/studio-shared/solution-package";
 import DynamicForm from "./dynamic-form";
 import { LookupActions } from "./lookup-actions";
 import { useRealtimeTopics } from "@/realtime/use-realtime";
+import { useSessionGeneration } from "@/auth/session-scope";
+import { isReadAccessDenied } from "@/queries/read-state";
 
 function RefreshResultsButton({ onClick }: { onClick: () => void }) {
   const t = useMessages(automationMessages);
@@ -178,7 +181,8 @@ export default function RequestPage({ object }: { object: StudioObject }) {
   const isWizard = !!object.config.studio?.wizard?.enabled;
   const [surface, setSurface] = useState<"form" | "results">("form");
   const tenantId = String(getStudioRuntime().tenantId ?? 0);
-  const scopeKey = `${tenantId}:${object.name}`;
+  const sessionGeneration = useSessionGeneration();
+  const scopeKey = `${sessionGeneration}:${tenantId}:${object.name}`;
   const [selected, setSelected] = useState(() =>
     defaultSelectedActions(config.actions),
   );
@@ -187,20 +191,37 @@ export default function RequestPage({ object }: { object: StudioObject }) {
   const [runs, setRuns] = useState<PageRun[]>([]),
     [runsScope, setRunsScope] = useState(scopeKey),
     [loading, setLoading] = useState(true),
-    [error, setError] = useState("");
+    [resultsError, setResultsError] = useState(""),
+    [executionError, setExecutionError] = useState("");
+  const [accessError, setAccessError] = useState("");
+  const error = accessError || executionError || resultsError;
   const [values, setValues] = useState<Record<string, unknown>>({}),
     [formVersion, setFormVersion] = useState(0);
   const [busy, setBusy] = useState(false);
   const submitting = useRef(false);
+  const submission = useRef<
+    { fingerprint: string; pending: Map<string, string> } | undefined
+  >(undefined);
   const alive = useRef(true);
   const scopeGeneration = useRef(0);
   const currentScope = useRef(scopeKey);
+  const accessBoundary = useRef<{ denial: Error | null }>({ denial: null });
   if (currentScope.current !== scopeKey) {
     currentScope.current = scopeKey;
     scopeGeneration.current++;
+    submission.current = undefined;
+    accessBoundary.current = { denial: null };
   }
+  const hideProtectedRuns = useCallback((denial: Error) => {
+    accessBoundary.current = { denial };
+    setRuns([]);
+    setExecutionError("");
+    setResultsError("");
+    setAccessError(denial.message);
+  }, []);
   const refreshRunning = useRef(false);
   const refreshAgain = useRef(false);
+  const receiptVersion = useRef(0);
   const refreshRef = useRef<(() => Promise<void>) | null>(null);
   const refresh = useCallback(async () => {
     if (currentScope.current !== scopeKey) return;
@@ -210,17 +231,48 @@ export default function RequestPage({ object }: { object: StudioObject }) {
     }
     refreshRunning.current = true;
     const generation = scopeGeneration.current;
+    const version = receiptVersion.current;
+    const access = accessBoundary.current;
     try {
       const result = await requestPageApi<{ data: PageRun[] }>(
         "/runs?" + new URLSearchParams({ tenantId, pageName: object.name }),
       );
       if (alive.current && generation === scopeGeneration.current) {
+        if (
+          access !== accessBoundary.current ||
+          version !== receiptVersion.current
+        ) {
+          refreshAgain.current = true;
+          return;
+        }
         setRuns(result.data);
         setRunsScope(scopeKey);
+        setAccessError("");
+        setResultsError("");
+        const attempt = submission.current;
+        if (attempt) {
+          for (const run of result.data) {
+            if (
+              (run.status === "complete" || run.status === "failed") &&
+              attempt.pending.get(run.actionId) === run.id
+            )
+              attempt.pending.delete(run.actionId);
+          }
+          if (attempt.pending.size === 0) {
+            submission.current = undefined;
+            setExecutionError("");
+          }
+        }
       }
     } catch (e) {
-      if (alive.current && generation === scopeGeneration.current)
-        setError((e as Error).message);
+      if (
+        alive.current &&
+        generation === scopeGeneration.current &&
+        access === accessBoundary.current
+      ) {
+        if (isReadAccessDenied(e)) hideProtectedRuns(e as Error);
+        else setResultsError((e as Error).message);
+      }
     } finally {
       if (alive.current && generation === scopeGeneration.current)
         setLoading(false);
@@ -230,7 +282,7 @@ export default function RequestPage({ object }: { object: StudioObject }) {
         queueMicrotask(() => void refreshRef.current?.());
       }
     }
-  }, [tenantId, object.name]);
+  }, [tenantId, object.name, scopeKey, hideProtectedRuns]);
   refreshRef.current = refresh;
   useEffect(() => {
     alive.current = true;
@@ -243,7 +295,9 @@ export default function RequestPage({ object }: { object: StudioObject }) {
     setRuns([]);
     setRunsScope(scopeKey);
     setLoading(true);
-    setError("");
+    setAccessError("");
+    setResultsError("");
+    setExecutionError("");
     setBusy(false);
     setValues({});
     setFormVersion((version) => version + 1);
@@ -288,13 +342,43 @@ export default function RequestPage({ object }: { object: StudioObject }) {
   const execute = async (
     action: RequestAction,
     data: Record<string, unknown>,
+    id?: string,
   ) => {
     if (currentScope.current !== scopeKey)
       throw new Error("The request page changed before execution started.");
     const generation = scopeGeneration.current;
-    const run = await executeRequestPageAction(object.name, action, data, mode);
+    const access = accessBoundary.current;
+    const run = await executeRequestPageAction(
+      object.name,
+      action,
+      data,
+      mode,
+      id,
+    ).catch((reason: unknown) => {
+      if (alive.current && generation === scopeGeneration.current) {
+        const currentAccess = accessBoundary.current;
+        if (access !== currentAccess && currentAccess.denial)
+          throw currentAccess.denial;
+        if (isReadAccessDenied(reason)) hideProtectedRuns(reason as Error);
+      }
+      throw reason;
+    });
     if (alive.current && generation === scopeGeneration.current) {
-      setRuns((previous) => [run, ...previous.filter((r) => r.id !== run.id)]);
+      const currentAccess = accessBoundary.current;
+      if (access !== currentAccess && currentAccess.denial)
+        throw currentAccess.denial;
+      receiptVersion.current++;
+      setAccessError("");
+      setRuns((previous) => {
+        if (
+          run.status === "running" &&
+          previous.some(
+            (known) => known.id === run.id && known.status !== "running",
+          )
+        )
+          return previous;
+        return [run, ...previous.filter((known) => known.id !== run.id)];
+      });
       setRunsScope(scopeKey);
     }
     return run;
@@ -444,20 +528,50 @@ export default function RequestPage({ object }: { object: StudioObject }) {
             );
             if (!submitActions.length)
               throw new Error(t("Selecciona al menos una operación."));
+            const fingerprint = canonicalJson([
+              mode,
+              submitActions.map((action) => action.id),
+              data,
+            ]);
+            const previous = submission.current;
+            const attempt =
+              previous?.fingerprint === fingerprint
+                ? previous
+                : {
+                    fingerprint,
+                    pending: new Map(
+                      submitActions.map((action) => [
+                        action.id,
+                        crypto.randomUUID(),
+                      ]),
+                    ),
+                  };
+            submission.current = attempt;
             submitting.current = true;
             const generation = scopeGeneration.current;
             setBusy(true);
+            setExecutionError("");
             try {
               await Promise.all(
                 submitActions.map(async (a) => {
+                  const id = attempt.pending.get(a.id);
+                  if (!id) return;
                   try {
-                    await execute(a, data);
+                    const run = await execute(a, data, id);
+                    if (run.status !== "running") attempt.pending.delete(a.id);
                   } catch (e) {
-                    if (alive.current && generation === scopeGeneration.current)
-                      setError((e as Error).message);
+                    if (
+                      alive.current &&
+                      generation === scopeGeneration.current &&
+                      attempt.pending.has(a.id) &&
+                      !isReadAccessDenied(e)
+                    )
+                      setExecutionError((e as Error).message);
                   }
                 }),
               );
+              if (attempt.pending.size === 0 && submission.current === attempt)
+                submission.current = undefined;
               await refresh();
               if (
                 isWizard &&
@@ -500,7 +614,7 @@ export default function RequestPage({ object }: { object: StudioObject }) {
             {error}
           </p>
         )}
-        {loading ? (
+        {accessError ? null : loading ? (
           <div className="space-y-3" role="status" aria-live="polite">
             <p className="text-xs font-medium text-muted-foreground">
               {t("Cargando resultados…")}

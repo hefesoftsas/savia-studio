@@ -125,6 +125,7 @@ export type NangoProxyRequest = {
   path: string;
   connection: ActiveCrmConnection;
   body?: unknown;
+  signal?: AbortSignal;
 };
 
 export type NangoClient = {

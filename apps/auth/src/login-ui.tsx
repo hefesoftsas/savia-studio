@@ -781,6 +781,7 @@ export function renderOAuthSurface(
     emailAvailable?: boolean;
     allowEmailRegistration?: boolean;
     initialEmail?: string;
+    restartUrl?: string;
     verification?: { id: string; email: string; notice?: string };
   },
 ): string {
@@ -827,12 +828,17 @@ export function renderOAuthSurface(
             {options?.branding?.displayName ?? "Savia"}
           </p>
           <h1>Completando inicio de sesión</h1>
-          <p id="oauth-status" role="status">
-            Validando tu acceso…
-          </p>
-          <a className="oauth-action-link" href="/api/auth/login">
-            Volver al inicio de sesión
-          </a>
+          <div className="oauth-form">
+            <Status initialNotice="Validando tu acceso…" />
+            <Button type="button" data-sso-continue hidden>
+              Continuar a Savia
+            </Button>
+            <Button variant="outline" asChild>
+              <a href={options?.restartUrl ?? "/api/auth/login"}>
+                Volver al inicio de sesión
+              </a>
+            </Button>
+          </div>
         </section>
       </Shell>
     ) : screen === "login" ? (

@@ -24,6 +24,9 @@ import type {
   Mutation,
   PullBatch,
 } from "./contracts";
+
+export class LocalDeleteConflict extends Error {}
+
 function overlay(
   document: StudioRecord | undefined,
   mutation: Mutation,
@@ -120,14 +123,16 @@ export class LocalStore {
     data?: Record<string, unknown>,
     baseVersion?: number,
   ) {
-    return (await this.mutateWithReceipt(collection, action, id, data, baseVersion)).data;
+    return (
+      await this.mutateWithReceipt(collection, action, id, data, baseVersion)
+    ).data;
   }
   async mutateWithReceipt(
     collection: string,
     action: Exclude<Mutation["action"], "bundle">,
     id: string,
     data?: Record<string, unknown>,
-    baseVersion?: number,
+    baseVersion?: number | null,
   ) {
     return this.db.transaction(
       "rw",
@@ -141,6 +146,15 @@ export class LocalStore {
             "This record belongs to a pending bundle; synchronize or resolve it first",
           );
         const current = await this.get(collection, id);
+        // Null means the editor saw an unversioned local draft. Check inside
+        // the write transaction in case synchronization just confirmed it.
+        if (
+          baseVersion === null &&
+          (!current || current._version != null || current.deleted_at != null)
+        )
+          throw new LocalDeleteConflict(
+            "The record changed. Reload before deleting.",
+          );
         const last = await this.db.outbox.orderBy("sequence").last();
         const mutation: Mutation = {
           mutationId: crypto.randomUUID(),

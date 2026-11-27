@@ -277,30 +277,41 @@ describe("useCurrentTenant", () => {
     },
   );
 
-  it("blocks a previously resolved workspace after the server reports it missing", async () => {
-    const workspace = { data: { name: "Example", kind: "commercial", id: 42 } };
-    const { get, services } = createServices(
-      vi.fn().mockResolvedValue(workspace),
-    );
-    services.queryClient!.setDefaultOptions({ queries: { retry: false } });
-    const { result } = renderHook(
-      () => useCurrentTenant({ hostname: "example.savia.hefesoft.com" }),
-      { wrapper: servicesWrapper(services) },
-    );
-    await waitFor(() => expect(result.current.id).toBe(42));
-    get.mockRejectedValueOnce(
-      new ApiClientError(404, "not_found", "Workspace missing"),
-    );
-    await act(async () => {
-      await services.queryClient!.invalidateQueries();
-    });
-    await waitFor(() => expect(result.current.scopeStatus).toBe("error"));
-    expect(result.current.id).toBeNull();
+  it.each([401, 403, 404])(
+    "blocks a previously resolved workspace after HTTP %s",
+    async (status) => {
+      const workspace = {
+        data: { name: "Example", kind: "commercial", id: 42 },
+      };
+      const { get, services } = createServices(
+        vi.fn().mockResolvedValue(workspace),
+      );
+      services.queryClient!.setDefaultOptions({ queries: { retry: false } });
+      const { result } = renderHook(
+        () => useCurrentTenant({ hostname: "example.savia.hefesoft.com" }),
+        { wrapper: servicesWrapper(services) },
+      );
+      await waitFor(() => expect(result.current.id).toBe(42));
+      get.mockRejectedValueOnce(
+        new ApiClientError(
+          status,
+          "WORKSPACE_UNAVAILABLE",
+          "Workspace unavailable",
+        ),
+      );
+      await act(async () => {
+        await services.queryClient!.invalidateQueries();
+      });
+      await waitFor(() => expect(result.current.scopeStatus).toBe("error"));
+      expect(result.current.id).toBeNull();
+      expect(Boolean(result.current.requiresSignIn)).toBe(status === 401);
 
-    await act(async () => {
-      await result.current.retry?.();
-    });
-    await waitFor(() => expect(result.current.id).toBe(42));
-    expect(result.current.scopeStatus).toBe("resolved");
-  });
+      await act(async () => {
+        await result.current.retry?.();
+      });
+      await waitFor(() => expect(result.current.id).toBe(42));
+      expect(result.current.scopeStatus).toBe("resolved");
+      expect(result.current.requiresSignIn).toBeFalsy();
+    },
+  );
 });

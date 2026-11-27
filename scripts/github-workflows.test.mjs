@@ -643,6 +643,17 @@ test("coverage remains manually available without automatic repeated tests", asy
   assert.doesNotMatch(ci, /paths-ignore:|continue-on-error: true/);
 });
 
+test("native VS Code validation uses current JavaScript actions and verifies the minimum host", async () => {
+  const source = await workflow("build-vscode-extension.yml");
+  assert.doesNotMatch(
+    source,
+    /uses: (?:actions\/(?:checkout|setup-node|upload-artifact)|pnpm\/action-setup)@v[1-4](?:[.\s]|$)/,
+  );
+  assert.match(source, /node-version: 22/);
+  assert.match(source, /xvfb-run -a pnpm --filter @savia\/vscode test:host/);
+  assert.match(source, /if-no-files-found: error/);
+});
+
 test("CodeQL scans affected PR languages or manual selections without push or schedule triggers", async () => {
   const source = await workflow("codeql.yml");
   assert.match(source, /^  pull_request:\n    branches: \[main\]/m);
@@ -712,6 +723,15 @@ test("manual previews validate trusted source before executing repository code",
     preview,
     /run:[\s\S]*?\$\{\{ inputs\.(?:branch|confirm) \}\}/,
   );
+  const deploy = preview.indexOf("name: Deploy preview environment");
+  const destroy = preview.indexOf("name: Destroy preview environment");
+  assert.ok(deploy > setup && destroy > deploy);
+  assert.match(
+    preview.slice(deploy, destroy),
+    /BETTER_AUTH_BOOTSTRAP_PASSWORD: \$\{\{ secrets\.SAVIA_BRANCH_PREVIEW_BOOTSTRAP_PASSWORD \}\}/,
+  );
+  assert.doesNotMatch(preview.slice(0, deploy), /BOOTSTRAP_PASSWORD/);
+  assert.doesNotMatch(preview.slice(destroy), /BOOTSTRAP_PASSWORD/);
 });
 
 test("Flows CI splits all seven package suites and keeps readiness fail-closed", async () => {
@@ -845,6 +865,35 @@ test("Flows CI splits all seven package suites and keeps readiness fail-closed",
     ci,
     /name: Preview CI proof .*vars\.SAVIA_CI_FLOWS_ENABLED == 'false' && ' \(Flows skipped\)'/,
   );
+});
+
+test("local unit validation honors the dedicated Flows test setting", async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  const runner = `pnpm() {
+    printf 'lane:%s\\n' "$2"
+    if [ "$2" = "$SAVIA_TEST_FAIL_LANE" ]; then return 9; fi
+  }
+  ${manifest.scripts["test:unit"]}`;
+  const core = ["test:unit:admin", "test:unit:api", "test:unit:workspace"];
+  for (const scenario of [
+    { flag: "false", lanes: core },
+    { flag: "true", lanes: [...core, "flows:test"] },
+    { lanes: [...core, "flows:test"] },
+    { flag: "false", fail: "test:unit:api", lanes: core.slice(0, 2) },
+    { flag: "true", fail: "flows:test", lanes: [...core, "flows:test"] },
+  ]) {
+    const env = { ...process.env, SAVIA_TEST_FAIL_LANE: scenario.fail ?? "" };
+    delete env.SAVIA_CI_FLOWS_ENABLED;
+    if (scenario.flag !== undefined) env.SAVIA_CI_FLOWS_ENABLED = scenario.flag;
+    const result = spawnSync("sh", ["-c", runner], { env, encoding: "utf8" });
+    assert.equal(result.status, scenario.fail ? 9 : 0, result.stderr);
+    assert.deepEqual(
+      [...result.stdout.matchAll(/^lane:(.+)$/gm)].map(([, lane]) => lane),
+      scenario.lanes,
+    );
+  }
 });
 
 test("focused API validation regenerates and typechecks frontend consumers", async () => {

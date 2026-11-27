@@ -4,15 +4,45 @@ import {
   validateRecord,
   type StudioObject,
 } from "./metadata";
+import { parseCurrencyValue, parseNumberValue } from "./spreadsheet-inference";
+
+export const CSV_IMPORT_MAX_ROWS = 1000;
+export const CSV_IMPORT_MAX_LENGTH = 1024 * 1024;
+
+function detectCsvDelimiter(text: string): "," | ";" {
+  let quoted = false;
+  let hasText = false;
+  let hasSemicolon = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === '"') {
+      if (quoted && text[index + 1] === '"') {
+        hasText = true;
+        index++;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (quoted) {
+      hasText = true;
+    } else if (char === ",") {
+      return ",";
+    } else if (char === ";") {
+      hasSemicolon = true;
+    } else if (char === "\n" || char === "\r") {
+      if (hasText || hasSemicolon) break;
+    } else {
+      hasText = true;
+    }
+  }
+  return hasSemicolon ? ";" : ",";
+}
 
 export function parseCsv(
   text: string,
-  maxRows = 1000,
+  maxRows = CSV_IMPORT_MAX_ROWS,
 ): { headers: string[]; rows: string[][] } {
   text = text.replace(/^\uFEFF/, "");
-  const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
-  const delimiter =
-    !firstLine.includes(",") && firstLine.includes(";") ? ";" : ",";
+  const delimiter = detectCsvDelimiter(text);
   const rows: string[][] = [];
   let row: string[] = [],
     cell = "",
@@ -109,9 +139,15 @@ export function mapCsvRow(
     } else if (
       ["Number", "Currency", "Percentage", "Rating"].includes(field.type)
     ) {
-      input[key] = Number(raw);
-      if (!Number.isFinite(input[key]))
+      const value =
+        field.type === "Currency"
+          ? parseCurrencyValue(raw, String(field.config?.currency || "COP"))
+          : field.type === "Number"
+            ? parseNumberValue(raw)
+            : Number(raw);
+      if (value === null || !Number.isFinite(value))
         conversionErrors[key] = `${field.label}: número inválido.`;
+      else input[key] = value;
     } else if (field.type === "Toggle") {
       if (/^(true|1|sí|si)$/i.test(raw)) input[key] = true;
       else if (/^(false|0|no)$/i.test(raw)) input[key] = false;
@@ -126,6 +162,10 @@ export function mapCsvRow(
   };
 }
 
+function quoteCsvCell(text: string): string {
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+
 export function csvCell(value: unknown): string {
   let text =
     value === null || value === undefined
@@ -136,7 +176,16 @@ export function csvCell(value: unknown): string {
   // Prevent spreadsheet formula execution while retaining negative numeric values.
   if (typeof value === "string" && /^[\s]*[=+\-@\t\r]/.test(text))
     text = "'" + text;
-  return '"' + text.replace(/"/g, '""') + '"';
+  return quoteCsvCell(text);
+}
+
+/** Encodes values for the import API. Downloadable CSVs use csvLine. */
+export function csvImportLine(
+  values: readonly (string | number | boolean | null)[],
+): string {
+  return (
+    values.map((value) => quoteCsvCell(String(value ?? ""))).join(",") + "\r\n"
+  );
 }
 export function csvHeaders(object: StudioObject) {
   return [

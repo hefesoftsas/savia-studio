@@ -7,10 +7,12 @@ export function ReadRefreshStatus({
   refreshing = false,
   error,
   onRetry,
+  retryDisabled = false,
 }: {
   refreshing?: boolean;
   error?: string;
   onRetry?: () => void;
+  retryDisabled?: boolean;
 }) {
   const t = useMessages(backgroundRefreshMessages);
   if (!refreshing && !error) return null;
@@ -40,6 +42,7 @@ export function ReadRefreshStatus({
               size="sm"
               className="h-auto p-0 text-xs"
               onClick={onRetry}
+              disabled={retryDisabled}
             >
               {t("Retry")}
             </Button>

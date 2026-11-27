@@ -108,6 +108,44 @@ it("recovers from an initial connection error on the same management link", asyn
   ]);
 });
 
+it("suspends manual retries when the management link opens during a rate limit", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+  const fetcher = vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(null, {
+        status: 429,
+        headers: { "Retry-After": new Date(Date.now() + 30_000).toUTCString() },
+      }),
+    )
+    .mockResolvedValueOnce(Response.json({ data: manageData() }));
+  vi.stubGlobal("fetch", fetcher);
+
+  await act(async () => {
+    renderManagePage();
+  });
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Too many booking requests. Try again after",
+  );
+  const retry = screen.getByRole("button", { name: "Retry" });
+  expect(retry).toBeDisabled();
+  act(() => vi.advanceTimersByTime(29_999));
+  fireEvent.click(retry);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  act(() => vi.advanceTimersByTime(1));
+  expect(retry).toBeEnabled();
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    fireEvent.click(retry);
+  });
+  expect(screen.getByRole("button", { name: "Reschedule" })).toBeEnabled();
+  expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
+    managePath,
+    managePath,
+  ]);
+});
+
 it.each([
   { status: 404, cancelled: false },
   { status: 409, cancelled: true },
@@ -816,6 +854,89 @@ it.each(["cancelled", "unchanged", "moved"])(
 );
 
 it.each(["cancel", "reschedule"])(
+  "waits for Retry-After before offering another %s request",
+  async (action) => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+    const requestedSlot = "2026-10-06T15:00:00Z";
+    const writes: unknown[] = [];
+    const request = vi.fn(async (input: string, init?: RequestInit) => {
+      const path = new URL(input, "https://savia.test").pathname;
+      if (path === managePath) return Response.json({ data: manageData() });
+      if (path === `${managePath}/availability`)
+        return Response.json({ data: availabilityData(requestedSlot) });
+      if (path !== `${managePath}/${action}`)
+        throw new Error(`Unexpected management path ${path}`);
+      writes.push(JSON.parse(String(init?.body)));
+      if (writes.length === 1)
+        return new Response(null, {
+          status: 429,
+          headers: { "Retry-After": "30" },
+        });
+      return Response.json({
+        data: confirmedReservation(
+          action === "cancel"
+            ? { status: "cancelled", version: 8 }
+            : {
+                startsAt: requestedSlot,
+                endsAt: "2026-10-06T15:30:00Z",
+                version: 8,
+              },
+        ),
+      });
+    });
+    vi.stubGlobal("fetch", request);
+    await act(async () => {
+      renderManagePage();
+    });
+    if (action === "reschedule") {
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+      });
+      fireEvent.click(screen.getByRole("button", { name: "10:00 AM" }));
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    }
+    const name =
+      action === "cancel" ? "Cancel reservation" : "Confirm reschedule";
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name }));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Too many booking requests. Try again after",
+    );
+    expect(
+      screen.getByRole("button", { name: "Cancel reservation" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name })).toBeDisabled();
+    expect(
+      request.mock.calls.filter(([path]) => path === managePath),
+    ).toHaveLength(1);
+    act(() => vi.advanceTimersByTime(29_999));
+    fireEvent.click(screen.getByRole("button", { name }));
+    expect(writes).toHaveLength(1);
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByRole("button", { name })).toBeEnabled();
+    expect(writes).toHaveLength(1);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name }));
+    });
+    const expectedWrite = {
+      version: 7,
+      ...(action === "reschedule" ? { startsAt: requestedSlot } : {}),
+    };
+    expect(writes).toEqual([expectedWrite, expectedWrite]);
+    expect(
+      screen.getByText(
+        action === "cancel"
+          ? "Cancelled"
+          : "Your appointment has been updated.",
+      ),
+    ).toBeVisible();
+  },
+);
+
+it.each(["cancel", "reschedule"])(
   "requires a successful appointment refresh before allowing changes after an unverified %s",
   async (action) => {
     const changed =
@@ -879,6 +1000,222 @@ it.each(["cancel", "reschedule"])(
     ).toHaveLength(1);
   },
 );
+
+it.each([
+  { action: "refresh", status: 404, button: "Refresh appointment" },
+  { action: "cancel", status: 410, button: "Cancel reservation" },
+  { action: "reschedule", status: 404, button: "Confirm reschedule" },
+])(
+  "hides appointment details when a current read after $action returns $status",
+  async ({ action, status, button }) => {
+    let reads = 0;
+    const request = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), "https://savia.test").pathname;
+      if (path === `${managePath}/availability`)
+        return Response.json({ data: availabilityData() });
+      if (path === `${managePath}/${action}`)
+        return new Response(null, { status: 503 });
+      if (path !== managePath)
+        throw new Error(`Unexpected management path ${path}`);
+      if (++reads > 1) return new Response(null, { status });
+      return Response.json({
+        data: manageData(
+          confirmedReservation({
+            conference: {
+              provider: "google_meet",
+              joinUrl: null,
+              status: "pending",
+            },
+          }),
+        ),
+      });
+    });
+    vi.stubGlobal("fetch", request);
+    renderManagePage();
+    expect(await screen.findByText("Casey · casey@example.test")).toBeVisible();
+    if (action === "reschedule") {
+      fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+      fireEvent.click(await screen.findByRole("button", { name: "10:00 AM" }));
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    }
+    fireEvent.click(screen.getByRole("button", { name: button }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This booking link could not be loaded. Ask the booking owner for help.",
+    );
+    expect(screen.queryByText("Casey · casey@example.test")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Cancel reservation" }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(reads).toBe(2);
+  },
+);
+
+it("honors consecutive read limits while verifying an uncertain cancellation", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json({ data: manageData() }))
+    .mockResolvedValueOnce(new Response(null, { status: 503 }))
+    .mockResolvedValueOnce(
+      new Response(null, { status: 429, headers: { "Retry-After": "30" } }),
+    )
+    .mockResolvedValueOnce(
+      new Response(null, { status: 429, headers: { "Retry-After": "10" } }),
+    )
+    .mockResolvedValueOnce(
+      Response.json({
+        data: manageData(
+          confirmedReservation({ status: "cancelled", version: 8 }),
+        ),
+      }),
+    );
+  vi.stubGlobal("fetch", request);
+
+  await act(async () => {
+    renderManagePage();
+  });
+  const cancel = screen.getByRole("button", { name: "Cancel reservation" });
+  await act(async () => {
+    fireEvent.click(cancel);
+  });
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Too many booking requests. Try again after",
+  );
+  const refresh = screen.getByRole("button", { name: "Refresh appointment" });
+  expect(refresh).toBeDisabled();
+  fireEvent.click(refresh);
+  expect(request).toHaveBeenCalledTimes(3);
+  act(() => vi.advanceTimersByTime(30_000));
+  expect(cancel).toBeDisabled();
+  expect(refresh).toBeEnabled();
+  expect(request).toHaveBeenCalledTimes(3);
+  await act(async () => {
+    fireEvent.click(refresh);
+  });
+  expect(refresh).toBeDisabled();
+  act(() => vi.advanceTimersByTime(10_000));
+  expect(refresh).toBeEnabled();
+  expect(cancel).toBeDisabled();
+  await act(async () => {
+    fireEvent.click(refresh);
+  });
+  expect(screen.getByText("Cancelled")).toBeVisible();
+  expect(request.mock.calls.map(([path]) => path)).toEqual([
+    managePath,
+    `${managePath}/cancel`,
+    managePath,
+    managePath,
+    managePath,
+  ]);
+});
+
+it.each(["appointment", "availability"])(
+  "pauses both management reads when %s returns a retry deadline",
+  async (limited) => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(new Date("2026-10-03T12:00:00Z"));
+    const data = manageData(
+      confirmedReservation({
+        conference: {
+          provider: "google_meet",
+          joinUrl: null,
+          status: "pending",
+        },
+      }),
+    );
+    let reads = 0;
+    const request = vi.fn(async (input: string) => {
+      const path = new URL(input, "https://savia.test").pathname;
+      const availability = path === `${managePath}/availability`;
+      if (
+        (availability && limited === "availability" && reads === 1) ||
+        (!availability && limited === "appointment" && reads === 1)
+      ) {
+        reads += 1;
+        return new Response(null, {
+          status: 429,
+          headers: { "Retry-After": "30" },
+        });
+      }
+      reads += 1;
+      return Response.json({ data: availability ? availabilityData() : data });
+    });
+    vi.stubGlobal("fetch", request);
+    await act(async () => {
+      renderManagePage();
+    });
+
+    const refresh = screen.getByRole("button", { name: "Refresh appointment" });
+    if (limited === "appointment") {
+      await act(async () => {
+        fireEvent.click(refresh);
+      });
+    }
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+    });
+
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(refresh).toBeDisabled();
+    expect(retry).toBeDisabled();
+    fireEvent.click(refresh);
+    fireEvent.click(retry);
+    expect(request).toHaveBeenCalledTimes(2);
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(refresh).toBeEnabled();
+    expect(retry).toBeEnabled();
+    expect(request).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+    expect(screen.getByRole("button", { name: "10:00 AM" })).toBeEnabled();
+    expect(request).toHaveBeenCalledTimes(3);
+  },
+);
+
+it("uses a read limit received while a cancellation is still pending", async () => {
+  let respondToCalendar!: (response: Response) => void;
+  let respondToCancellation!: (response: Response) => void;
+  const pendingCalendar = new Promise<Response>((resolve) => {
+    respondToCalendar = resolve;
+  });
+  const pendingCancellation = new Promise<Response>((resolve) => {
+    respondToCancellation = resolve;
+  });
+  const request = vi.fn(async (input: string) => {
+    const path = new URL(input, "https://savia.test").pathname;
+    if (path === `${managePath}/availability`) return pendingCalendar;
+    if (path === `${managePath}/cancel`) return pendingCancellation;
+    return Response.json({ data: manageData() });
+  });
+  vi.stubGlobal("fetch", request);
+  renderManagePage();
+  fireEvent.click(await screen.findByRole("button", { name: "Reschedule" }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel reservation" }));
+  await act(async () => {
+    respondToCalendar(
+      new Response(null, { status: 429, headers: { "Retry-After": "30" } }),
+    );
+  });
+  await act(async () => {
+    respondToCancellation(new Response(null, { status: 503 }));
+  });
+
+  expect(
+    request.mock.calls.map(
+      ([path]) => new URL(path, "https://savia.test").pathname,
+    ),
+  ).toEqual([managePath, `${managePath}/availability`, `${managePath}/cancel`]);
+  expect(
+    screen.getByRole("button", { name: "Refresh appointment" }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "Cancel reservation" }),
+  ).toBeDisabled();
+});
 
 it("leaves the appointment unchanged when a reviewed change is backed out", async () => {
   const requests: string[] = [];
@@ -1093,7 +1430,7 @@ it("refreshes a pending conference link from the private management endpoint", a
   expect(fetchMock.mock.calls[1][1]?.credentials).toBe("omit");
 });
 
-it("discards a stale refresh response after cancellation advances the reservation", async () => {
+it.each([200, 404])("ignores stale refreshes (%s)", async (status) => {
   let refreshReads = 0;
   let resolveRefresh!: (response: Response) => void;
   const delayedRefresh = new Promise<Response>((resolve) => {
@@ -1133,7 +1470,11 @@ it("discards a stale refresh response after cancellation advances the reservatio
   expect(await screen.findByText("Cancelled")).toBeInTheDocument();
 
   await act(async () => {
-    resolveRefresh(Response.json({ data: manageData(staleReservation) }));
+    resolveRefresh(
+      status === 200
+        ? Response.json({ data: manageData(staleReservation) })
+        : new Response(null, { status }),
+    );
     await delayedRefresh;
   });
 

@@ -20,7 +20,7 @@ import {
   supportsLocalRecordTools,
 } from "./collection-capabilities";
 import { getStudioRuntime } from "./runtime";
-import { studioFetch, downloadCrm } from "./api";
+import { api, downloadCrm } from "./api";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -41,7 +41,6 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "./api";
 import {
   fieldEntries,
   R2_ATTACHMENT_TYPE,
@@ -402,10 +401,7 @@ export default function RecordDetail({
                 {t("KB ·")} {file.mime}
               </span>
             </div>
-            <OfficeEditButton
-              file={file}
-              disabled={Boolean(object.config.fields[field]?.readOnly)}
-            />
+            <OfficeEditButton file={file} />
             <DocumentDeliveryActions file={file} />
             <Button
               type="button"
@@ -451,19 +447,15 @@ export default function RecordDetail({
     try {
       const form = new FormData();
       form.append("file", file);
-      const response = await studioFetch(`/api/files/${base}`, {
-        method: "POST",
-        body: form,
-      });
-      const data = (await response.json()) as {
-        data: { id: string };
+      const result = await api<{
+        data?: { id: string };
         error?: string;
-      };
-      if (!response.ok)
-        throw new Error(data.error ?? t("No se pudo cargar el archivo."));
+      }>(`/files/${base}`, "POST", form);
+      if (!result?.data?.id)
+        throw new Error(result?.error ?? t("No se pudo cargar el archivo."));
       refresh();
       toast.success(t("Archivo guardado"));
-      return data.data;
+      return result.data;
     } catch (error) {
       setFileError((error as Error).message);
       if (propagateError) throw error;
@@ -970,16 +962,7 @@ export default function RecordDetail({
                           )}
                         </p>
                       </div>
-                      <OfficeEditButton
-                        file={file}
-                        disabled={
-                          saving ||
-                          Boolean(
-                            file.field &&
-                            object.config.fields[file.field]?.readOnly,
-                          )
-                        }
-                      />
+                      <OfficeEditButton file={file} disabled={saving} />
                       <DocumentDeliveryActions file={file} disabled={saving} />
                       <Button variant="ghost" size="icon" asChild>
                         <a

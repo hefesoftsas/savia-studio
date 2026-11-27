@@ -114,10 +114,13 @@ it("retains delete queued after create acknowledgement", async () => {
   const s = await open();
   await s.mutate("people", "create", "a", { name: "First" });
   const first = (await s.db.outbox.toArray())[0]!;
-  await s.mutate("people", "delete", "a");
+  await s.mutateWithReceipt("people", "delete", "a", undefined, null);
   await s.acknowledge(first, doc("a", "First", 1));
   expect((await s.get("people", "a"))?.deleted_at).toBeTruthy();
-  expect((await s.db.outbox.toArray())[0]?.action).toBe("delete");
+  expect((await s.db.outbox.toArray())[0]).toMatchObject({
+    action: "delete",
+    baseVersion: 1,
+  });
 });
 it("does not advance the cursor when the document transaction fails", async () => {
   const s = await open();

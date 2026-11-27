@@ -80,10 +80,7 @@ import {
 import { isStudioChildActive } from "@/features/studio/studio-navigation";
 import { isStudioLocation } from "@/features/studio/studio-route";
 import { useStudioSidebarNavigation } from "@/features/studio/use-studio-sidebar-navigation";
-import {
-  hasLucideIconLoader,
-  LucideLookupIcon,
-} from "@/features/studio-engine/lucide-lookup-icon";
+import { LucideLookupIcon } from "@/features/studio-engine/lucide-lookup-icon";
 import { UserMenu } from "@/components/admin/user-menu";
 import { SidebarFlowsSkeleton } from "@/components/admin/page-skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -142,9 +139,15 @@ function SidebarItemIcon({
   icon: SidebarNavigationItem["icon"];
   className?: string;
 }) {
-  if (typeof icon === "string" && hasLucideIconLoader(icon))
-    return <LucideLookupIcon name={icon} className={className} />;
-  const Icon = typeof icon === "string" ? FileText : icon;
+  if (typeof icon === "string")
+    return (
+      <LucideLookupIcon
+        name={icon}
+        className={className}
+        fallback={<FileText aria-hidden="true" className={className} />}
+      />
+    );
+  const Icon = icon;
   return <Icon aria-hidden="true" className={className} />;
 }
 

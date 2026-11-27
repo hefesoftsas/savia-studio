@@ -367,16 +367,22 @@ export class TenantBrandingUploadInProgressError extends HTTPException {
 export async function deactivateTenantForDeletion(
   db: D1Database,
   id: number,
-  confirmedName?: string,
+  {
+    confirmedName,
+    assetStorageAvailable = true,
+  }: { confirmedName?: string; assetStorageAvailable?: boolean } = {},
 ): Promise<boolean> {
-  // Recheck confirmation and in-flight uploads in the deactivation statement,
-  // before marking or removing any branding assets.
+  // Check confirmation, storage availability, and in-flight uploads together
+  // so a blocked deletion never deactivates the tenant.
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const locked = await db
     .prepare(
-      "UPDATE tenants SET is_active=0 WHERE id=? AND name=COALESCE(?,name) AND NOT EXISTS(SELECT 1 FROM tenant_branding_assets WHERE tenant_id=? AND state='uploading' AND created_at>=?) RETURNING id",
+      `UPDATE tenants SET is_active=0 WHERE id=? AND name=COALESCE(?,name)
+       AND NOT EXISTS(SELECT 1 FROM tenant_branding_assets
+         WHERE tenant_id=? AND (?=0 OR (state='uploading' AND created_at>=?)))
+       RETURNING id`,
     )
-    .bind(id, confirmedName ?? null, id, cutoff)
+    .bind(id, confirmedName ?? null, id, Number(assetStorageAvailable), cutoff)
     .first();
   if (!locked) {
     const tenant = await db
@@ -387,26 +393,21 @@ export async function deactivateTenantForDeletion(
       throw new HTTPException(404, { message: "The tenant no longer exists." });
     if (confirmedName !== undefined && tenant.name !== confirmedName)
       return false;
+    if (!assetStorageAvailable)
+      throw new HTTPException(503, {
+        message: "Image storage cleanup unavailable.",
+      });
     throw new TenantBrandingUploadInProgressError();
   }
   return true;
 }
 
-/** Removes assets for ordinary deletion, after its restrictive-reference checks. */
+/** Removes assets after an ordinary deletion has deactivated the tenant. */
 export async function deleteTenantBrandingAssets(
   db: D1Database,
-  bucket: R2Bucket | undefined,
+  bucket: R2Bucket,
   id: number,
 ) {
-  const pending = await db
-    .prepare("SELECT count(*) n FROM tenant_branding_assets WHERE tenant_id=?")
-    .bind(id)
-    .first<number>("n");
-  if (pending && !bucket)
-    throw new HTTPException(503, {
-      message: "Image storage cleanup unavailable.",
-    });
-  await deactivateTenantForDeletion(db, id);
   await db
     .prepare(
       "UPDATE tenant_branding_assets SET state='deleting' WHERE tenant_id=?",
@@ -419,7 +420,7 @@ export async function deleteTenantBrandingAssets(
     .all<{ object_key: string }>();
   if (assets.results.length) {
     try {
-      await bucket!.delete(assets.results.map((row) => row.object_key));
+      await bucket.delete(assets.results.map((row) => row.object_key));
     } catch {
       throw new HTTPException(503, {
         message: "Image cleanup failed. Retry tenant deletion.",

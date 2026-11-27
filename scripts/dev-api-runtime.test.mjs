@@ -16,16 +16,16 @@ import { resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { prepareApiRuntime } from "./dev-api-runtime.mjs";
 
-test("stops the detached API process when the launcher receives SIGHUP", async (t) => {
+async function assertRuntimeReleasesPort(t, termination) {
   const root = await mkdtemp(resolve(tmpdir(), "savia-runtime-hangup-"));
   let runtime;
-  let workerPid;
+  let runtimeGroup;
   t.after(async () => {
     if (runtime?.exitCode === null && runtime.signalCode === null)
       runtime.kill("SIGKILL");
-    if (workerPid) {
+    if (runtimeGroup) {
       try {
-        process.kill(-workerPid, "SIGKILL");
+        process.kill(-runtimeGroup, "SIGKILL");
       } catch (error) {
         if (error.code !== "ESRCH") throw error;
       }
@@ -47,18 +47,29 @@ test("stops the detached API process when the launcher receives SIGHUP", async (
   await writeFile(
     resolve(root, "pnpm"),
     `#!/bin/sh
-exec "$SAVIA_TEST_NODE" -e '
-  const server = require("node:http").createServer((_, response) => response.end("ok"));
-  server.listen(0, "127.0.0.1", () => console.log(process.pid, server.address().port));
-'
+exec "$SAVIA_TEST_NODE" "$SAVIA_TEST_WORKER"
 `,
     { mode: 0o700 },
+  );
+  const worker = resolve(root, "local-worker.cjs");
+  await writeFile(
+    worker,
+    `const { spawn } = require("node:child_process");
+process.on("SIGTERM", () => process.exit(7));
+spawn(process.execPath, ["-e",
+'process.on("SIGTERM", () => {});' +
+'const server = require("node:http").createServer((_, response) => response.end("ok"));' +
+'server.listen(0, "127.0.0.1", () => console.log(process.argv[1], server.address().port));',
+String(process.pid)
+], { stdio: "inherit" });
+`,
   );
   runtime = spawn(process.execPath, ["scripts/dev-api-runtime.mjs"], {
     cwd: root,
     env: {
       PATH: `${root}:${process.env.PATH}`,
       SAVIA_TEST_NODE: process.execPath,
+      SAVIA_TEST_WORKER: worker,
       SAVIA_FLOWS_ENABLED: "0",
     },
     stdio: ["ignore", "pipe", "inherit"],
@@ -68,7 +79,7 @@ exec "$SAVIA_TEST_NODE" -e '
   });
   const [pid, port] = ready.toString().trim().split(" ").map(Number);
   assert.ok(pid > 0 && port > 0);
-  workerPid = pid;
+  runtimeGroup = pid;
   const checkPort = () =>
     fetch(`http://127.0.0.1:${port}`, {
       signal: AbortSignal.timeout(2000),
@@ -77,13 +88,19 @@ exec "$SAVIA_TEST_NODE" -e '
   assert.equal(await (await checkPort()).text(), "ok");
 
   const exit = once(runtime, "exit", { signal: AbortSignal.timeout(5000) });
-  runtime.kill("SIGHUP");
-  await exit;
+  if (termination === "launcher hangup") runtime.kill("SIGHUP");
+  else process.kill(runtimeGroup, "SIGTERM");
+  assert.deepEqual(await exit, [7, null]);
   await assert.rejects(
     checkPort(),
     (error) => error.cause?.code === "ECONNREFUSED",
   );
-});
+}
+
+for (const termination of ["launcher hangup", "worker wrapper exit"]) {
+  test(`releases the local API port after ${termination}`, (t) =>
+    assertRuntimeReleasesPort(t, termination));
+}
 
 test("enables the private local Flows binding only for an explicitly enabled local runtime", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "savia-flows-core-config-"));

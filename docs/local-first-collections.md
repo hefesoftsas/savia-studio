@@ -24,6 +24,41 @@ bulk operations and integrations still require connectivity. The first complete
 collection download requires connectivity; an unhydrated collection is never
 presented as an empty complete replica.
 
+Studio confirms when a record was saved or moved to trash on this device and
+marks the change as pending synchronization. A record created on this device
+can be moved to trash before its first server confirmation. If synchronization
+assigns a server version before that deletion is queued, reopen the record to
+review its current version before deleting it.
+Restoring a record from trash requires connectivity and a server confirmation.
+Synchronize or resolve pending changes to that record first. Once the server
+confirms the restore, Studio refreshes the local list for that collection.
+For a custom role with read and restore access, the trash is read online from
+the server. Scoped replicas receive removal markers for deleted records, so
+Studio does not use them to display the trash or cache its contents offline.
+
+Bulk deletion is available for native collections when the user's role permits
+deletion. Connected collections expose individual deletion or archiving when
+supported by the connector and allowed by the user's permissions. For native
+collections, **Select all** reads every page with the active filters before
+replacing the selection. If a page fails or the results cannot be verified, the
+existing selection remains available.
+
+After a bulk deletion, Studio refreshes the collection and keeps records
+without a confirmed deletion selected so they can be reviewed and retried.
+The same refresh applies when the server confirms only part of a bulk write.
+For large selections, Studio submits up to 200 records per request. Records
+without a verified version stay selected for review. If a request is
+interrupted, earlier confirmations are retained and Studio stops sending
+further requests.
+
+Creating a record with uploaded files waits for the server to confirm the
+creation before associating the files. Retries in the open form reuse that
+creation request. Forms with staged related records can queue the bundle
+locally and must synchronize it before the files are associated. If the
+connection drops, keep the form open and retry when it returns.
+When an upload fails, the file row shows the error and a **Retry** action.
+Retrying that file preserves uploads that already finished.
+
 ## Replication and correctness
 
 D1 triggers atomically capture record changes, including imports, bulk writes,
@@ -65,6 +100,9 @@ for preparation requirements and limits.
 
 A successful online session provisions a twelve-hour offline identity/permission
 lease. First login requires connectivity. Explicit logout invalidates the lease.
+An online verification already in progress cannot restore a lease after logout
+in the same tab or another tab sharing that browser profile. A successful new
+verification can provision a new lease.
 An explicit server authentication rejection does not fall back to cached access.
 Replication authorization failures hide the replica and stop retries, preserving
 pending work for recovery. Offline devices cannot learn a revocation until they

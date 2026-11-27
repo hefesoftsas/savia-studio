@@ -1,6 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, vi } from "vitest";
 import { createLocalTransport } from "./transport";
+import { openLocalStore } from "./store";
 const document = { id: "one", _version: 1, deleted_at: null, name: "Ana" };
 function store() {
   return {
@@ -20,12 +21,10 @@ function store() {
       syncState: { get: async () => ({ hydrated: true }) },
     },
     get: async () => document,
-    mutateWithReceipt: vi
-      .fn()
-      .mockResolvedValue({
-        data: { ...document, name: "Updated" },
-        mutationId: "m1",
-      }),
+    mutateWithReceipt: vi.fn().mockResolvedValue({
+      data: { ...document, name: "Updated" },
+      mutationId: "m1",
+    }),
   };
 }
 describe("local CRM transport", () => {
@@ -79,21 +78,33 @@ describe("local CRM transport", () => {
   });
 });
 
-it("forwards bulk operations without mistaking the reserved name for a record id", async () => {
+it("refreshes the replica after a bulk write returns mixed outcomes", async () => {
   const local = store();
-  const network = vi.fn().mockResolvedValue(Response.json({ data: [] }));
+  const outcomes = [
+    { id: "one", ok: true },
+    { id: "two", ok: false, error: "The record changed" },
+  ];
+  const network = vi.fn().mockResolvedValue(Response.json({ data: outcomes }));
+  const sync = vi.fn(async () => {
+    throw new Error("Replica refresh interrupted");
+  });
+  const requestSync = vi.fn();
   const transport = createLocalTransport(
     local as never,
     network,
-    async () => {},
+    sync,
+    requestSync,
   );
   const result = await transport("/api/records/contacts/bulk", {
     method: "POST",
     body: "{}",
   });
   expect(result.ok).toBe(true);
+  expect(await result.json()).toEqual({ data: outcomes });
   expect(network).toHaveBeenCalledOnce();
   expect(local.mutateWithReceipt).not.toHaveBeenCalled();
+  expect(sync).toHaveBeenCalledExactlyOnceWith("contacts", true);
+  expect(requestSync).toHaveBeenCalledOnce();
 });
 it("returns 404 for locally deleted detail records", async () => {
   const local = store();
@@ -358,54 +369,84 @@ it("refreshes collection versions after saving history settings without caching 
   ).toHaveLength(2);
 });
 
-it("blocks history recovery while the target has local pending edits", async () => {
-  const local = store();
-  Object.assign(local.db, {
-    outbox: { where: () => ({ equals: () => ({ count: async () => 1 }) }) },
-  });
-  Object.assign(local, { getPendingBundle: async () => null });
-  const network = vi.fn();
-  const transport = createLocalTransport(
-    local as never,
-    network,
-    async () => {},
-  );
-  const result = await transport("/api/record-history/contacts/one/2/restore", {
+const restoreRoutes = [
+  {
+    label: "history recovery",
+    path: "/api/record-history/contacts/one/2/restore",
     method: "PUT",
-    body: JSON.stringify({
-      fields: ["name"],
-      side: "before",
-      expectedVersion: 2,
-    }),
-  });
-  expect(result.status).toBe(409);
-  expect(network).not.toHaveBeenCalled();
-});
+  },
+  {
+    label: "trash recovery",
+    path: "/api/records/contacts/one/restore",
+    method: "POST",
+  },
+];
 
-it("refreshes local data after successful history recovery without reporting refresh failure as a write failure", async () => {
+function restoreStore(quarantined: boolean) {
   const local = store();
-  Object.assign(local.db, {
-    outbox: { where: () => ({ equals: () => ({ count: async () => 0 }) }) },
-  });
-  Object.assign(local, { getPendingBundle: async () => null });
-  const network = vi.fn(async () => Response.json({ data: { version: 3 } }));
-  const sync = vi.fn(async () => {
-    throw new Error("Offline after commit");
-  });
-  const requestSync = vi.fn();
-  const transport = createLocalTransport(
-    local as never,
-    network,
-    sync,
-    requestSync,
-  );
-  const result = await transport("/api/record-history/contacts/one/2/restore", {
-    method: "PUT",
-  });
-  expect(result.status).toBe(200);
-  expect(sync).toHaveBeenCalledWith("contacts", true);
-  expect(requestSync).toHaveBeenCalledOnce();
-});
+  return {
+    ...local,
+    db: {
+      ...local.db,
+      outbox: {
+        where: () => ({
+          equals: () => ({
+            filter: (matches: (row: { quarantined: boolean }) => boolean) => ({
+              count: async () => Number(matches({ quarantined })),
+            }),
+          }),
+        }),
+      },
+    },
+    getPendingBundle: async () => null,
+  };
+}
+
+it.each(restoreRoutes)(
+  "blocks $label while the target has local pending edits",
+  async ({ path, method }) => {
+    const network = vi.fn(async () => Response.json({ data: { id: "one" } }));
+    const transport = createLocalTransport(
+      restoreStore(false) as never,
+      network,
+      async () => {},
+    );
+    const result = await transport(path, { method });
+    expect(result.status).toBe(409);
+    expect(await result.json()).toMatchObject({
+      code: "LOCAL_RECORD_CHANGES_PENDING",
+    });
+    expect(network).not.toHaveBeenCalled();
+  },
+);
+
+it.each(restoreRoutes)(
+  "refreshes local data after successful $label and preserves success on refresh failure",
+  async ({ path, method }) => {
+    const network = vi.fn(async () => Response.json({ data: { version: 3 } }));
+    const sync = vi.fn(async () => {
+      throw new Error("Offline after commit");
+    });
+    const requestSync = vi.fn();
+    const transport = createLocalTransport(
+      restoreStore(true) as never,
+      network,
+      sync,
+      requestSync,
+    );
+    const init = { method, body: JSON.stringify({ version: 3 }) };
+    network.mockResolvedValueOnce(
+      Response.json({ error: "Version changed" }, { status: 409 }),
+    );
+    expect((await transport(path, init)).status).toBe(409);
+    expect(sync).not.toHaveBeenCalled();
+    const result = await transport(path, init);
+    expect(result.status).toBe(200);
+    expect(network).toHaveBeenLastCalledWith(path, init);
+    expect(sync).toHaveBeenCalledWith("contacts", true);
+    expect(requestSync).toHaveBeenCalledOnce();
+  },
+);
 
 it.each([
   ["/api/objects", "POST"],
@@ -501,4 +542,58 @@ it("rejects a malformed delete version without enqueueing", async () => {
   )("/api/records/contacts/one?version=bad", { method: "DELETE" });
   expect(result.status).toBe(422);
   expect(local.mutateWithReceipt).not.toHaveBeenCalled();
+});
+
+it("rejects a draft deletion if its creation is confirmed before the local write", async () => {
+  const local = await openLocalStore(crypto.randomUUID());
+  try {
+    await local.refreshManifest([
+      {
+        name: "contacts",
+        capability: "read-write",
+        schemaVersion: 1,
+        object: {
+          name: "contacts",
+          label: "Contacts",
+          description: "",
+          config: { fields: {} },
+        } as never,
+      },
+    ]);
+    await local.applyPull("contacts", {
+      documents: [],
+      hasMore: false,
+      cursor: "seed",
+    });
+    await local.mutate("contacts", "create", document.id, {
+      name: document.name,
+    });
+    const [created] = await local.db.outbox.toArray();
+    const persist = local.mutateWithReceipt.bind(local);
+    vi.spyOn(local, "mutateWithReceipt").mockImplementationOnce(
+      async (...args) => {
+        await local.acknowledge(created, {
+          ...document,
+          created_at: "",
+          updated_at: "",
+        });
+        return persist(...args);
+      },
+    );
+    const network = vi.fn();
+    const transport = createLocalTransport(local, network, async () => {});
+    const response = await transport(
+      "/api/records/contacts/one?version=local",
+      { method: "DELETE" },
+    );
+    expect(response.status).toBe(409);
+    expect(await local.db.outbox.count()).toBe(0);
+    expect(await local.get("contacts", document.id)).toMatchObject({
+      _version: 1,
+      deleted_at: null,
+    });
+    expect(network).not.toHaveBeenCalled();
+  } finally {
+    await local.destroy();
+  }
 });

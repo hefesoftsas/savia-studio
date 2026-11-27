@@ -281,6 +281,46 @@
     {
       "filename": "0065_notification_collection_follow_cleanup.sql",
       "sha256": "2f9c4f72b4c30603ac88ef5c780431a5addafc67b8b2bcf66baa5a880e15bc1e"
+    },
+    {
+      "filename": "0067_studio_file_deletions.sql",
+      "sha256": "9adf5abc503e519a6a838311ba14f7fdf201e05f2da786e4d0ffd1cbe068dba7"
+    },
+    {
+      "filename": "0068_studio_attachment_intents.sql",
+      "sha256": "ba9a3be6a794b8190e6c1fb7433057c7670bbb8c8a6fe047758b78c1975f91f4"
+    },
+    {
+      "filename": "0069_studio_file_drafts_due.sql",
+      "sha256": "d3e10edd1b01e2e1b7547c25c840667fadf44575c1e56582a65b85bd4254f6cc"
+    },
+    {
+      "filename": "0070_tenant_purge_identity.sql",
+      "sha256": "abd5a1de70b0ebd1d94124b8c4f6ccc963aa0c875f8aad7b6bbd68e35e1d2404"
+    },
+    {
+      "filename": "0071_tenant_deletion_leases.sql",
+      "sha256": "bdf69d19b17d19797387c42a12e22eec0c7d4e165f94be52011f8a8491fb7cad"
+    },
+    {
+      "filename": "0072_identity_pending_deletion.sql",
+      "sha256": "f22e3a25d9d949f841f689a9181e62ddf0eca0808dfdc739bfde70d2e5374f6b"
+    },
+    {
+      "filename": "0073_identity_directory_revision.sql",
+      "sha256": "422895eda0d5de3129ed5e88c5f14a5c68c65f595b4e8a1e139391913c0552fb"
+    },
+    {
+      "filename": "0074_platform_administrator_revocation.sql",
+      "sha256": "ed78901816ae00bb2fc05313b9889b0a01ef708bb72975f5ebab68ea45c37daa"
+    },
+    {
+      "filename": "0075_platform_administrator_session.sql",
+      "sha256": "e08b463abd97ab6910cde0bb056ee6fb11bfa508010916e99dcbd8600f6414df"
+    },
+    {
+      "filename": "0076_identity_access_change_leases.sql",
+      "sha256": "09a7b317bd096518b82918474604e1107ebfe3eed6fecab4c59841a610e8a87d"
     }
   ],
   "sqliteOnlyDerivedTables": [
@@ -610,6 +650,21 @@
       "type": "index",
       "name": "social_registration_audit_tenant_created_index",
       "table": "social_registration_audit"
+    },
+    {
+      "type": "index",
+      "name": "studio_file_deletions_due",
+      "table": "studio_file_deletions"
+    },
+    {
+      "type": "index",
+      "name": "studio_file_deletions_file",
+      "table": "studio_file_deletions"
+    },
+    {
+      "type": "index",
+      "name": "studio_file_drafts_due",
+      "table": "studio_file_drafts"
     },
     {
       "type": "index",
@@ -978,6 +1033,11 @@
     },
     {
       "type": "table",
+      "name": "identity_directory_revision",
+      "table": "identity_directory_revision"
+    },
+    {
+      "type": "table",
       "name": "identity_global_role",
       "table": "identity_global_role"
     },
@@ -1228,6 +1288,11 @@
     },
     {
       "type": "table",
+      "name": "studio_file_deletions",
+      "table": "studio_file_deletions"
+    },
+    {
+      "type": "table",
       "name": "studio_file_drafts",
       "table": "studio_file_drafts"
     },
@@ -1380,6 +1445,16 @@
       "type": "table",
       "name": "tenant_flow_versions",
       "table": "tenant_flow_versions"
+    },
+    {
+      "type": "table",
+      "name": "tenant_deletion_leases",
+      "table": "tenant_deletion_leases"
+    },
+    {
+      "type": "table",
+      "name": "identity_access_change_leases",
+      "table": "identity_access_change_leases"
     },
     {
       "type": "table",
@@ -1685,6 +1760,11 @@
       "type": "trigger",
       "name": "studio_relation_definition_update",
       "table": "studio_collection_relations"
+    },
+    {
+      "type": "trigger",
+      "name": "tenant_purge_identity_guard",
+      "table": "tenants"
     },
     {
       "type": "trigger",
@@ -4708,6 +4788,38 @@
       "checkCount": 0
     },
     {
+      "name": "identity_directory_revision",
+      "columns": [
+        {
+          "cid": 0,
+          "name": "id",
+          "type": "BIGINT",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 1
+        },
+        {
+          "cid": 1,
+          "name": "revision",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [],
+      "seedRows": 0,
+      "uniqueKeys": [
+        {
+          "columns": [
+            "id"
+          ],
+          "origin": "pk"
+        }
+      ],
+      "checkCount": 2
+    },
+    {
       "name": "identity_global_role",
       "columns": [
         {
@@ -4731,6 +4843,14 @@
           "name": "created_at",
           "type": "TEXT",
           "notnull": 1,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 3,
+          "name": "session_after",
+          "type": "TEXT",
+          "notnull": 0,
           "dflt_value": null,
           "pk": 0
         }
@@ -4825,6 +4945,22 @@
           "notnull": 1,
           "dflt_value": null,
           "pk": 0
+        },
+        {
+          "cid": 8,
+          "name": "deletion_started_at",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 9,
+          "name": "platform_admin_revoked",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt_value": "0",
+          "pk": 0
         }
       ],
       "foreignKeys": [],
@@ -4844,7 +4980,7 @@
           "origin": "pk"
         }
       ],
-      "checkCount": 0
+      "checkCount": 2
     },
     {
       "name": "identity_tenant_membership",
@@ -9484,6 +9620,54 @@
       "checkCount": 2
     },
     {
+      "name": "studio_file_deletions",
+      "columns": [
+        {
+          "cid": 0,
+          "name": "storage_key",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 1
+        },
+        {
+          "cid": 1,
+          "name": "tenant_id",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 2,
+          "name": "file_id",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 3,
+          "name": "next_attempt_at",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt_value": "0",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [],
+      "seedRows": 0,
+      "uniqueKeys": [
+        {
+          "columns": [
+            "storage_key"
+          ],
+          "origin": "pk"
+        }
+      ],
+      "checkCount": 0
+    },
+    {
       "name": "studio_file_drafts",
       "columns": [
         {
@@ -9572,6 +9756,30 @@
           "type": "TEXT",
           "notnull": 1,
           "dflt_value": "strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+          "pk": 0
+        },
+        {
+          "cid": 11,
+          "name": "created_by",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 12,
+          "name": "target_record_id",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 13,
+          "name": "create_request_key",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt_value": null,
           "pk": 0
         }
       ],
@@ -9773,6 +9981,22 @@
           "type": "TEXT",
           "notnull": 1,
           "dflt_value": "''",
+          "pk": 0
+        },
+        {
+          "cid": 11,
+          "name": "created_by",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 12,
+          "name": "create_request_key",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt_value": null,
           "pk": 0
         }
       ],
@@ -12113,6 +12337,100 @@
       "checkCount": 0
     },
     {
+      "name": "tenant_deletion_leases",
+      "columns": [
+        {
+          "cid": 0,
+          "name": "tenant_id",
+          "type": "BIGINT",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 1
+        },
+        {
+          "cid": 1,
+          "name": "lease_token",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 2,
+          "name": "lease_until",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "id": 0,
+          "table": "tenants",
+          "from": "tenant_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "seedRows": 0,
+      "uniqueKeys": [
+        {
+          "columns": ["tenant_id"],
+          "origin": "pk"
+        }
+      ],
+      "checkCount": 0
+    },
+    {
+      "name": "identity_access_change_leases",
+      "columns": [
+        {
+          "cid": 0,
+          "name": "principal_id",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 1
+        },
+        {
+          "cid": 1,
+          "name": "lease_token",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 0
+        },
+        {
+          "cid": 2,
+          "name": "lease_until",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt_value": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "id": 0,
+          "table": "identity_principal",
+          "from": "principal_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "seedRows": 0,
+      "uniqueKeys": [
+        {
+          "columns": ["principal_id"],
+          "origin": "pk"
+        }
+      ],
+      "checkCount": 0
+    },
+    {
       "name": "tenant_flows",
       "columns": [
         {
@@ -12530,6 +12848,14 @@
           "notnull": 1,
           "dflt_value": "'commercial'",
           "pk": 0
+        },
+        {
+          "cid": 7,
+          "name": "purge_token",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt_value": null,
+          "pk": 0
         }
       ],
       "foreignKeys": [],
@@ -12548,7 +12874,7 @@
           "origin": "pk"
         }
       ],
-      "checkCount": 2
+      "checkCount": 3
     },
     {
       "name": "user_appearance_preferences",

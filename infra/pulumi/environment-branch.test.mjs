@@ -2,6 +2,26 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import { runBranchDeployment } from "./environment-branch.mjs";
+
+test("a new branch without an Auth password stops before provisioning", async () => {
+  const reads = [];
+  await assert.rejects(
+    runBranchDeployment(["--branch", "feature-login"], {
+      env: {},
+      run: async () => assert.fail("spawned a command"),
+      dependencies: () => ({
+        inventory: async (environment) => {
+          reads.push(environment);
+          return { resources: [] };
+        },
+      }),
+      freeze: async () => assert.fail("prepared a release"),
+    }),
+    /BETTER_AUTH_BOOTSTRAP_PASSWORD/,
+  );
+  assert.deepEqual(reads, ["branch-feature-login"]);
+});
+
 test("legacy branch dry-run freezes credential-free configuration without cloud or infrastructure mutations", async () => {
   let work;
   const result = await runBranchDeployment(

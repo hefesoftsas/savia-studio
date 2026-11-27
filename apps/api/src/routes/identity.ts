@@ -11,10 +11,12 @@ import {
 import {
   activePlatformAdministratorCount,
   deletePrincipal,
+  ensureBootstrapAdministrator,
   findPrincipal,
   findPrincipalBySubject,
   grantMembership,
   loadActor,
+  readIdentityDirectoryRevision,
   removeMembership,
   setPlatformAdministrator,
   setPrincipalActive,
@@ -23,8 +25,11 @@ import {
   assertIdentityEmailAvailable,
 } from "../auth/identity-repository";
 import {
+  PLATFORM_TENANT_ID,
   TenantMembershipInvariantError,
   assertPrincipalCanLoseActiveMembership,
+  assertPrincipalNotDeleting,
+  beginPrincipalDeletion,
   ensureActiveCommercialTenant,
 } from "../auth/tenant-membership-invariants";
 import type {
@@ -46,6 +51,10 @@ import type { AccessScope } from "@savia/studio-shared/access-control";
 import { MAX_CUSTOM_ROLES_PER_USER } from "@savia/studio-shared/user-access-limits";
 import { AccessControlError } from "../auth/access-registry";
 import { assertTenantUserCapacity } from "../auth/tenant-user-capacity";
+import {
+  withIdentityAccessChange,
+  type IdentityAccessChange,
+} from "../auth/identity-access-change";
 
 const membershipSchema = z.object({
   id: z.string(),
@@ -71,12 +80,15 @@ const actorSchema = z.object({
 
 const managedActorSchema = actorSchema.extend({
   attributes: actorSchema.shape.attributes.extend({
-    account: z.object({
-      role: z.enum(["admin", "user"]),
-      isBanned: z.boolean(),
-      twoFactorEnabled: z.boolean(),
-      emailVerified: z.boolean().optional(),
-    }),
+    deletionPending: z.literal(true).optional(),
+    account: z
+      .object({
+        role: z.enum(["admin", "user"]),
+        isBanned: z.boolean(),
+        twoFactorEnabled: z.boolean(),
+        emailVerified: z.boolean().optional(),
+      })
+      .nullable(),
   }),
 });
 
@@ -154,6 +166,7 @@ const identityUsersRoute = createRoute({
       description: "Provisioned users",
     },
     403: { description: "Platform or tenant administrator role is required" },
+    503: { description: "The identity directory is temporarily unavailable" },
   },
 });
 
@@ -416,13 +429,18 @@ const deleteIdentityRoute = createRoute({
   tags: ["Identity & access"],
   summary: "Delete a Savia user",
   description:
-    "Removes the Better Auth account and its Savia principal memberships.",
+    "Disables the user in Savia before removing the Better Auth account and local memberships. Retry this request if Auth is unavailable.",
   security: [{ oauth2: ["savia.api.write"] }],
   request: { params: membershipParamsSchema },
   responses: {
     204: { description: "User removed from Better Auth and Savia" },
     403: { description: "Platform or tenant administrator role is required" },
     404: { description: "Identity principal was not found" },
+    409: {
+      description:
+        "Deleting the user would remove the last active tenant member or platform administrator",
+    },
+    503: { description: "Auth deletion could not be completed" },
   },
 });
 
@@ -586,13 +604,17 @@ function actorDocument(actor: AppActor) {
   };
 }
 
-function managedActorDocument(actor: AppActor, account: ManagedIdentityUser) {
+function managedActorDocument(
+  actor: AppActor,
+  account: ManagedIdentityUser | null,
+) {
   const document = actorDocument(actor);
   return {
     ...document,
     attributes: {
       ...document.attributes,
-      account: {
+      ...(account === null ? { deletionPending: true as const } : {}),
+      account: account && {
         role: account.role,
         isBanned: account.isBanned,
         twoFactorEnabled: account.twoFactorEnabled,
@@ -606,17 +628,29 @@ function managedActorDocument(actor: AppActor, account: ManagedIdentityUser) {
 
 async function managedActor(
   d1: D1Database,
-  principalId: string,
+  actor: AppActor,
   administrator: IdentityUserAdministrator,
   request: Request,
+  tenantId: number | undefined,
 ) {
-  const principal = await findPrincipal(d1, principalId);
-  if (!principal) return undefined;
-  const [actor, account] = await Promise.all([
-    loadActor(d1, principal),
-    administrator.getUser(principal.subject, request),
-  ]);
-  return managedActorDocument(actor, account);
+  if (actor.principal.deletionStartedAt)
+    return managedActorDocument(actor, null);
+  try {
+    return managedActorDocument(
+      actor,
+      await administrator.getUser(actor.principal.subject, request),
+    );
+  } catch (error) {
+    const current = await findPrincipal(d1, actor.principal.id);
+    if (!current) return undefined;
+    if (current.deletionStartedAt) {
+      const pending = await loadActor(d1, current);
+      return targetBelongsToScope(pending, tenantId)
+        ? managedActorDocument(pending, null)
+        : undefined;
+    }
+    throw error;
+  }
 }
 
 function unavailableUserAdministration(): never {
@@ -665,6 +699,12 @@ function membershipInvariantResponse(
     { error: { code: error.code, message: error.message } },
     error.code === "TENANT_NOT_FOUND" ? 404 : 409,
   );
+}
+
+function authEmailTenantId(actor: AppActor): number | null {
+  const membership = actor.memberships[0];
+  const tenantId = membership?.tenantId ?? membership?.agencyId;
+  return tenantId === PLATFORM_TENANT_ID ? null : (tenantId ?? null);
 }
 
 /**
@@ -836,64 +876,127 @@ export function registerIdentityRoutes(
   app.openapi(identityUsersRoute, async (context) => {
     const tenantId = requireIdentityAdministrator(actorFromContext(context));
     if (!userAdministrator) unavailableUserAdministration();
-    const accounts =
+    const tenantScope =
       tenantId === undefined
-        ? await userAdministrator.listUsers(context.req.raw)
-        : await Promise.all(
-            (
-              await d1
-                .prepare(
-                  `SELECT p.subject FROM identity_principal p
-                   JOIN identity_tenant_membership m ON m.principal_id=p.id
-                   WHERE p.issuer=? AND m.tenant_id=?
-                     AND NOT EXISTS (SELECT 1 FROM identity_global_role g WHERE g.principal_id=p.id)
+        ? ""
+        : `
+      AND EXISTS (SELECT 1 FROM identity_tenant_membership m WHERE m.principal_id=p.id AND m.tenant_id=?)
+      AND NOT EXISTS (SELECT 1 FROM identity_global_role g WHERE g.principal_id=p.id)`;
+    const scopeParameters =
+      tenantId === undefined
+        ? [userAdministrator.issuer]
+        : [userAdministrator.issuer, tenantId];
+    const loadDirectory = async (revision: number) => {
+      const accounts =
+        tenantId === undefined
+          ? await userAdministrator.listUsers(context.req.raw)
+          : await Promise.all(
+              (
+                await d1
+                  .prepare(
+                    `SELECT p.id,p.subject FROM identity_principal p
+                   WHERE p.issuer=? AND p.deletion_started_at IS NULL ${tenantScope}
                    ORDER BY p.display_name,p.id`,
-                )
-                .bind(userAdministrator.issuer, tenantId)
-                .all<{ subject: string }>()
-            ).results.map((principal) =>
-              userAdministrator.getUser(principal.subject, context.req.raw),
-            ),
+                  )
+                  .bind(...scopeParameters)
+                  .all<{ id: string; subject: string }>()
+              ).results.map(async (principal) => {
+                try {
+                  return await userAdministrator.getUser(
+                    principal.subject,
+                    context.req.raw,
+                  );
+                } catch (error) {
+                  // A deletion may have started after the list query.
+                  const current = await findPrincipal(d1, principal.id);
+                  if (!current || current.deletionStartedAt) return undefined;
+                  throw error;
+                }
+              }),
+            );
+      if ((await readIdentityDirectoryRevision(d1)) !== revision)
+        return undefined;
+      const documents = await Promise.all(
+        accounts.map(async (account) => {
+          if (!account) return undefined;
+          let principal = await findPrincipalBySubject(
+            d1,
+            userAdministrator.issuer,
+            account.subject,
           );
-    const documents = await Promise.all(
-      accounts.map(async (account) => {
-        let principal = await findPrincipalBySubject(
-          d1,
-          userAdministrator.issuer,
-          account.subject,
-        );
-        if (
-          !principal ||
-          principal.email !== account.email ||
-          principal.displayName !== account.displayName
-        ) {
-          principal = await upsertPrincipal(d1, {
-            issuer: userAdministrator.issuer,
-            subject: account.subject,
-            email: account.email,
-            displayName: account.displayName,
-          });
-        }
-        const actor = await loadActor(d1, principal);
-        if (
-          account.role === "admin" &&
-          !actor.globalRoles.includes("platform_admin")
-        ) {
-          if (tenantId !== undefined) return undefined;
-          await setPlatformAdministrator(d1, principal.id, true);
-          actor.globalRoles = ["platform_admin"];
-        }
-        if (
-          tenantId !== undefined &&
-          actor.globalRoles.includes("platform_admin")
+          // Use the local record for pending users, even if Auth still lists them.
+          if (principal?.deletionStartedAt) return undefined;
+          // The tenant catalog queried an existing membership before calling Auth.
+          if (!principal && tenantId !== undefined) return undefined;
+          if (
+            !principal ||
+            principal.email !== account.email ||
+            principal.displayName !== account.displayName
+          ) {
+            principal = await upsertPrincipal(
+              d1,
+              {
+                issuer: userAdministrator.issuer,
+                subject: account.subject,
+                email: account.email,
+                displayName: account.displayName,
+              },
+              revision,
+            );
+          }
+          if (!principal) return undefined;
+          let actor = await loadActor(d1, principal);
+          if (
+            !principal.platformAdminRevoked &&
+            account.role === "admin" &&
+            !actor.globalRoles.includes("platform_admin")
+          ) {
+            if (tenantId !== undefined) return undefined;
+            await ensureBootstrapAdministrator(d1, principal.id);
+            actor = await loadActor(d1, principal);
+          }
+          if (!targetBelongsToScope(actor, tenantId)) return undefined;
+          return managedActorDocument(actor, account);
+        }),
+      );
+      const pendingRows = await d1
+        .prepare(
+          `SELECT p.id FROM identity_principal p
+         WHERE p.issuer=? AND p.deletion_started_at IS NOT NULL ${tenantScope}
+         ORDER BY p.display_name,p.id`,
         )
-          return undefined;
-        return managedActorDocument(actor, account);
-      }),
-    );
-    return context.json(
-      { data: documents.filter((document) => document !== undefined) },
-      200,
+        .bind(...scopeParameters)
+        .all<{ id: string }>();
+      const pending = await Promise.all(
+        pendingRows.results.map(async ({ id }) => {
+          const principal = await findPrincipal(d1, id);
+          if (!principal?.deletionStartedAt) return undefined;
+          const actor = await loadActor(d1, principal);
+          if (!targetBelongsToScope(actor, tenantId)) return undefined;
+          return managedActorDocument(actor, null);
+        }),
+      );
+      const pendingIds = new Set(pendingRows.results.map(({ id }) => id));
+      return [
+        ...documents.filter(
+          (document) => document && !pendingIds.has(document.id),
+        ),
+        ...pending.filter((document) => document !== undefined),
+      ];
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const revision = await readIdentityDirectoryRevision(d1);
+      try {
+        const data = await loadDirectory(revision);
+        if (data && (await readIdentityDirectoryRevision(d1)) === revision)
+          return context.json({ data }, 200);
+      } catch (error) {
+        if ((await readIdentityDirectoryRevision(d1)) === revision) throw error;
+      }
+    }
+    throw new AuthenticationError(
+      "AUTHENTICATION_UNAVAILABLE",
+      "The identity directory changed while loading. Try again.",
     );
   });
   const provisionIdentity: RouteHandler<typeof provisionIdentityRoute> = async (
@@ -1071,62 +1174,69 @@ export function registerIdentityRoutes(
     }
     const input = context.req.valid("json");
     const requestedTenant = input.tenantId ?? input.agencyId!;
-    const targetActor = await loadActor(d1, principal);
     if (
-      !targetBelongsToScope(targetActor, tenantId) ||
-      (tenantId !== undefined && requestedTenant !== tenantId)
+      tenantId !== undefined &&
+      (requestedTenant !== tenantId ||
+        !targetBelongsToScope(await loadActor(d1, principal), tenantId))
     )
       return notFound(context);
-    try {
-      await ensureActiveCommercialTenant(d1, requestedTenant);
-    } catch (error) {
-      if (error instanceof TenantMembershipInvariantError)
-        return membershipInvariantResponse(context, error);
-      throw error;
-    }
-    const previousEmailTenantId =
-      targetActor.memberships[0]?.tenantId ??
-      targetActor.memberships[0]?.agencyId ??
-      null;
-    await userAdministrator.updateUser(
-      principal.subject,
-      { tenantId: requestedTenant },
-      context.req.raw,
-    );
-    try {
-      await grantMembership(d1, principal.id, requestedTenant, input.role);
-    } catch (error) {
+    return withIdentityAccessChange(d1, principal.id, async (accessChange) => {
+      const targetActor = await loadActor(d1, principal);
+      if (!targetBelongsToScope(targetActor, tenantId))
+        return notFound(context);
+      await accessChange.assertSourceAvailable();
+      try {
+        await assertPrincipalNotDeleting(d1, principal.id);
+        await ensureActiveCommercialTenant(d1, requestedTenant);
+      } catch (error) {
+        if (error instanceof TenantMembershipInvariantError)
+          return membershipInvariantResponse(context, error);
+        throw error;
+      }
+      const previousEmailTenantId = authEmailTenantId(targetActor);
+      await accessChange.renew();
       await userAdministrator.updateUser(
         principal.subject,
-        { tenantId: previousEmailTenantId },
+        { tenantId: requestedTenant },
         context.req.raw,
       );
-      if (error instanceof TenantMembershipInvariantError) {
-        return membershipInvariantResponse(context, error);
+      try {
+        await accessChange.renew();
+        await grantMembership(d1, principal.id, requestedTenant, input.role);
+      } catch (error) {
+        await accessChange.renew();
+        await userAdministrator.updateUser(
+          principal.subject,
+          { tenantId: previousEmailTenantId },
+          context.req.raw,
+        );
+        if (error instanceof TenantMembershipInvariantError) {
+          return membershipInvariantResponse(context, error);
+        }
+        throw error;
       }
-      throw error;
-    }
-    notifyUsers(realtime, context, "updated", principal.id);
-    notifyMembershipUpdates(
-      realtime,
-      actorFromContext(context).principal.id,
-      principal.id,
-      [
-        ...targetActor.memberships.map(
-          (membership) => membership.tenantId ?? membership.agencyId,
-        ),
-        requestedTenant,
-      ],
-    );
-    return context.json(
-      {
-        data: managedActorDocument(
-          await loadActor(d1, principal),
-          await userAdministrator.getUser(principal.subject, context.req.raw),
-        ),
-      },
-      201,
-    );
+      notifyUsers(realtime, context, "updated", principal.id);
+      notifyMembershipUpdates(
+        realtime,
+        actorFromContext(context).principal.id,
+        principal.id,
+        [
+          ...targetActor.memberships.map(
+            (membership) => membership.tenantId ?? membership.agencyId,
+          ),
+          requestedTenant,
+        ],
+      );
+      return context.json(
+        {
+          data: managedActorDocument(
+            await loadActor(d1, principal),
+            await userAdministrator.getUser(principal.subject, context.req.raw),
+          ),
+        },
+        201,
+      );
+    });
   });
   app.openapi(identityUserRoute, async (context) => {
     const tenantId = requireIdentityAdministrator(actorFromContext(context));
@@ -1134,13 +1244,14 @@ export function registerIdentityRoutes(
     const { principalId } = context.req.valid("param");
     const target = await findPrincipal(d1, principalId);
     if (!target) return notFound(context);
-    if (!targetBelongsToScope(await loadActor(d1, target), tenantId))
-      return notFound(context);
+    const actor = await loadActor(d1, target);
+    if (!targetBelongsToScope(actor, tenantId)) return notFound(context);
     const document = await managedActor(
       d1,
-      principalId,
+      actor,
       userAdministrator,
       context.req.raw,
+      tenantId,
     );
     if (!document) {
       return context.json(
@@ -1167,166 +1278,178 @@ export function registerIdentityRoutes(
       );
     }
     const input = context.req.valid("json");
-    const targetActor = await loadActor(d1, target);
-    if (!targetBelongsToScope(targetActor, tenantId)) return notFound(context);
-    if (
-      tenantId !== undefined &&
-      (input.platformAdmin !== undefined ||
-        (input.membership !== undefined &&
-          (input.membership.tenantId ?? input.membership.agencyId) !==
-            tenantId))
-    )
-      return notFound(context);
-    const demotionTenantId =
-      input.platformAdmin === false &&
-      targetActor.globalRoles.includes("platform_admin")
-        ? (input.membership?.tenantId ?? input.membership?.agencyId)
-        : undefined;
-    if (demotionTenantId !== undefined)
-      await assertTenantUserCapacity(d1, demotionTenantId, target.id);
-    try {
-      if (input.platformAdmin === true) {
-        await assertPrincipalCanLoseActiveMembership(d1, target.id);
-      } else if (input.membership) {
-        await ensureActiveCommercialTenant(
-          d1,
-          input.membership.tenantId ?? input.membership.agencyId!,
-        );
-      }
-    } catch (error) {
-      if (error instanceof TenantMembershipInvariantError) {
-        return membershipInvariantResponse(context, error);
-      }
-      throw error;
-    }
-    if (input.platformAdmin === false) {
-      preventSelfAdministration(actor, target.id);
-      const blocked = await preventRemovingFinalAdministrator(d1, targetActor);
-      if (blocked) return blocked;
-      if (
-        targetActor.globalRoles.includes("platform_admin") &&
-        !input.membership
-      ) {
-        return context.json(
-          {
-            error: {
-              code: "COMMERCIAL_MEMBERSHIP_REQUIRED",
-              message:
-                "A commercial tenant membership is required when revoking platform administration",
-            },
-          },
-          400,
-        );
-      }
-    }
-    const [savedFirstName = "", ...savedLastName] = target.displayName
-      .trim()
-      .split(/\s+/);
-    const displayName =
-      input.firstName === undefined && input.lastName === undefined
-        ? undefined
-        : [
-            input.firstName ?? savedFirstName,
-            input.lastName ?? savedLastName.join(" "),
-          ]
-            .filter(Boolean)
-            .join(" ");
-    const previousEmailTenantId =
-      targetActor.memberships[0]?.tenantId ??
-      targetActor.memberships[0]?.agencyId ??
-      null;
-    const nextEmailTenantId =
-      input.platformAdmin === true
-        ? null
-        : input.membership
-          ? (input.membership.tenantId ?? input.membership.agencyId!)
-          : undefined;
     const changingAccess =
       input.platformAdmin !== undefined || input.membership !== undefined;
-    const previousAccount =
+    if (
       changingAccess &&
-      (displayName !== undefined || input.emailVerified !== undefined)
-        ? await userAdministrator.getUser(target.subject, context.req.raw)
-        : undefined;
-    const account = await userAdministrator.updateUser(
-      target.subject,
-      {
-        displayName,
-        platformAdmin: input.platformAdmin,
-        emailVerified: input.emailVerified,
-        ...(nextEmailTenantId === undefined
-          ? {}
-          : { tenantId: nextEmailTenantId }),
-      },
-      context.req.raw,
-    );
-    try {
-      if (input.platformAdmin !== undefined) {
-        await setPlatformAdministrator(
-          d1,
-          target.id,
-          input.platformAdmin,
-          input.membership?.tenantId ?? input.membership?.agencyId,
-          input.membership?.role,
-        );
-      } else if (input.membership) {
-        await grantMembership(
-          d1,
-          target.id,
-          input.membership.tenantId ?? input.membership.agencyId!,
-          input.membership.role,
-        );
+      tenantId !== undefined &&
+      (input.platformAdmin !== undefined ||
+        (input.membership?.tenantId ?? input.membership?.agencyId) !==
+          tenantId ||
+        !targetBelongsToScope(await loadActor(d1, target), tenantId))
+    )
+      return notFound(context);
+    const update = async (accessChange?: IdentityAccessChange) => {
+      const targetActor = await loadActor(d1, target);
+      if (!targetBelongsToScope(targetActor, tenantId))
+        return notFound(context);
+      await accessChange?.assertSourceAvailable();
+      const demotionTenantId =
+        input.platformAdmin === false &&
+        targetActor.globalRoles.includes("platform_admin")
+          ? (input.membership?.tenantId ?? input.membership?.agencyId)
+          : undefined;
+      if (demotionTenantId !== undefined)
+        await assertTenantUserCapacity(d1, demotionTenantId, target.id);
+      try {
+        await assertPrincipalNotDeleting(d1, target.id);
+        if (input.platformAdmin === true) {
+          await assertPrincipalCanLoseActiveMembership(d1, target.id);
+        } else if (input.membership) {
+          await ensureActiveCommercialTenant(
+            d1,
+            input.membership.tenantId ?? input.membership.agencyId!,
+          );
+        }
+      } catch (error) {
+        if (error instanceof TenantMembershipInvariantError) {
+          return membershipInvariantResponse(context, error);
+        }
+        throw error;
       }
-    } catch (error) {
-      await userAdministrator.updateUser(
+      if (input.platformAdmin === false) {
+        preventSelfAdministration(actor, target.id);
+        const blocked = await preventRemovingFinalAdministrator(
+          d1,
+          targetActor,
+        );
+        if (blocked) return blocked;
+        if (
+          targetActor.globalRoles.includes("platform_admin") &&
+          !input.membership
+        ) {
+          return context.json(
+            {
+              error: {
+                code: "COMMERCIAL_MEMBERSHIP_REQUIRED",
+                message:
+                  "A commercial tenant membership is required when revoking platform administration",
+              },
+            },
+            400,
+          );
+        }
+      }
+      const [savedFirstName = "", ...savedLastName] = target.displayName
+        .trim()
+        .split(/\s+/);
+      const displayName =
+        input.firstName === undefined && input.lastName === undefined
+          ? undefined
+          : [
+              input.firstName ?? savedFirstName,
+              input.lastName ?? savedLastName.join(" "),
+            ]
+              .filter(Boolean)
+              .join(" ");
+      const previousEmailTenantId = authEmailTenantId(targetActor);
+      const nextEmailTenantId =
+        input.platformAdmin === true
+          ? null
+          : input.membership
+            ? (input.membership.tenantId ?? input.membership.agencyId!)
+            : undefined;
+      const previousAccount =
+        changingAccess &&
+        (displayName !== undefined || input.emailVerified !== undefined)
+          ? await userAdministrator.getUser(target.subject, context.req.raw)
+          : undefined;
+      await accessChange?.renew();
+      const account = await userAdministrator.updateUser(
         target.subject,
         {
-          ...(input.platformAdmin === undefined
-            ? {}
-            : {
-                platformAdmin:
-                  targetActor.globalRoles.includes("platform_admin"),
-              }),
+          displayName,
+          platformAdmin: input.platformAdmin,
+          emailVerified: input.emailVerified,
           ...(nextEmailTenantId === undefined
             ? {}
-            : { tenantId: previousEmailTenantId }),
-          ...(displayName !== undefined && previousAccount
-            ? { displayName: previousAccount.displayName }
-            : {}),
-          ...(input.emailVerified !== undefined && previousAccount
-            ? { emailVerified: Boolean(previousAccount.emailVerified) }
-            : {}),
+            : { tenantId: nextEmailTenantId }),
         },
         context.req.raw,
       );
-      if (error instanceof TenantMembershipInvariantError) {
-        return membershipInvariantResponse(context, error);
+      try {
+        await accessChange?.renew();
+        if (input.platformAdmin !== undefined) {
+          await setPlatformAdministrator(
+            d1,
+            target.id,
+            input.platformAdmin,
+            input.membership?.tenantId ?? input.membership?.agencyId,
+            input.membership?.role,
+          );
+        } else if (input.membership) {
+          await grantMembership(
+            d1,
+            target.id,
+            input.membership.tenantId ?? input.membership.agencyId!,
+            input.membership.role,
+          );
+        }
+      } catch (error) {
+        await accessChange?.renew();
+        await userAdministrator.updateUser(
+          target.subject,
+          {
+            ...(input.platformAdmin === undefined
+              ? {}
+              : {
+                  platformAdmin:
+                    targetActor.globalRoles.includes("platform_admin"),
+                }),
+            ...(nextEmailTenantId === undefined
+              ? {}
+              : { tenantId: previousEmailTenantId }),
+            ...(displayName !== undefined && previousAccount
+              ? { displayName: previousAccount.displayName }
+              : {}),
+            ...(input.emailVerified !== undefined && previousAccount
+              ? { emailVerified: Boolean(previousAccount.emailVerified) }
+              : {}),
+          },
+          context.req.raw,
+        );
+        if (error instanceof TenantMembershipInvariantError) {
+          return membershipInvariantResponse(context, error);
+        }
+        throw error;
       }
-      throw error;
-    }
-    const savedPrincipal = displayName
-      ? await updatePrincipal(d1, target.id, { displayName })
-      : target;
-    const updatedActor = await loadActor(d1, savedPrincipal);
-    notifyMembershipUpdates(realtime, actor.principal.id, target.id, [
-      ...targetActor.memberships.map(
-        (membership) => membership.tenantId ?? membership.agencyId,
-      ),
-      ...updatedActor.memberships.map(
-        (membership) => membership.tenantId ?? membership.agencyId,
-      ),
-      ...(targetActor.globalRoles.includes("platform_admin") ||
-      updatedActor.globalRoles.includes("platform_admin")
-        ? [0]
-        : []),
-    ]);
-    notifyUsers(realtime, context, "updated", target.id);
-    return context.json(
-      {
-        data: managedActorDocument(updatedActor, account),
-      },
-      200,
-    );
+      const savedPrincipal = displayName
+        ? await updatePrincipal(d1, target.id, { displayName })
+        : target;
+      const updatedActor = await loadActor(d1, savedPrincipal);
+      notifyMembershipUpdates(realtime, actor.principal.id, target.id, [
+        ...targetActor.memberships.map(
+          (membership) => membership.tenantId ?? membership.agencyId,
+        ),
+        ...updatedActor.memberships.map(
+          (membership) => membership.tenantId ?? membership.agencyId,
+        ),
+        ...(targetActor.globalRoles.includes("platform_admin") ||
+        updatedActor.globalRoles.includes("platform_admin")
+          ? [0]
+          : []),
+      ]);
+      notifyUsers(realtime, context, "updated", target.id);
+      return context.json(
+        {
+          data: managedActorDocument(updatedActor, account),
+        },
+        200,
+      );
+    };
+    return changingAccess
+      ? withIdentityAccessChange(d1, target.id, update)
+      : update();
   });
   app.openapi(deleteMembershipRoute, async (context) => {
     const tenantId = requireIdentityAdministrator(actorFromContext(context));
@@ -1346,31 +1469,11 @@ export function registerIdentityRoutes(
       (tenantId !== undefined && Number(agencyId) !== tenantId)
     )
       return notFound(context);
-    const previousEmailTenantId =
-      targetActor.memberships[0]?.tenantId ??
-      targetActor.memberships[0]?.agencyId ??
-      null;
-    const nextEmailTenantId =
-      targetActor.memberships
-        .filter(
-          (membership) =>
-            (membership.tenantId ?? membership.agencyId) !== Number(agencyId),
-        )
-        .map((membership) => membership.tenantId ?? membership.agencyId)[0] ??
-      null;
-    await userAdministrator?.updateUser(
-      target.subject,
-      { tenantId: nextEmailTenantId },
-      context.req.raw,
-    );
+    // A current membership can only change through a transfer. Deleting
+    // another membership is idempotent and leaves the Auth account untouched.
     try {
       await removeMembership(d1, principalId, agencyId);
     } catch (error) {
-      await userAdministrator?.updateUser(
-        target.subject,
-        { tenantId: previousEmailTenantId },
-        context.req.raw,
-      );
       if (error instanceof TenantMembershipInvariantError) {
         return membershipInvariantResponse(context, error);
       }
@@ -1406,6 +1509,7 @@ export function registerIdentityRoutes(
     const blocked = await preventRemovingFinalAdministrator(d1, targetActor);
     if (blocked) return blocked;
     try {
+      await assertPrincipalNotDeleting(d1, target.id);
       await assertPrincipalCanLoseActiveMembership(d1, target.id);
       await userAdministrator.setAccountActive(
         target.subject,
@@ -1446,6 +1550,14 @@ export function registerIdentityRoutes(
     }
     const targetActor = await loadActor(d1, target);
     if (!targetBelongsToScope(targetActor, tenantId)) return notFound(context);
+    try {
+      await assertPrincipalNotDeleting(d1, target.id);
+    } catch (error) {
+      if (error instanceof TenantMembershipInvariantError) {
+        return membershipInvariantResponse(context, error);
+      }
+      throw error;
+    }
     const reactivationTenantId =
       tenantId ??
       targetActor.memberships
@@ -1532,18 +1644,38 @@ export function registerIdentityRoutes(
     preventSelfAdministration(actor, principal.id);
     const targetActor = await loadActor(d1, principal);
     if (!targetBelongsToScope(targetActor, tenantId)) return notFound(context);
-    const blocked = await preventRemovingFinalAdministrator(d1, targetActor);
+    const blocked = principal.isActive
+      ? await preventRemovingFinalAdministrator(d1, targetActor)
+      : undefined;
     if (blocked) return blocked;
     try {
-      await assertPrincipalCanLoseActiveMembership(d1, principal.id);
+      if (!(await beginPrincipalDeletion(d1, principal.id)))
+        return context.body(null, 204);
     } catch (error) {
       if (error instanceof TenantMembershipInvariantError) {
         return membershipInvariantResponse(context, error);
       }
       throw error;
     }
-    await userAdministrator.deleteUser(principal.subject, context.req.raw);
-    await deletePrincipal(d1, principal.id);
+    try {
+      await userAdministrator.deleteUser(principal.subject, context.req.raw);
+      await deletePrincipal(d1, principal.id);
+    } catch (error) {
+      notifyUserActivity(realtime, context, targetActor, "updated");
+      console.warn(
+        "IDENTITY_DELETION_PENDING",
+        error instanceof AuthenticationError ? error.code : "DELETION_FAILED",
+      );
+      return context.json(
+        {
+          error: {
+            code: "IDENTITY_DELETION_PENDING",
+            message: "The user remains disabled. Retry deletion to finish.",
+          },
+        },
+        503,
+      );
+    }
     notifyUserActivity(realtime, context, targetActor, "deleted");
     return context.body(null, 204);
   });

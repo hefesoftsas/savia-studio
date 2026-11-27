@@ -1,11 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, Save } from "lucide-react";
 import {
   OfficeApi,
+  OfficeSaveUnconfirmedError,
   type OfficeMetadata,
   type OfficeRevision,
 } from "./office-api";
 import { loadOfficeEngine, type OfficeEngine } from "./office-engine";
+type OfficeSaveSnapshot = {
+  bytes: Uint8Array;
+  generation: number;
+  version: number;
+};
+
 function download(bytes: Uint8Array, name: string, mime: string) {
   const url = URL.createObjectURL(
     new Blob([bytes.slice().buffer], { type: mime }),
@@ -32,10 +39,15 @@ export function OfficePage({
     changed = useRef(false),
     saveAction = useRef(() => {});
   const changes = useRef(0);
+  const pendingSave = useRef<OfficeSaveSnapshot | null>(null);
   const readOnly = useRef(false);
   const originalBytes = useRef<Uint8Array | null>(null);
+  const historyRequest = useRef<AbortController | null>(null);
   const [meta, setMeta] = useState<OfficeMetadata | null>(null);
   const [revisions, setRevisions] = useState<OfficeRevision[]>([]);
+  const [historyStatus, setHistoryStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const [status, setStatus] = useState("Abriendo documento…"),
     [error, setError] = useState("");
   const [ready, setReady] = useState(false),
@@ -47,8 +59,42 @@ export function OfficePage({
     changed.current = true;
     setDirty(true);
   }
+  const refreshHistory = useCallback(async (client: OfficeApi) => {
+    historyRequest.current?.abort();
+    const request = new AbortController();
+    historyRequest.current = request;
+    setHistoryStatus("loading");
+    const isCurrent = () =>
+      api.current === client &&
+      historyRequest.current === request &&
+      !request.signal.aborted;
+    try {
+      const history = await client.revisions(request.signal);
+      if (!isCurrent()) return;
+      setRevisions(history);
+      setHistoryStatus("ready");
+    } catch (error) {
+      if (!isCurrent()) return;
+      if (
+        error instanceof Error &&
+        "status" in error &&
+        (error.status === 401 || error.status === 403)
+      )
+        setRevisions([]);
+      setHistoryStatus("error");
+    } finally {
+      if (historyRequest.current === request) historyRequest.current = null;
+    }
+  }, []);
   useEffect(() => {
     let cancelled = false;
+    api.current = null;
+    pendingSave.current = null;
+    busy.current = false;
+    setReady(false);
+    setSaving(false);
+    setRevisions([]);
+    setHistoryStatus("idle");
     readOnly.current = false;
     originalBytes.current = null;
     const beforeUnload = (e: BeforeUnloadEvent) => {
@@ -108,11 +154,7 @@ export function OfficePage({
         if (cancelled) return;
         setReady(true);
         setStatus(info.readOnly ? "Modo de solo lectura" : "Guardado en Savia");
-        try {
-          setRevisions(await client.revisions());
-        } catch {
-          /* history can be retried by reopening */
-        }
+        void refreshHistory(client);
       } catch (e) {
         if (!cancelled) {
           setError(
@@ -124,18 +166,22 @@ export function OfficePage({
     })();
     return () => {
       cancelled = true;
+      historyRequest.current?.abort();
       engine.current?.dispose();
       engine.current = null;
       window.removeEventListener("beforeunload", beforeUnload);
       window.removeEventListener("keydown", keydown, true);
     };
-  }, [search]);
+  }, [search, refreshHistory]);
   async function save() {
+    const client = api.current;
+    const editor = engine.current;
     if (
       !ready ||
       !meta ||
       meta.readOnly ||
-      !engine.current ||
+      !client ||
+      !editor ||
       busy.current ||
       !changed.current
     )
@@ -143,28 +189,40 @@ export function OfficePage({
     busy.current = true;
     setSaving(true);
     setError("");
+    let attempt =
+      pendingSave.current?.version === meta.version
+        ? pendingSave.current
+        : null;
+    const retrying = attempt !== null;
     try {
-      const bytes = await engine.current.save();
-      const generation = changes.current;
-      const result = await api.current!.save(meta, bytes);
-      setMeta({ ...meta, version: result.version, size: bytes.length });
-      changed.current = changes.current !== generation;
+      attempt ??= {
+        bytes: await editor.save(),
+        generation: changes.current,
+        version: meta.version,
+      };
+      if (api.current !== client) return;
+      const result = await client.save(meta, attempt.bytes, retrying);
+      if (api.current !== client) return;
+      pendingSave.current = null;
+      setMeta({ ...meta, version: result.version, size: attempt.bytes.length });
+      changed.current = changes.current !== attempt.generation;
       setDirty(changed.current);
       setStatus("Guardado en Savia");
-      try {
-        setRevisions(await api.current!.revisions());
-      } catch {
-        setRevisions([]);
-      }
+      void refreshHistory(client);
     } catch (e) {
+      if (api.current !== client) return;
+      pendingSave.current =
+        e instanceof OfficeSaveUnconfirmedError ? attempt : null;
       setError(
         e instanceof Error
           ? e.message
           : "No se pudo guardar. Descarga una copia para conservar tus cambios.",
       );
     } finally {
-      busy.current = false;
-      setSaving(false);
+      if (api.current === client) {
+        busy.current = false;
+        setSaving(false);
+      }
     }
   }
   saveAction.current = () => void save();
@@ -316,8 +374,24 @@ export function OfficePage({
               </li>
             ))}
           </ul>
-          {!revisions.length && (
-            <p>El historial se actualizará al volver a abrir el documento.</p>
+          {historyStatus === "loading" && (
+            <p role="status">Cargando historial…</p>
+          )}
+          {historyStatus === "error" && (
+            <>
+              <p role="status">No se pudo actualizar el historial.</p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (api.current) void refreshHistory(api.current);
+                }}
+              >
+                Reintentar historial
+              </button>
+            </>
+          )}
+          {historyStatus === "ready" && !revisions.length && (
+            <p>Todavía no hay versiones en el historial.</p>
           )}
         </details>
       </footer>

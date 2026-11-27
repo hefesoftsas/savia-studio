@@ -1,5 +1,5 @@
 import { mergeConfig } from "vitest/config";
-import adminConfig from "../apps/admin/vite.config";
+import adminConfig from "../apps/admin/vite.config.ts";
 import AdminTestSequencer from "./admin-test-sequencer.mjs";
 
 export default mergeConfig(adminConfig, {

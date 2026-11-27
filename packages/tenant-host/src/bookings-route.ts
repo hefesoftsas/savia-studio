@@ -19,13 +19,40 @@ export function readBookingRouteQuery(query: URLSearchParams) {
     new Date(parsed).toISOString().slice(0, 10) === requestedDate
       ? requestedDate
       : null;
-  return { tab, date };
+  const tenantIds = query.getAll("tenantId");
+  const requestedTenantId =
+    tenantIds.length === 1 && /^[1-9]\d*$/.test(tenantIds[0])
+      ? Number(tenantIds[0])
+      : NaN;
+  const tenantId = Number.isSafeInteger(requestedTenantId)
+    ? requestedTenantId
+    : null;
+  return { tab, date, tenantId };
 }
 
-export function normalizeBookingRouteQuery(query: string): string {
-  const { tab, date } = readBookingRouteQuery(new URLSearchParams(query));
+export function normalizeBookingRouteQuery(
+  query: string,
+  { includeTenantId = true } = {},
+): string {
+  const { tab, date, tenantId } = readBookingRouteQuery(
+    new URLSearchParams(query),
+  );
   const normalized = new URLSearchParams();
   if (tab) normalized.set("tab", tab);
   if (date) normalized.set("date", date);
+  if (includeTenantId && tenantId !== null)
+    normalized.set("tenantId", String(tenantId));
   return normalized.toString();
+}
+
+/** Read only the Bookings destination. The OAuth state still needs server validation. */
+export function bookingQueryFromOAuthState(
+  state: string | null,
+): string | undefined {
+  const bookingState = /^[A-Za-z0-9_-]+\.bookings(?:\?(.*))?$/.exec(
+    state ?? "",
+  );
+  return bookingState
+    ? normalizeBookingRouteQuery(bookingState[1] ?? "")
+    : undefined;
 }

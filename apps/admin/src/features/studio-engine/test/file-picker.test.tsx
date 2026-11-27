@@ -60,7 +60,7 @@ it("shows transfer progress for the file being uploaded", () => {
       maxFiles={1}
       maxSize={1024}
       onFilesChange={vi.fn()}
-      uploadingFile={file}
+      uploadingFiles={[file]}
     />,
   );
 

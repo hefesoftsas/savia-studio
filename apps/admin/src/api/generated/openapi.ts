@@ -10390,13 +10390,15 @@ export interface paths {
                   displayName: string;
                   isActive: boolean;
                   globalRoles: "platform_admin"[];
+                  /** @enum {boolean} */
+                  deletionPending?: true;
                   account: {
                     /** @enum {string} */
                     role: "admin" | "user";
                     isBanned: boolean;
                     twoFactorEnabled: boolean;
                     emailVerified?: boolean;
-                  };
+                  } | null;
                 };
                 relationships: {
                   memberships: {
@@ -10426,6 +10428,13 @@ export interface paths {
         };
         /** @description Platform or tenant administrator role is required */
         403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+        /** @description The identity directory is temporarily unavailable */
+        503: {
           headers: {
             [name: string]: unknown;
           };
@@ -10485,13 +10494,15 @@ export interface paths {
                   displayName: string;
                   isActive: boolean;
                   globalRoles: "platform_admin"[];
+                  /** @enum {boolean} */
+                  deletionPending?: true;
                   account: {
                     /** @enum {string} */
                     role: "admin" | "user";
                     isBanned: boolean;
                     twoFactorEnabled: boolean;
                     emailVerified?: boolean;
-                  };
+                  } | null;
                 };
                 relationships: {
                   memberships: {
@@ -10619,13 +10630,15 @@ export interface paths {
                   displayName: string;
                   isActive: boolean;
                   globalRoles: "platform_admin"[];
+                  /** @enum {boolean} */
+                  deletionPending?: true;
                   account: {
                     /** @enum {string} */
                     role: "admin" | "user";
                     isBanned: boolean;
                     twoFactorEnabled: boolean;
                     emailVerified?: boolean;
-                  };
+                  } | null;
                 };
                 relationships: {
                   memberships: {
@@ -10718,13 +10731,15 @@ export interface paths {
                   displayName: string;
                   isActive: boolean;
                   globalRoles: "platform_admin"[];
+                  /** @enum {boolean} */
+                  deletionPending?: true;
                   account: {
                     /** @enum {string} */
                     role: "admin" | "user";
                     isBanned: boolean;
                     twoFactorEnabled: boolean;
                     emailVerified?: boolean;
-                  };
+                  } | null;
                 };
                 relationships: {
                   memberships: {
@@ -10772,7 +10787,7 @@ export interface paths {
     post?: never;
     /**
      * Delete a Savia user
-     * @description Removes the Better Auth account and its Savia principal memberships.
+     * @description Disables the user in Savia before removing the Better Auth account and local memberships. Retry this request if Auth is unavailable.
      */
     delete: {
       parameters: {
@@ -10801,6 +10816,20 @@ export interface paths {
         };
         /** @description Identity principal was not found */
         404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+        /** @description Deleting the user would remove the last active tenant member or platform administrator */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+        /** @description Auth deletion could not be completed */
+        503: {
           headers: {
             [name: string]: unknown;
           };
@@ -10854,13 +10883,15 @@ export interface paths {
                   displayName: string;
                   isActive: boolean;
                   globalRoles: "platform_admin"[];
+                  /** @enum {boolean} */
+                  deletionPending?: true;
                   account: {
                     /** @enum {string} */
                     role: "admin" | "user";
                     isBanned: boolean;
                     twoFactorEnabled: boolean;
                     emailVerified?: boolean;
-                  };
+                  } | null;
                 };
                 relationships: {
                   memberships: {

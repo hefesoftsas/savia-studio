@@ -709,6 +709,7 @@ export function createApiShell(
         resolvedAuthService,
         oauthResource,
         new PersonalApiKeys(db, oauthUrls.personalApiKeyDeploymentId ?? null),
+        identityBridgeKey,
       ),
   );
   app.use("/v1/*", (context, next) =>
@@ -716,30 +717,8 @@ export function createApiShell(
       ? next()
       : authenticate(context, next),
   );
-  app.use(
-    "/api/assistant/*",
-    authenticationMiddleware(
-      db,
-      authenticator ??
-        betterAuthAuthenticator(
-          resolvedAuthService,
-          oauthResource,
-          new PersonalApiKeys(db, oauthUrls.personalApiKeyDeploymentId ?? null),
-        ),
-    ),
-  );
-  app.use(
-    "/api/lookups/*",
-    authenticationMiddleware(
-      db,
-      authenticator ??
-        betterAuthAuthenticator(
-          resolvedAuthService,
-          oauthResource,
-          new PersonalApiKeys(db, oauthUrls.personalApiKeyDeploymentId ?? null),
-        ),
-    ),
-  );
+  app.use("/api/assistant/*", authenticate);
+  app.use("/api/lookups/*", authenticate);
   if (canonicalHost) {
     const guard = tenantHostGuard(db, canonicalHost);
     app.use("/v1/*", (context, next) =>

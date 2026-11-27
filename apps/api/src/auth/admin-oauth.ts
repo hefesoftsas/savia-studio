@@ -6,7 +6,10 @@ import {
   isAllowedTenantOrigin,
 } from "@savia/tenant-host/tenant-host";
 import type { AuthService } from "./better-auth";
-import { normalizeBookingRouteQuery } from "@savia/tenant-host/bookings-route";
+import {
+  bookingQueryFromOAuthState,
+  normalizeBookingRouteQuery,
+} from "@savia/tenant-host/bookings-route";
 
 type AdminOAuthClient = {
   clientId: string;
@@ -28,9 +31,11 @@ type OAuthTransaction = {
   codeVerifier: string;
   redirectUri: string;
   initiatedOrigin: string | null;
+  expired: boolean;
 };
 
 const transactionLifetimeMilliseconds = 5 * 60 * 1000;
+const transactionRecoveryMilliseconds = 5 * 60 * 1000;
 const authProviderTimeoutMilliseconds = 10_000;
 const authClientLookupTimeoutMilliseconds = 4_000;
 const bookingsStateSuffix = ".bookings";
@@ -376,7 +381,7 @@ async function createTransaction(
   await d1.batch([
     d1
       .prepare("DELETE FROM admin_oauth_transactions WHERE expires_at <= ?")
-      .bind(now.toISOString()),
+      .bind(transactionRecoveryCutoff(now)),
     d1
       .prepare(
         `INSERT INTO admin_oauth_transactions
@@ -396,22 +401,30 @@ async function createTransaction(
   return { state, codeChallenge: await codeChallenge(codeVerifier) };
 }
 
+function transactionRecoveryCutoff(now: Date): string {
+  return new Date(
+    now.getTime() - transactionRecoveryMilliseconds,
+  ).toISOString();
+}
+
 async function consumeTransaction(
   d1: D1Database,
   state: string,
 ): Promise<OAuthTransaction | undefined> {
+  const now = new Date();
   const row = await d1
     .prepare(
       `DELETE FROM admin_oauth_transactions
        WHERE state = ? AND expires_at > ?
-       RETURNING client_id, redirect_uri, code_verifier, initiated_origin`,
+       RETURNING client_id, redirect_uri, code_verifier, initiated_origin, expires_at`,
     )
-    .bind(state, new Date().toISOString())
+    .bind(state, transactionRecoveryCutoff(now))
     .first<{
       client_id: string;
       code_verifier: string;
       redirect_uri: string;
       initiated_origin: string | null;
+      expires_at: string;
     }>();
   return row
     ? {
@@ -419,6 +432,7 @@ async function consumeTransaction(
         codeVerifier: row.code_verifier,
         redirectUri: row.redirect_uri,
         initiatedOrigin: row.initiated_origin,
+        expired: row.expires_at <= now.toISOString(),
       }
     : undefined;
 }
@@ -817,24 +831,20 @@ export function registerAdminOAuthRoutes(
         },
         { status: 400, headers },
       );
+    const invalidState = {
+      error: {
+        code: "INVALID_OAUTH_STATE",
+        message: "The login transaction is invalid or expired",
+      },
+    };
     const transaction = await consumeTransaction(d1, input.state);
     if (
       !transaction ||
       !transaction.initiatedOrigin ||
       transaction.clientId !== client.clientId ||
       transaction.redirectUri !== client.redirectUri
-    ) {
-      return Response.json(
-        {
-          error: {
-            code: "INVALID_OAUTH_STATE",
-            message: "The login transaction is invalid or expired",
-          },
-        },
-        { status: 400, headers },
-      );
-    }
-    const domain = cookieDomain(context.req.url);
+    )
+      return Response.json(invalidState, { status: 400, headers });
     // The transaction is authoritative; a shared return cookie may belong to
     // another tab or an earlier tenant login.
     const returnOrigin = isAllowedTenantOrigin(
@@ -843,17 +853,25 @@ export function registerAdminOAuthRoutes(
     )
       ? transaction.initiatedOrigin
       : undefined;
+    const bookingQuery = bookingQueryFromOAuthState(input.state);
+    const bookingDestination =
+      bookingQuery !== undefined
+        ? {
+            returnOrigin,
+            returnRoute: "bookings",
+            ...(bookingQuery ? { returnBookingQuery: bookingQuery } : {}),
+          }
+        : undefined;
+    // A recently expired transaction can only supply navigation for a new login.
+    if (transaction.expired)
+      return Response.json(
+        { ...invalidState, ...bookingDestination },
+        { status: 400, headers },
+      );
+    const domain = cookieDomain(context.req.url);
     for (const cookie of clearReturnOriginCookies(context.req.url, domain)) {
       headers.append("set-cookie", cookie);
     }
-    const bookingResume = /\.bookings(?:\?(.*))?$/.exec(input.state);
-    const bookingDestination = bookingResume
-      ? {
-          returnOrigin,
-          returnRoute: "bookings",
-          ...(bookingResume[1] ? { returnBookingQuery: bookingResume[1] } : {}),
-        }
-      : undefined;
     if ("authorizationFailed" in input) {
       return Response.json(
         {

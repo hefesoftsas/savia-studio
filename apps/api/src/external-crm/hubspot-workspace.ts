@@ -6,6 +6,7 @@ import { createCrmRepository } from "./repository";
 import { hubspotObjects, hubspotObject } from "./hubspot-workspace-catalog";
 import { objectSchema } from "@savia/studio-shared/metadata";
 import { csvHeaders } from "@savia/studio-shared/csv";
+import { hasRecordFilters } from "@savia/studio-shared/record-filter-input";
 import {
   buildRecordsCsv,
   parseCsvExportColumns,
@@ -39,9 +40,82 @@ type HubspotRecordPage = {
     createdAt?: string;
     updatedAt?: string;
   }>;
-  paging?: { next?: { after?: unknown } | null };
+  paging?: { next?: { after?: unknown } | null } | null;
   total?: unknown;
 };
+
+type HubspotPageCheckpoint = {
+  scope: string;
+  page: number;
+  after: HubspotCursor;
+  cursors: Set<string>;
+  recordIds: Set<string>;
+  providerTotal: number | undefined;
+};
+
+const maxPageCheckpoints = 64;
+// Charge per character and per set entry to bound retained pagination history.
+const maxCheckpointWeight = 1_000_000;
+const pageCheckpoints = new Map<
+  string,
+  {
+    state: HubspotPageCheckpoint;
+    expiresAt: number;
+    weight: number;
+  }
+>();
+let checkpointWeight = 0;
+
+function takePageCheckpoint(
+  token: string | undefined,
+  scope: string,
+  page: number,
+) {
+  if (!token) return;
+  const entry = pageCheckpoints.get(token);
+  if (!entry || entry.state.scope !== scope || entry.state.page !== page)
+    return;
+  pageCheckpoints.delete(token);
+  checkpointWeight -= entry.weight;
+  if (entry.expiresAt <= Date.now()) return;
+  return {
+    state: entry.state,
+    restore() {
+      if (
+        entry.expiresAt <= Date.now() ||
+        pageCheckpoints.size >= maxPageCheckpoints ||
+        checkpointWeight + entry.weight > maxCheckpointWeight
+      )
+        return;
+      pageCheckpoints.set(token, entry);
+      checkpointWeight += entry.weight;
+    },
+  };
+}
+
+function savePageCheckpoint(state: HubspotPageCheckpoint) {
+  let weight = state.scope.length;
+  for (const entries of [state.cursors, state.recordIds])
+    for (const value of entries) weight += value.length + 32;
+  if (weight > maxCheckpointWeight) return;
+
+  const now = Date.now();
+  for (const [token, entry] of pageCheckpoints) {
+    if (
+      entry.expiresAt > now &&
+      pageCheckpoints.size < maxPageCheckpoints &&
+      checkpointWeight + weight <= maxCheckpointWeight
+    )
+      break;
+    pageCheckpoints.delete(token);
+    checkpointWeight -= entry.weight;
+  }
+  const token = crypto.randomUUID();
+  pageCheckpoints.set(token, { state, expiresAt: now + 60_000, weight });
+  checkpointWeight += weight;
+  return token;
+}
+
 function fail(
   message: string,
   status: 403 | 404 | 405 | 409 | 422 | 502 | 503 = 422,
@@ -67,7 +141,7 @@ function readRecordPage(
   )
     fail("HubSpot devolvió una página de registros inválida.", 502);
 
-  const { total } = result;
+  const { total, paging } = result;
   if (
     total !== undefined &&
     (typeof total !== "number" ||
@@ -76,9 +150,12 @@ function readRecordPage(
   )
     fail("HubSpot devolvió un total de registros inválido.", 502);
 
+  if (paging != null && (typeof paging !== "object" || Array.isArray(paging)))
+    fail("HubSpot devolvió información de paginación inválida.", 502);
+
   let after: HubspotCursor | undefined;
-  if (result.paging?.next != null) {
-    const cursor = result.paging.next.after;
+  if (paging?.next != null) {
+    const cursor = paging.next.after;
     if (!(
       (typeof cursor === "string" && cursor.length > 0) ||
       (typeof cursor === "number" &&
@@ -109,6 +186,11 @@ function readRecordPage(
 function verifyScannedTotal(total: number | undefined, scanned: number) {
   if (total !== undefined && total < scanned)
     fail("El total de HubSpot es menor que los registros leídos.", 502);
+}
+
+function verifySummarizedTotal(total: number | undefined, scanned: number) {
+  if (total !== undefined && total !== scanned)
+    fail("El total de HubSpot no coincide con los registros del resumen.", 502);
 }
 
 export function capabilities(scopes: string[], resource: string) {
@@ -170,12 +252,13 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
   const tenantId = Number(tenant.replace(/^(?:agency|tenant):/, ""));
   const app = new Hono();
   app.onError((e, c) => {
+    if (c.req.raw.signal?.aborted) return new Response(null, { status: 499 });
     if (!(e instanceof HTTPException))
       return c.json(
         { error: "No se pudo completar la operación en HubSpot." },
         502,
       );
-    if (e.status === 429 && e.res) return e.res;
+    if (e.res) return e.res;
     return c.json({ error: e.message }, e.status);
   });
   app.use("*", async (c, next) => {
@@ -202,8 +285,16 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       !current ||
       current.status !== "connected" ||
       !current.externalAccountId
-    )
-      fail("La conexión de HubSpot del tenant debe reconectarse.", 409);
+    ) {
+      const message = "La conexión de HubSpot del tenant debe reconectarse.";
+      throw new HTTPException(409, {
+        message,
+        res: Response.json(
+          { error: { code: "HUBSPOT_CONNECTION_UNAVAILABLE", message } },
+          { status: 409 },
+        ),
+      });
+    }
     if (
       binding &&
       (binding.connectionId !== current.id ||
@@ -222,13 +313,17 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
     path: string,
     method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT" = "GET",
     body?: unknown,
+    signal?: AbortSignal,
   ) {
+    signal?.throwIfAborted();
     const response = await crm!.nango.proxy({
       connection: conn,
       path,
       method: method as any,
       ...(body === undefined ? {} : { body }),
+      ...(signal ? { signal } : {}),
     });
+    signal?.throwIfAborted();
     await audit(
       db,
       tenant,
@@ -288,31 +383,35 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       properties,
       query,
       after,
+      signal,
     }: {
       limit: number;
       properties: string[];
       query?: string;
       after?: HubspotCursor;
+      signal?: AbortSignal;
     },
   ) {
     const path = `/crm/v3/objects/${resource}`;
     if (query)
-      return remote(conn, `${path}/search`, "POST", {
-        query,
-        limit,
-        properties,
-        ...(after === undefined ? {} : { after }),
-      });
+      return remote(
+        conn,
+        `${path}/search`,
+        "POST",
+        { query, limit, properties, ...(after === undefined ? {} : { after }) },
+        signal,
+      );
     const params = new URLSearchParams({
       limit: String(limit),
       properties: properties.join(","),
     });
     if (after !== undefined) params.set("after", String(after));
-    return remote(conn, `${path}?${params}`);
+    return remote(conn, `${path}?${params}`, "GET", undefined, signal);
   }
   async function searchUnfilteredTotal(
     conn: ActiveCrmConnection,
     resource: string,
+    signal?: AbortSignal,
   ) {
     try {
       const result = await remote(
@@ -320,6 +419,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
         `/crm/v3/objects/${resource}/search`,
         "POST",
         { limit: 1, properties: ["hs_object_id"] },
+        signal,
       );
       return readRecordPage(result, new Set()).total;
     } catch (error) {
@@ -763,6 +863,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
     });
   });
   app.get("/api/records/:name/summary", async (c) => {
+    const signal = c.req.raw.signal;
     const name = decodeURIComponent(c.req.param("name"));
     const binding = await crmWorkspaceBinding(db, tenant, name);
     if (!binding) fail("Colección no encontrada.", 404);
@@ -778,6 +879,8 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       fail("La colección no está vinculada a HubSpot.", 404);
     if (!binding.capabilities.list)
       fail("La conexión no anuncia esta operación.", 405);
+    if (hasRecordFilters(c.req.query("filters")))
+      fail("Este origen no admite esos filtros.");
     if (group && !Object.hasOwn(object.config.fields, group))
       fail("El campo de agrupación no es válido.");
     if (amount && !Object.hasOwn(object.config.fields, amount))
@@ -809,6 +912,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
         properties,
         query,
         after,
+        signal,
       });
       const {
         records,
@@ -818,6 +922,8 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       reportedTotal = providerTotal ?? reportedTotal;
       total += records.length;
       verifyScannedTotal(reportedTotal, total);
+      if (!query && next === undefined)
+        verifySummarizedTotal(reportedTotal, total);
       if (
         !group &&
         !amount &&
@@ -834,6 +940,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
           const searchTotal = await searchUnfilteredTotal(
             conn,
             binding.resource,
+            signal,
           );
           // Search can lag behind the listing. The next cursor proves that
           // a count at or below the already scanned rows is incomplete.
@@ -860,17 +967,21 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
           ...(amount ? { amount: 0 } : {}),
         };
         entry.count++;
-        if (amount) {
+        // Keep counting records after an invalid amount makes the sum unknown.
+        if (amount && entry.amount !== undefined) {
           const rawAmount = record.properties?.[amount];
           if (
             rawAmount !== null &&
             rawAmount !== undefined &&
             rawAmount !== ""
           ) {
-            const numeric = Number(rawAmount);
-            if (!Number.isFinite(numeric))
-              fail("HubSpot devolvió un importe no numérico.", 502);
-            entry.amount = (entry.amount ?? 0) + numeric;
+            const numeric =
+              typeof rawAmount === "number" ||
+              (typeof rawAmount === "string" && rawAmount.trim())
+                ? Number(rawAmount)
+                : NaN;
+            const sum = entry.amount + numeric;
+            entry.amount = Number.isFinite(sum) ? sum : undefined;
           }
         }
         groups.set(key, entry);
@@ -878,11 +989,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       after = next;
       if (after === undefined) break;
     }
-    if (reportedTotal !== undefined && reportedTotal !== total)
-      fail(
-        "El total de HubSpot no coincide con los registros del resumen.",
-        502,
-      );
+    verifySummarizedTotal(reportedTotal, total);
     const data =
       group || amount
         ? [...groups.values()].sort((a, b) =>
@@ -1158,9 +1265,10 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       updated_at: r.updatedAt,
     });
     if (surface === "export") {
+      const signal = c.req.raw.signal;
       const params = c.req.query();
       if (
-        (params.filters && params.filters !== "[]") ||
+        hasRecordFilters(params.filters) ||
         params.searchField ||
         params.stage ||
         params.trash === "true"
@@ -1195,7 +1303,9 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
           properties,
           query: params.q,
           after,
+          signal,
         });
+        signal.throwIfAborted();
         const next = readRecordPage(result, cursors, recordIds);
         reportedTotal = next.total ?? reportedTotal;
         rows.push(...next.records.map(project));
@@ -1224,6 +1334,7 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
     }
     const properties = Object.keys(object.config.fields);
     if (operation === "list") {
+      const signal = c.req.raw.signal;
       const page = Number(c.req.query("page") ?? 1),
         limit = Number(c.req.query("perPage") ?? 25),
         q = c.req.query("q");
@@ -1238,47 +1349,95 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
       )
         fail("Paginación inválida (máximo 100 páginas).");
       if (
-        c.req.query("filters") ||
+        hasRecordFilters(c.req.query("filters")) ||
         c.req.query("stage") ||
         c.req.query("trash") === "true"
       )
         fail("Este origen no admite esos filtros.");
-      const cursors = new Set<string>();
-      const recordIds = new Set<string>();
-      let after: HubspotCursor | undefined;
+      const scope = JSON.stringify([
+        tenant,
+        actor.principal.id,
+        conn.id,
+        conn.nangoConnectionId,
+        conn.nangoIntegrationId,
+        binding.accountId,
+        name,
+        resource,
+        q,
+        limit,
+        properties,
+      ]);
+      const checkpoint = takePageCheckpoint(c.req.query("cursor"), scope, page);
+      const state = checkpoint?.state;
+      const cursors = state?.cursors ?? new Set<string>();
+      const recordIds = state?.recordIds ?? new Set<string>();
+      let after = state?.after;
       let records: ReturnType<typeof readRecordPage>["records"] = [];
-      let providerTotal: number | undefined;
-      let visited = 0;
-      for (let current = 1; current <= page; current++) {
-        const result = await fetchRecordPage(conn, resource, {
-          limit,
-          properties,
-          query: q,
-          after,
-        });
+      let providerTotal = state?.providerTotal;
+      for (let current = state ? page : 1; current <= page; current++) {
+        let result: HubspotRecordPage | null;
+        try {
+          result = await fetchRecordPage(conn, resource, {
+            limit,
+            properties,
+            query: q,
+            after,
+            signal,
+          });
+          signal?.throwIfAborted();
+        } catch (error) {
+          // The checkpoint is still intact until readRecordPage updates its sets.
+          if (
+            signal?.aborted ||
+            !(error instanceof HTTPException) ||
+            error.status === 429 ||
+            error.status >= 500
+          )
+            checkpoint?.restore();
+          throw error;
+        }
         const nextPage = readRecordPage(result, cursors, recordIds);
         records = nextPage.records;
         providerTotal = nextPage.total ?? providerTotal;
-        visited += records.length;
-        verifyScannedTotal(providerTotal, visited);
+        verifyScannedTotal(providerTotal, recordIds.size);
         after = nextPage.after;
         if (current < page && after === undefined) {
           records = [];
           break;
         }
       }
-      const total =
-        after === undefined
-          ? (providerTotal ?? visited)
-          : providerTotal === visited
-            ? undefined
-            : providerTotal;
+      const visited = recordIds.size;
+      let total = providerTotal;
+      if (after === undefined) {
+        total ??= visited;
+        if (!q && total !== visited) total = undefined;
+      } else if (total === visited) {
+        total = undefined;
+      }
+      const pagination = workspaceRecordPagination(
+        page,
+        maxPage,
+        after !== undefined,
+      );
+      const nextCursor =
+        pagination.pageInfo.hasNextPage && after !== undefined
+          ? savePageCheckpoint({
+              scope,
+              page: page + 1,
+              after,
+              cursors,
+              recordIds,
+              providerTotal,
+            })
+          : undefined;
       return c.json({
         data: records.map(project),
         page,
         perPage: limit,
         ...(total !== undefined ? { total } : {}),
-        ...workspaceRecordPagination(page, maxPage, after !== undefined),
+        ...pagination,
+        meta: { ...pagination.meta, recordOffset: visited - records.length },
+        ...(nextCursor ? { nextCursor } : {}),
       });
     }
     if (operation === "read") {

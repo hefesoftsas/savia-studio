@@ -1,10 +1,10 @@
 import { env } from "cloudflare:workers";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { symmetricEncrypt } from "better-auth/crypto";
 import { createApiShell } from "../../api/src/api-shell";
 import { createAuthHandler, createBetterAuth } from "../src/index";
 
-it("completes fresh OAuth login through the API after TOTP verification", async () => {
+it("completes the original OAuth login after an incorrect code and valid TOTP", async () => {
   const origin = "http://127.0.0.1:8787";
   const auth = createAuthHandler(env);
   const clientResponse = await auth.fetch(
@@ -71,6 +71,10 @@ it("completes fresh OAuth login through the API after TOTP verification", async 
   expect(start.status).toBe(302);
   const login = new URL(start.headers.get("location")!, origin);
   expect(login.pathname).toBe("/api/auth/login");
+  const loginPage = await auth.fetch(new Request(login));
+  expect(await loginPage.text()).toContain(
+    'data-oauth-restart-url="http://127.0.0.1:5173/#/login?resume=bookings&amp;tab=reservations&amp;date=2026-11-25"',
+  );
   const oauthQuery = login.search.slice(1);
   const api = createApiShell(env.AUTH_DB, undefined, auth);
   const post = (path: string, body: unknown, cookie = "") =>
@@ -95,12 +99,36 @@ it("completes fresh OAuth login through the API after TOTP verification", async 
       .getSetCookie()
       .map((value) => value.split(";")[0])
       .join("; ");
-  const { code } = await betterAuth.api.generateTOTP({ body: { secret } });
-  const verified = await post(
-    "two-factor/verify-totp",
-    { code, oauth_query: oauthQuery },
-    cookies(signIn),
-  );
+  const attemptTime = Date.now();
+  const clock = vi.spyOn(Date, "now");
+  const codeAt = async (offset: number) => {
+    clock.mockReturnValue(attemptTime + offset);
+    return (await betterAuth.api.generateTOTP({ body: { secret } })).code;
+  };
+  const challengeCookies = cookies(signIn);
+  let verified: Response;
+  try {
+    const previous = await codeAt(-30_000);
+    const next = await codeAt(30_000);
+    const code = await codeAt(0);
+    const invalidCode = ["000000", "111111", "222222", "333333"].find(
+      (candidate) => ![previous, code, next].includes(candidate),
+    )!;
+    const rejected = await post(
+      "two-factor/verify-totp",
+      { code: invalidCode, oauth_query: oauthQuery },
+      challengeCookies,
+    );
+    expect(rejected.status).toBe(401);
+    expect(await rejected.json()).toMatchObject({ code: "INVALID_CODE" });
+    verified = await post(
+      "two-factor/verify-totp",
+      { code, oauth_query: oauthQuery },
+      challengeCookies,
+    );
+  } finally {
+    clock.mockRestore();
+  }
   expect(verified.status).toBe(200);
   const result = (await verified.json()) as { url?: string };
   // The OAuth hook normally returns the callback on the session-creating request.

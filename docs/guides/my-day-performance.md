@@ -32,6 +32,9 @@ data, My Day still shows the collection count when a separate total is
 available. The widget indicates that the status breakdown is unavailable.
 It also preserves a valid total when a response contains an invalid status
 count or omits a requested amount.
+If HubSpot returns an invalid amount, Savia continues verifying the record
+count and omits the affected group's amount. My Day shows the verified total
+and marks the requested breakdown as unavailable.
 When HubSpot returns the same record twice during a scan, Savia reports a
 provider error instead of counting it twice.
 It also rejects a provider total below the number of records already scanned.
@@ -41,10 +44,34 @@ chart, and actions widgets.
 On a temporary data refresh failure, these widgets keep the latest result
 for that selection and offer a retry. An authorization failure removes the
 previous result.
+When a collection source sends a retry time, My Day keeps the latest result
+for the current selection in its summary, items, chart, or actions widget.
+**Retry** becomes available at that time. Manual and live data refreshes wait
+until then, even if the widget settings or collection metadata change.
 Background collection metadata refreshes also keep the current widget visible
 during a temporary failure. A denied or missing collection removes its results.
 Collection widgets hide the previous session's data as soon as the session
 is cleared and skip new reads while explicit logout finishes.
+Live refresh notices and queued events are discarded when the signed-in
+account changes. Collection widgets also discard queued refreshes when they
+switch collections, including within the same organization.
+They cancel obsolete collection reads when the selection changes or the
+widget closes. When the API receives the cancellation signal, it stops making
+requests for that HubSpot summary.
+The gateway and API opt into Cloudflare's
+[incoming request cancellation flag](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#enable-requestsignal-for-incoming-requests).
+
+Plugin widgets verify installation for the current organization and session
+before loading plugin content. Changing scope or starting logout cancels the
+previous verification. If verification fails, use **Retry** on the widget.
+
+The add-widget dialog uses the current session's authorized workspaces and
+clears the previous collection when the workspace changes. It loads collection
+fields alongside the collection list. Workspace, collection, and plugin catalog
+failures can be retried separately. Standard collection widgets remain
+available when the plugin catalog is temporarily unavailable.
+The workspace catalog cache is scoped to the API client and authenticated
+session. Responses started before catalog invalidation are discarded.
 
 The agenda now reads selected day/week/month ranges. OAuth caches are keyed by
 the requested range; shared-source display caches also include the display

@@ -26,6 +26,18 @@ import {
   useTranslate,
 } from "ra-core";
 
+export function getListRecordOffset(
+  page: number,
+  perPage: number,
+  recordOffset: unknown,
+): number {
+  return typeof recordOffset === "number" &&
+    Number.isSafeInteger(recordOffset) &&
+    recordOffset >= 0
+    ? recordOffset
+    : (page - 1) * perPage;
+}
+
 /**
  * A pagination component with page numbers and rows per page selector.
  *
@@ -66,20 +78,20 @@ export const ListPagination = ({
     total,
     setPage,
   } = useListPaginationContext();
-  const { data = [] } = useListContext();
+  const { data = [], meta } = useListContext();
   const hasNextPage =
     sourceHasNextPage && (maxPage === undefined || page < maxPage);
 
   const hasKnownTotal =
     typeof total === "number" && Number.isSafeInteger(total) && total >= 0;
-  const isEmpty = data.length === 0 && (!hasKnownTotal || total === 0);
-  const pageStart = (page - 1) * perPage + 1;
-  const pageEnd = hasKnownTotal
-    ? Math.min(page * perPage, total)
-    : pageStart + Math.max(data.length, 1) - 1;
+  const isEmpty = data.length === 0;
+  const offset = getListRecordOffset(page, perPage, meta?.recordOffset);
+  const pageStart = offset + 1;
+  const pageEnd = offset + data.length;
+  const totalForRange = hasKnownTotal && pageEnd <= total ? total : undefined;
   const rangeTranslationKey = isEmpty
     ? "ra.navigation.empty_page_range_info"
-    : hasKnownTotal
+    : totalForRange !== undefined
       ? "ra.navigation.page_range_info"
       : hasNextPage
         ? "ra.navigation.partial_page_range_info"
@@ -87,8 +99,16 @@ export const ListPagination = ({
 
   const boundaryCount = 1;
   const siblingCount = 1;
+  const estimatedPageCount = hasKnownTotal
+    ? Math.max(1, Math.ceil(total / perPage))
+    : 1;
+  const hasNumberedPages =
+    hasKnownTotal &&
+    offset === (page - 1) * perPage &&
+    page <= estimatedPageCount &&
+    (!hasNextPage || page < estimatedPageCount);
   const count = Math.min(
-    hasKnownTotal ? Math.max(1, Math.ceil(total / perPage)) : 1,
+    hasNumberedPages ? estimatedPageCount : 1,
     maxPage ?? Infinity,
   );
 
@@ -98,7 +118,7 @@ export const ListPagination = ({
   };
 
   const startPages =
-    !hasKnownTotal && page > 1
+    !hasNumberedPages && page > 1
       ? [1, page]
       : range(1, Math.min(boundaryCount, count));
   const endPages = range(
@@ -178,13 +198,13 @@ export const ListPagination = ({
           options={{
             offsetBegin: pageStart,
             offsetEnd: pageEnd,
-            total: hasKnownTotal ? total : pageEnd,
+            total: totalForRange ?? pageEnd,
           }}
         >
           {isEmpty
             ? "0 results"
-            : hasKnownTotal
-              ? `${pageStart}-${pageEnd} of ${total}`
+            : totalForRange !== undefined
+              ? `${pageStart}-${pageEnd} of ${totalForRange}`
               : `${pageStart}-${pageEnd} results`}
         </Translate>
       </div>

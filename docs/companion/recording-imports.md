@@ -26,6 +26,7 @@ unless the transcription provider supplies one.
 
 On mobile, the selected audio leads the page. When multiple recordings are available,
 use **Select a recording** to switch; desktop keeps the list beside the player.
+If the audio download stalls, use **Refresh** to try again.
 Consent and the possible processing charge remain visible beside **Generate summary**.
 Expand **How processing works** for provider routing and retry details.
 

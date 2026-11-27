@@ -15,6 +15,12 @@ export const PLATFORM_TENANT = "";
 
 const TENANT_PATTERN = /^tenant:(0|[1-9]\d*)$/;
 
+export class TenantPurgedError extends Error {
+  constructor() {
+    super("Los datos del tenant se eliminaron durante la solicitud.");
+  }
+}
+
 export function isPlatformTenant(tenant: string): boolean {
   return tenant === PLATFORM_TENANT;
 }

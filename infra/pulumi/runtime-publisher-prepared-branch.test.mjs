@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { previewNames } from "../../scripts/preview-environment.mjs";
@@ -130,4 +130,65 @@ test("partial branch secret custody fails before migration or publication", () =
       /partial|custody/i,
     );
     assert.equal(calls, 0);
+  }));
+
+test("fresh branch publication rejects missing or invalid bootstrap credentials before any writes", () =>
+  fixture(async (inputs) => {
+    const writes = [];
+    for (const password of [
+      undefined,
+      "short",
+      " ".repeat(12),
+      "x".repeat(129),
+    ]) {
+      await assert.rejects(
+        createBranchPublisher(inputs, {
+          env: {
+            CLOUDFLARE_ACCOUNT_ID: inputs.accountId,
+            BETTER_AUTH_BOOTSTRAP_PASSWORD: password,
+          },
+          client: { api: async () => ({ bindings: [] }) },
+          bootstrappedWorkers: inputs.workers.map(({ name }) => name),
+          run: async (...args) => writes.push(args),
+          runWrangler: async (...args) => writes.push(args),
+        }),
+        /BETTER_AUTH_BOOTSTRAP_PASSWORD/,
+      );
+    }
+    assert.deepEqual(writes, []);
+  }));
+
+test("fresh branch publication sends the bootstrap password only to Auth secret upload", () =>
+  fixture(async (inputs) => {
+    const password = "synthetic-branch-bootstrap-password";
+    const uploads = [];
+    const deployments = [];
+    const publisher = await createBranchPublisher(inputs, {
+      env: {
+        CLOUDFLARE_ACCOUNT_ID: inputs.accountId,
+        BETTER_AUTH_BOOTSTRAP_PASSWORD: password,
+      },
+      client: { api: async () => ({ bindings: [] }) },
+      bootstrappedWorkers: inputs.workers.map(({ name }) => name),
+      run: async () => {},
+      runWrangler: async (args, { input }) => {
+        if (args[0] === "secret") {
+          const config = JSON.parse(await readFile(args.at(-1), "utf8"));
+          uploads.push({ worker: config.name, values: JSON.parse(input) });
+        } else deployments.push(args);
+      },
+    });
+    await publisher.publish();
+    assert.deepEqual(
+      uploads
+        .filter(({ values }) => "BETTER_AUTH_BOOTSTRAP_PASSWORD" in values)
+        .map(({ worker }) => worker),
+      [previewNames("test").workers.auth],
+    );
+    assert.equal(
+      uploads.find(({ worker }) => worker === previewNames("test").workers.auth)
+        .values.BETTER_AUTH_BOOTSTRAP_PASSWORD,
+      password,
+    );
+    assert.equal(deployments.length, inputs.workers.length);
   }));

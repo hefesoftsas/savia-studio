@@ -2791,77 +2791,139 @@ describe("release deployment worker", () => {
 });
 
 describe("explicit plugin store install versions", () => {
-  it("does not install or provision a store extension deleted after resolution", async () => {
-    const tenant = "store-install-delete-race";
-    expect(
-      (await uploadZip(tenant, pluginZip({ store: tareasStore }))).status,
-    ).toBe(200);
+  it("requires a matching ZIP digest when installing a pinned version", async () => {
+    const tenant = "store-install-pinned";
+    const uploaded = await uploadZip(tenant, pluginZip({ store: tareasStore }));
+    expect(uploaded.status).toBe(200);
+    const { data } = await uploaded.json<{ data: { sha256: string } }>();
+    const install = (body: Record<string, string>) =>
+      api(tenant, "/extensions/custom.demo/install", "POST", body);
 
-    let installBatchStarted!: () => void;
-    let resumeInstallBatch!: () => void;
-    const batchStarted = new Promise<void>((resolve) => {
-      installBatchStarted = resolve;
+    expect((await install({ sha256: data.sha256 })).status).toBe(400);
+    const mismatched = await install({
+      version: "1.0.0",
+      sha256: "0".repeat(64),
     });
-    const resume = new Promise<void>((resolve) => {
-      resumeInstallBatch = resolve;
-    });
-    let paused = false;
-    const guardedDb = new Proxy(platform.env.DB, {
-      get(target, property) {
-        if (property === "batch")
-          return async (statements: D1PreparedStatement[]) => {
-            if (!paused) {
-              paused = true;
-              installBatchStarted();
-              await resume;
-            }
-            return target.batch(statements);
-          };
-        const value = Reflect.get(target, property, target);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-    const env = { ...platform.env, DB: guardedDb };
-    const pendingInstall = app(tenant).request(
-      "http://localhost/api/extensions/custom.demo/install",
-      { method: "POST", headers: { "content-type": "application/json" } },
-      env,
-    );
-
-    await batchStarted;
-    const deleted = await app(tenant).request(
-      "http://localhost/api/plugin-store/custom.demo?version=1.0.0",
-      { method: "DELETE" },
-      platform.env,
-    );
-    expect(deleted.status, await deleted.text()).toBe(200);
-    resumeInstallBatch();
-
-    const installed = await pendingInstall;
-    expect(installed.status).toBe(409);
-    expect(
-      await platform.env.DB.prepare(
-        "SELECT 1 FROM studio_extension_installations WHERE tenant_id=? AND id=?",
-      )
-        .bind(tenant, "custom.demo")
-        .first(),
-    ).toBeNull();
+    expect(mismatched.status, JSON.stringify(mismatched.json)).toBe(409);
     expect(await storedObject(tenant, "tareas")).toBeNull();
     expect(
-      await platform.env.DB.prepare(
-        "SELECT count(*) as count FROM studio_schema_versions WHERE tenant_id=? AND object_name=?",
-      )
-        .bind(tenant, "tareas")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 0 });
-    expect(
-      await platform.env.DB.prepare(
-        "SELECT count(*) as count FROM plugin_store_artifacts WHERE tenant_id=? AND id=?",
-      )
-        .bind(tenant, "custom.demo")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 0 });
+      await isExtensionAvailable(platform.env.DB, tenant, "custom.demo"),
+    ).toBe(false);
+
+    const pinned = { version: "1.0.0", sha256: data.sha256 };
+    expect((await install(pinned)).status).toBe(200);
+    expect(await storedObject(tenant, "tareas")).not.toBeNull();
+    expect((await install(pinned)).status).toBe(200);
+    expect((await install({ ...pinned, sha256: "0".repeat(64) })).status).toBe(
+      409,
+    );
   });
+
+  const changes = ["deleted", "replaced"] as const;
+  it.each(changes)(
+    "rejects a version %s during installation",
+    async (change) => {
+      const replace = change === "replaced";
+      const tenant = `store-install-race-${change}`;
+      const uploaded = await uploadZip(
+        tenant,
+        pluginZip({ store: tareasStore }),
+      );
+      expect(uploaded.status).toBe(200);
+      const { data } = await uploaded.json<{ data: { sha256: string } }>();
+
+      let installBatchStarted!: () => void;
+      let resumeInstallBatch!: () => void;
+      const batchStarted = new Promise<void>((resolve) => {
+        installBatchStarted = resolve;
+      });
+      const resume = new Promise<void>((resolve) => {
+        resumeInstallBatch = resolve;
+      });
+      let paused = false;
+      const guardedDb = new Proxy(platform.env.DB, {
+        get(target, property) {
+          if (property === "batch")
+            return async (statements: D1PreparedStatement[]) => {
+              if (!paused) {
+                paused = true;
+                installBatchStarted();
+                await resume;
+              }
+              return target.batch(statements);
+            };
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const env = { ...platform.env, DB: guardedDb };
+      const pendingInstall = app(tenant).request(
+        "http://localhost/api/extensions/custom.demo/install",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          ...(replace
+            ? {
+                body: JSON.stringify({ version: "1.0.0", sha256: data.sha256 }),
+              }
+            : {}),
+        },
+        env,
+      );
+
+      try {
+        const first = await Promise.race([
+          batchStarted.then(() => null),
+          pendingInstall,
+        ]);
+        expect(first, first && (await first.text())).toBeNull();
+        const deleted = await app(tenant).request(
+          "http://localhost/api/plugin-store/custom.demo?version=1.0.0",
+          { method: "DELETE" },
+          platform.env,
+        );
+        expect(deleted.status, await deleted.text()).toBe(200);
+        if (replace) {
+          const replacement = await uploadZip(
+            tenant,
+            pluginZip({
+              entry:
+                "export function render(el) { el.textContent = 'replacement'; }",
+              store: tareasStore,
+            }),
+          );
+          expect(replacement.status, await replacement.text()).toBe(200);
+        }
+      } finally {
+        resumeInstallBatch();
+      }
+
+      const installed = await pendingInstall;
+      expect(installed.status).toBe(409);
+      expect(
+        await platform.env.DB.prepare(
+          "SELECT 1 FROM studio_extension_installations WHERE tenant_id=? AND id=?",
+        )
+          .bind(tenant, "custom.demo")
+          .first(),
+      ).toBeNull();
+      expect(await storedObject(tenant, "tareas")).toBeNull();
+      expect(
+        await platform.env.DB.prepare(
+          "SELECT count(*) as count FROM studio_schema_versions WHERE tenant_id=? AND object_name=?",
+        )
+          .bind(tenant, "tareas")
+          .first<{ count: number }>(),
+      ).toEqual({ count: 0 });
+      expect(
+        await platform.env.DB.prepare(
+          "SELECT count(*) as count FROM plugin_store_artifacts WHERE tenant_id=? AND id=?",
+        )
+          .bind(tenant, "custom.demo")
+          .first<{ count: number }>(),
+      ).toEqual({ count: replace ? 1 : 0 });
+    },
+  );
 
   it("installs the requested version, rejects implicit downgrade, and permits only an explicit admin rollback", async () => {
     const older = pluginZip({ manifest: { version: "1.0.0" } });
@@ -2940,6 +3002,61 @@ describe("studio plugin registry consumer", () => {
     url: "https://registry.example",
     token: "registry-secret",
   };
+
+  it("rejects importing an archive when the workspace already holds the version with a different digest", async () => {
+    const tenant = "registry-import-archive-conflict";
+    const uploaded = await uploadZip(tenant, pluginZip());
+    expect(uploaded.status).toBe(200);
+    const { data } = await uploaded.json<{ data: { sha256: string } }>();
+    const repacked = pluginZip({}, { deflate: true });
+    const digest = [
+      ...new Uint8Array(
+        await crypto.subtle.digest(
+          "SHA-256",
+          repacked as unknown as ArrayBuffer,
+        ),
+      ),
+    ]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    expect(digest).not.toBe(data.sha256);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(repacked, { headers: { "x-plugin-sha256": digest } }),
+      ),
+    );
+    try {
+      const studio = app(tenant, {
+        principalId: "registry-user",
+        pluginRegistry: registry,
+        canManageExtension: () => true,
+      });
+      const imported = await studio.request(
+        "http://localhost/api/plugin-store/registry/import",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "custom.demo",
+            version: "1.0.0",
+            sha256: digest,
+          }),
+        },
+        platform.env,
+      );
+      expect(imported.status, await imported.text()).toBe(409);
+      const local = await api(tenant, "/plugin-store");
+      expect(local.json.data).toMatchObject([{ sha256: data.sha256 }]);
+      const duplicate = await uploadZip(tenant, repacked);
+      expect(duplicate.status).toBe(200);
+      expect(await duplicate.json()).toMatchObject({ data: { deduped: true } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("fails closed for registry routes when tenant admin authorization is absent", async () => {
     const studio = createStudioApp("registry-tenant", {

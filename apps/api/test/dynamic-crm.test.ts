@@ -571,6 +571,33 @@ it("forwards principal binding through both authenticated synchronization gatewa
   }
 });
 
+it.each(["/summary", "?q=Ana&page=3"])(
+  "preserves cancellation when forwarding a Studio collection read (%s)",
+  async (suffix) => {
+    let forwarded: Request | undefined;
+    const app = createTestApp({
+      documents: env.DOCUMENTS,
+      auth: agencyAdministratorAuthenticator(),
+      collectionGatewayFactory: () => ({
+        async prepare() {},
+        async fetch(request) {
+          forwarded = request;
+          return Response.json({ total: 6 });
+        },
+      }),
+    });
+    const controller = new AbortController();
+    const response = await app.request(
+      `/v1/studio/101/api/records/hubspot_contacts${suffix}`,
+      { signal: controller.signal },
+    );
+    expect(response.status).toBe(200);
+    expect(forwarded?.signal.aborted).toBe(false);
+    controller.abort();
+    expect(forwarded?.signal.aborted).toBe(true);
+  },
+);
+
 it("preserves upstream no-transform on authenticated plugin HTML and keeps JSON no-store", async () => {
   const app = createTestApp({
     documents: env.DOCUMENTS,

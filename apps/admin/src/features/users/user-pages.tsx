@@ -98,7 +98,7 @@ import {
   userCreateScope,
 } from "./tenant-user-scope";
 import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -194,17 +194,23 @@ function asApiErrorLike(error: unknown): ApiErrorLike {
 export function deleteUserErrorMessage(
   error: unknown,
 ): keyof typeof settingsMessages {
+  const { code, status } = asApiErrorLike(error);
+  if (code === "IDENTITY_DELETION_PENDING") {
+    return "La eliminación quedó pendiente. Puedes reintentar desde la ficha del usuario o desde Inactivos.";
+  }
   if (isOfflineError(error)) {
     return "Sin conexión o servicio no disponible. Inténtalo de nuevo.";
   }
-  const { code, status } = asApiErrorLike(error);
   if (code === "LAST_ACTIVE_MEMBER") {
     return "No se puede eliminar: el tenant debe conservar al menos un usuario activo.";
   }
   if (code === "AUTHORIZATION_FORBIDDEN") {
     return "No tienes permiso para eliminar este usuario (no puedes eliminarte a ti mismo).";
   }
-  if (code === "VALIDATION_ERROR") {
+  if (
+    code === "VALIDATION_ERROR" ||
+    code === "LAST_ACTIVE_PLATFORM_ADMINISTRATOR"
+  ) {
     return "No se puede eliminar al último administrador de plataforma activo.";
   }
   if (code === "NOT_FOUND" || status === 404) {
@@ -235,9 +241,12 @@ function UserDeleteButton({
 }) {
   const translate = useTranslate();
   const t = useMessages(settingsMessages);
-  const displayLabel =
-    label ?? translate("savia.users.actions.delete", { _: "Eliminar usuario" });
   const record = useRecordContext<UserRecord>();
+  const showLabelOnMobile = Boolean(record?.deletionPending && !iconOnly);
+  const displayLabel = record?.deletionPending
+    ? t("Reintentar eliminación")
+    : (label ??
+      translate("savia.users.actions.delete", { _: "Eliminar usuario" }));
   const resource = useResourceContext() ?? "users";
   const { canAccess } = useCanAccess({
     resource,
@@ -274,6 +283,12 @@ function UserDeleteButton({
         },
         onError: (error: unknown) => {
           setConfirmOpen(false);
+          if (asApiErrorLike(error).code === "IDENTITY_DELETION_PENDING") {
+            void queryClient.invalidateQueries({
+              queryKey: ["tenant-user-capacity"],
+            });
+            refresh();
+          }
           notify(t(deleteUserErrorMessage(error)), { type: "error" });
         },
       },
@@ -293,18 +308,26 @@ function UserDeleteButton({
           event.stopPropagation();
           setConfirmOpen(true);
         }}
-        className="max-sm:size-11 cursor-pointer hover:bg-destructive/10! text-destructive! border-destructive! focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40"
+        className={`${showLabelOnMobile ? "max-sm:min-h-11" : "max-sm:size-11"} cursor-pointer hover:bg-destructive/10! text-destructive! border-destructive! focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40`}
       >
         <Trash2 className="size-4" />
         {iconOnly ? null : (
-          <span className="sr-only sm:not-sr-only">{displayLabel}</span>
+          <span
+            className={showLabelOnMobile ? undefined : "sr-only sm:not-sr-only"}
+          >
+            {displayLabel}
+          </span>
         )}
       </Button>
       <Confirm
         isOpen={confirmOpen}
-        title={translate("savia.users.dialogs.deleteTitle", {
-          _: "Eliminar usuario",
-        })}
+        title={
+          record.deletionPending
+            ? t("Reintentar eliminación")
+            : translate("savia.users.dialogs.deleteTitle", {
+                _: "Eliminar usuario",
+              })
+        }
         content={translate("savia.users.dialogs.deleteContent", {
           name: record.displayName ?? record.email,
           _: `¿Eliminar a ${record.displayName ?? record.email}? Esta acción no se puede deshacer.`,
@@ -568,6 +591,16 @@ function UserTable({ storeKey }: { storeKey: string }) {
         source="displayName"
         label={translate("savia.users.fields.name", { _: "Usuario" })}
         className="font-medium"
+        render={(record) => (
+          <>
+            {record.displayName}
+            {record.deletionPending && (
+              <span className="block text-sm font-normal text-muted-foreground sm:hidden">
+                {t("Eliminación pendiente")}
+              </span>
+            )}
+          </>
+        )}
       />
       <DataTable.Col
         source="email"
@@ -587,30 +620,42 @@ function UserTable({ storeKey }: { storeKey: string }) {
         label="MFA"
         className="hidden xl:table-cell"
         headerClassName="hidden xl:table-cell"
-        render={(record) => <MfaStatus enabled={record.twoFactorEnabled} />}
+        render={(record) =>
+          record.deletionPending ? (
+            "—"
+          ) : (
+            <MfaStatus enabled={record.twoFactorEnabled} />
+          )
+        }
       />
       <DataTable.Col
         source="isActive"
         label={translate("savia.users.fields.status", { _: "Estado" })}
         className="hidden sm:table-cell"
         headerClassName="hidden sm:table-cell"
-        render={(record) => <UserStatus active={record.isActive} />}
+        render={(record) => (
+          <UserStatus
+            active={record.isActive}
+            deletionPending={record.deletionPending}
+          />
+        )}
       />
       <DataTable.Col
         label={translate("savia.tenants.table.actions", { _: "Acciones" })}
         disableSort
         className="w-px whitespace-nowrap"
         headerClassName="w-px text-right"
-      >
-        <div
-          className="flex justify-end gap-2 py-1 [&_button]:max-sm:size-11"
-          onClick={(event) => event.stopPropagation()}
-        >
-          <ShowButton iconOnly />
-          <EditButton iconOnly />
-          <UserDeleteButton iconOnly redirectTo={false} />
-        </div>
-      </DataTable.Col>
+        render={(record) => (
+          <div
+            className="flex justify-end gap-2 py-1 [&_button]:max-sm:size-11"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ShowButton iconOnly />
+            {!record.deletionPending && <EditButton iconOnly />}
+            <UserDeleteButton iconOnly redirectTo={false} />
+          </div>
+        )}
+      />
     </DataTable>
   );
 }
@@ -836,6 +881,8 @@ function UserEditForm({
 }) {
   const record = useRecordContext<UserRecord>();
   const { save } = useSaveContext();
+  if (record?.deletionPending)
+    return <UserDeletionPending email={record.email} />;
   const buildUpdate = platformCanEdit
     ? platformAdminUserUpdateData
     : tenantAdminUserUpdateData;
@@ -905,6 +952,8 @@ function UserEditTitle() {
 
 function UserEditActions() {
   const translate = useTranslate();
+  const { record } = useEditContext<UserRecord>();
+  if (record?.deletionPending) return null;
   return (
     <div className="flex flex-wrap justify-end gap-2 [&_button]:max-sm:size-11 [&_a]:max-sm:min-h-11 [&_a]:max-sm:min-w-11">
       <ShowButton
@@ -946,6 +995,8 @@ function UserShowTitle() {
 
 function UserShowActions() {
   const translate = useTranslate();
+  const { record } = useShowContext<UserRecord>();
+  if (record?.deletionPending) return null;
   return (
     <div className="flex flex-wrap justify-end gap-2 [&_button]:max-sm:size-11 [&_a]:max-sm:min-h-11 [&_a]:max-sm:min-w-11">
       <EditButton
@@ -962,11 +1013,34 @@ function UserShowActions() {
   );
 }
 
+function UserDeletionPending({ email }: { email: string }) {
+  const t = useMessages(settingsMessages);
+  return (
+    <Alert className="max-w-xl">
+      <CircleAlert aria-hidden="true" />
+      <AlertTitle>{t("Eliminación pendiente")}</AlertTitle>
+      <AlertDescription>
+        <p className="wrap-anywhere font-medium text-foreground">{email}</p>
+        <p>
+          {t(
+            "La cuenta está desactivada. Reintenta para completar la eliminación.",
+          )}
+        </p>
+        <div className="mt-2">
+          <UserDeleteButton />
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 function UserShowContent() {
   const t = useMessages(settingsMessages);
   const { record } = useShowContext<UserRecord>();
   const translate = useTranslate();
   if (!record) return null;
+  if (record.deletionPending)
+    return <UserDeletionPending email={record.email} />;
 
   return (
     <div className="max-w-5xl space-y-5">
@@ -1726,8 +1800,17 @@ function UserAccessSummary({ record }: { record: UserRecord }) {
   return <span>{tenantName || "—"}</span>;
 }
 
-function UserStatus({ active }: { active: boolean }) {
+function UserStatus({
+  active,
+  deletionPending,
+}: {
+  active: boolean;
+  deletionPending?: boolean;
+}) {
   const translate = useTranslate();
+  const t = useMessages(settingsMessages);
+  if (deletionPending)
+    return <Badge variant="outline">{t("Eliminación pendiente")}</Badge>;
   return active ? (
     <Badge>{translate("savia.users.status.active", { _: "Activo" })}</Badge>
   ) : (

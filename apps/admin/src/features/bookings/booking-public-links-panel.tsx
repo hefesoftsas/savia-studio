@@ -73,6 +73,7 @@ export function BookingPublicLinksPanel({
   currentProfessionalName,
   canManageTeamLinks,
   apiClient,
+  recoverExpiredSession,
   services,
 }: {
   tenantId: string;
@@ -80,12 +81,14 @@ export function BookingPublicLinksPanel({
   currentProfessionalName?: string;
   canManageTeamLinks: boolean;
   apiClient: ApiClient;
+  recoverExpiredSession: (error: unknown) => boolean;
   services: ServiceOption[];
 }) {
   const t = useMessages(bookingMessages);
   const locale = useAppLocale();
   const [links, setLinks] = useState<BookingPublicLink[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [error, setError] = useState(false);
   const [notice, setNotice] = useState("");
   const [expiry, setExpiry] = useState<Expiry>("30d");
@@ -99,24 +102,31 @@ export function BookingPublicLinksPanel({
   const [copied, setCopied] = useState("");
 
   const endpoint = `/v1/tenants/${encodeURIComponent(tenantId)}/booking/public-links`;
-  const loadLinks = useCallback(async () => {
-    setLoading(true);
-    setError(false);
-    try {
-      const response = await apiClient.get<{
-        data: { links: BookingPublicLink[] };
-      }>(endpoint);
-      setLinks(response.data.links);
-    } catch {
-      setError(true);
-    } finally {
-      setLoading(false);
-    }
-  }, [apiClient, endpoint]);
+  const handleRequestError = useCallback(
+    (error: unknown) => {
+      if (!recoverExpiredSession(error)) setError(true);
+    },
+    [recoverExpiredSession],
+  );
 
   useEffect(() => {
-    void loadLinks();
-  }, [loadLinks]);
+    const controller = new AbortController();
+    const { signal } = controller;
+    setLoading(true);
+    setError(false);
+    void apiClient
+      .get<{ data: { links: BookingPublicLink[] } }>(endpoint, { signal })
+      .then(({ data }) => {
+        if (!signal.aborted) setLinks(data.links);
+      })
+      .catch((error: unknown) => {
+        if (!signal.aborted) handleRequestError(error);
+      })
+      .finally(() => {
+        if (!signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [apiClient, endpoint, handleRequestError, loadAttempt]);
 
   const activeLinks = useMemo(() => links.filter(linkIsActive), [links]);
   const expiryLabel = (link: BookingPublicLink) =>
@@ -147,8 +157,8 @@ export function BookingPublicLinksPanel({
         ...current.filter((link) => link.id !== response.data.id),
       ]);
       setNotice(t("Booking link created."));
-    } catch {
-      setError(true);
+    } catch (error) {
+      handleRequestError(error);
     } finally {
       setBusy(false);
     }
@@ -168,8 +178,8 @@ export function BookingPublicLinksPanel({
         current.map((item) => (item.id === link.id ? response.data : item)),
       );
       setNotice(t("Booking link revoked."));
-    } catch {
-      setError(true);
+    } catch (error) {
+      handleRequestError(error);
     } finally {
       setActiveOperation("");
     }
@@ -187,8 +197,8 @@ export function BookingPublicLinksPanel({
       setLinks((current) => current.filter((item) => item.id !== link.id));
       setConfirming(null);
       setNotice(t("Booking link deleted."));
-    } catch {
-      setError(true);
+    } catch (error) {
+      handleRequestError(error);
     } finally {
       setActiveOperation("");
     }
@@ -208,8 +218,8 @@ export function BookingPublicLinksPanel({
             : item,
         ),
       );
-    } catch {
-      setError(true);
+    } catch (error) {
+      handleRequestError(error);
     } finally {
       setShorteningId("");
     }
@@ -372,7 +382,7 @@ export function BookingPublicLinksPanel({
             type="button"
             variant="outline"
             disabled={loading || busy || !!activeOperation || !!shorteningId}
-            onClick={() => void loadLinks()}
+            onClick={() => setLoadAttempt((attempt) => attempt + 1)}
           >
             {t("Retry")}
           </Button>

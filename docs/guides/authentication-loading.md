@@ -27,14 +27,21 @@ and uses it when creating the session to complete the requested authorization.
 Dropping the query at the API boundary leaves `prompt=login` pending: a valid
 second factor then returns to login instead of the application's callback.
 
-If second-factor verification returns `INVALID_TWO_FACTOR_COOKIE`, the login
-page starts a fresh authorization through the configured admin login route,
-preserving the tenant host. MFA challenges expire after five minutes and are
-single-use; submitting codes against an invalid challenge cannot restore it.
-An incorrect authenticator code keeps the form available for another attempt.
-Both authenticator and recovery-code sign-in use this recovery path. The client
-reads Better Auth's `code` field as well as OAuth's `error` field to distinguish
-an invalid challenge from an incorrect code.
+If a second-factor challenge expires or exhausts its permitted attempts, the
+login page starts a fresh authorization through the configured admin login
+route, preserving the tenant host. MFA challenges expire after five minutes
+and are single-use. An incorrect authenticator code keeps the form available
+while the challenge still permits another attempt. Account lockout messages
+remain visible. Both authenticator and recovery-code sign-in use this recovery
+path. The client reads Better Auth's `code` field as well as OAuth's `error` field
+to identify a challenge that needs to be restarted.
+If the authenticator or its recovery-code configuration is removed while an
+MFA form is open, the form restarts sign-in and keeps the requested destination.
+If the session expires before MFA setup can generate the authenticator code,
+the setup form starts a fresh sign-in through that same Admin route.
+An incorrect password keeps the active setup form available for correction.
+If the response lacks the authenticator setup URI, the form remains available
+for retry. When the setup details appear, focus moves to the verification code.
 
 The shared loading style is delivered through the existing authentication CSS
 route; it does not require a new script or animation library. It represents
@@ -57,16 +64,22 @@ an explicit content type, and adds authentication headers to a copy.
 Admin API requests allow up to 15 seconds to obtain an access token, then start
 the request's separate deadline. The standard request deadline is 15 seconds
 and covers the body for JSON and OAuth session requests. Requests that callers
-cancel before they start never reach the network. Page-file uploads and
-companion recording uploads use a five-minute deadline to allow larger files
-and slower connections to finish. If the application splash or a route fallback
-remains visible for 15 seconds, it replaces the spinner or skeleton with
+cancel before they start never reach the network. Cancelling a request in
+progress preserves the caller's cancellation reason. Reaching the deadline
+reports a timeout even if the transport returns its own abort error. Page-file
+uploads and companion recording uploads allow five minutes for larger files and
+slower connections. If the application splash or a route fallback remains
+visible for 15 seconds, it replaces the spinner or skeleton with
 actions to retry or return to sign-in. The users list also shows a retry action
 when its data request fails, including when it reaches the request deadline.
 
 The OAuth sign-in and second-factor forms restore the failed form after 15
 seconds if the authentication request stalls, including while reading its
-response. The user can then explicitly retry.
+response. The form recovers even when the transport ignores cancellation.
+The form discards late responses and lets the user explicitly retry.
+The pinned OAuth provider decodes URL-encoded exchanges from their original
+UTF-8 bytes in Workers. The parser still validates repeated client fields and
+preserves the ordered list of resource values.
 The SSO connection lookup has the same deadline and restores its form on timeout.
 Editing the SSO email or starting another lookup clears the previous connection
 choices. Only results for the current email are offered.
@@ -76,7 +89,16 @@ When sign-in requires a second factor, keyboard focus moves to the
 authenticator code after its form appears, including after returning from SSO.
 After a failed code verification, focus returns to the current code field
 so the user can correct it and retry.
+If the second factor succeeds and OAuth continuation fails, **Continue to
+Savia** retries only the continuation. If the verified session has ended, the
+login page starts a fresh authorization.
+After social sign-in or SSO, **Continue to Savia** also retries a failed
+continuation with the original signed request. If the SSO session has ended,
+the login page restarts authorization for the original destination.
 Tenant discovery on the sign-in email field only remembers confirmed results.
+A dedicated workspace redirect requires a configured tenant domain. Sign-in
+on the local development host or an isolated branch Preview continues on the
+current origin.
 A later blur can try again after an unconfirmed or timed-out lookup.
 If tenant navigation stalls, the same email can trigger a new lookup while the
 manual continuation link remains available until the next navigation begins.
@@ -109,8 +131,9 @@ runs if workspace cleanup fails.
 Logout still rotates the session read generation to invalidate protected reads,
 but only principal replacement changes the application subtree key. Keep React
 Admin mounted during logout so its active logout hook can finish cleanup and
-redirect. Remounting that boundary on every session clear restarts Office
-availability and appearance reads and can cause a repeated logout/request loop.
+redirect. Office availability starts after the authenticated layout mounts.
+Clearing the session discards pending results and stops Office availability
+requests while logout finishes.
 
 If the browser does not finish an OAuth redirect within ten seconds, the page
 restores its content and exposes **Continue to Savia** as a normal link to the

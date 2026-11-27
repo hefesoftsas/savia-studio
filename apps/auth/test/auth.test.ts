@@ -496,6 +496,19 @@ describe("Savia Better Auth worker", () => {
     expect(JSON.parse(upgraded?.scopes ?? "[]")).toContain("offline_access");
   });
 
+  it("serves the issuer's OpenID metadata at the public discovery alias", async () => {
+    const [canonical, alias] = await Promise.all([
+      authRequest("/api/auth/.well-known/openid-configuration"),
+      authRequest("/.well-known/openid-configuration"),
+    ]);
+
+    expect(canonical.status).toBe(200);
+    expect(alias.status).toBe(200);
+    const metadata = await canonical.json();
+    expect(metadata).toMatchObject({ issuer: `${origin}/api/auth` });
+    expect(await alias.json()).toEqual(metadata);
+  });
+
   it("enables the refresh-token grant for Savia OAuth sessions", () => {
     expect(oauthProviderOptions(env).grantTypes).toEqual(
       expect.arrayContaining(["authorization_code", "refresh_token"]),
@@ -654,6 +667,20 @@ describe("Savia Better Auth worker", () => {
     );
   });
 
+  it("reports an unauthorized session when MFA setup no longer has a sign-in cookie", async () => {
+    const response = await authRequest("/api/auth/two-factor/enable", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({
+        password: env.BETTER_AUTH_BOOTSTRAP_PASSWORD,
+        method: "totp",
+      }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
   it("verifies the existing authenticator when enrollment was already completed", async () => {
     const script = await (await authRequest("/api/auth/oauth-ui.js")).text();
     const handlers = new Map<string, () => Promise<void>>();
@@ -756,17 +783,55 @@ describe("Savia Better Auth worker", () => {
     });
   });
 
-  it.each(["verify-totp", "verify-backup-code"])(
-    "restarts authorization when %s loses its MFA challenge",
-    async (formKind) => {
+  it.each(["login", "mfa-enroll", "sso-complete"])(
+    "keeps the requested Bookings view when restarting from %s",
+    async (path) => {
+      const environment = {
+        ...env,
+        SAVIA_ADMIN_REDIRECT_URI:
+          "https://savia-preview.hefesoft.com/auth/callback",
+      };
+      const url = new URL(
+        `https://agency.savia-preview.hefesoft.com/api/auth/${path}`,
+      );
+      url.search = new URLSearchParams({
+        state: `${"a".repeat(43)}.bookings?tab=reservations&date=2026-11-25&next=https://unrelated.example`,
+        sig: "expired",
+        ba_param: "state",
+      }).toString();
+      const response = await authWorker.fetch(new Request(url), environment);
+      const html = await response.text();
+      const encodedRestartUrl = html.match(
+        /data-oauth-restart-url="([^"]+)"/,
+      )?.[1];
+      const restartUrl = encodedRestartUrl?.replace(/&amp;/g, "&");
+      expect(restartUrl).toBe(
+        "https://agency.savia-preview.hefesoft.com/#/login?resume=bookings&tab=reservations&date=2026-11-25",
+      );
+      if (path === "sso-complete") {
+        expect(html).toContain(`href="${encodedRestartUrl}"`);
+        expect(html).toContain("data-sso-continue");
+        expect(html).toContain("data-oauth-resume");
+      }
+    },
+  );
+
+  it.each([
+    ["verify-totp", "INVALID_TWO_FACTOR_COOKIE"],
+    ["verify-backup-code", "INVALID_TWO_FACTOR_COOKIE"],
+    ["verify-totp", "TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE"],
+    ["verify-backup-code", "TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE"],
+  ])(
+    "restarts authorization for %s after %s invalidates the challenge",
+    async (formKind, code) => {
       const script = await (await authRequest("/api/auth/oauth-ui.js")).text();
       await expect(
         submitExpiredOAuthLogin(
           script,
           "https://agency.savia-preview.hefesoft.com/#/login",
           {
-            code: "INVALID_TWO_FACTOR_COOKIE",
-            message: "Invalid two factor cookie",
+            code,
+            message: "This MFA challenge is no longer usable",
           },
           formKind,
         ),
@@ -777,16 +842,19 @@ describe("Savia Better Auth worker", () => {
     },
   );
 
-  it("keeps MFA input available after an incorrect authenticator code", async () => {
+  it.each([
+    ["INVALID_CODE", "Invalid code"],
+    ["ACCOUNT_TEMPORARILY_LOCKED", "Your account is temporarily locked"],
+  ])("keeps the server message visible for %s", async (code, message) => {
     const script = await (await authRequest("/api/auth/oauth-ui.js")).text();
     await expect(
       submitExpiredOAuthLogin(
         script,
         "https://agency.savia-preview.hefesoft.com/#/login",
-        { code: "INVALID_CODE", message: "Invalid code" },
+        { code, message },
         "verify-totp",
       ),
-    ).resolves.toEqual({ restartUrl: undefined, status: "Invalid code" });
+    ).resolves.toEqual({ restartUrl: undefined, status: message });
   });
 
   it("requires unenrolled administrators to enroll TOTP before OAuth continues", async () => {
@@ -978,6 +1046,7 @@ describe("Savia Better Auth worker", () => {
 
     expect(await session.json()).toEqual({
       user: expect.objectContaining({ image }),
+      sessionCreatedAt: expect.any(Number),
     });
   });
 

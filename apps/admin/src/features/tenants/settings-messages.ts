@@ -16,6 +16,18 @@ export const tenantSettingsMessages = {
     "This user is unavailable. Choose another active user.",
     "Este usuário está indisponível. Selecione outro usuário ativo.",
   ],
+  "An operation is in progress for the user's current tenant. Wait for it to finish before trying again.":
+    [
+      "Hay una operación en curso en el tenant actual de este usuario. Espera a que termine antes de volver a intentarlo.",
+      "An operation is in progress for the user's current tenant. Wait for it to finish before trying again.",
+      "Há uma operação em andamento no tenant atual deste usuário. Aguarde a conclusão antes de tentar novamente.",
+    ],
+  "Another access change is in progress for this user. Wait for it to finish before trying again.":
+    [
+      "Hay otro cambio de acceso en curso para este usuario. Espera a que termine antes de volver a intentarlo.",
+      "Another access change is in progress for this user. Wait for it to finish before trying again.",
+      "Há outra alteração de acesso em andamento para este usuário. Aguarde a conclusão antes de tentar novamente.",
+    ],
   "This user is the last active member of their organization. Add another member there before transferring them.":
     [
       "El usuario es el último miembro activo de su organización. Agrega otro miembro allí antes de transferirlo.",
@@ -45,10 +57,16 @@ export const tenantSettingsMessages = {
       "An account already uses this email. Choose an existing user or use a different email.",
       "Já existe uma conta com esse e-mail. Selecione um usuário existente ou use outro e-mail.",
     ],
-  "The request timed out. Check the tenant list before trying again.": [
-    "La solicitud tardó demasiado. Revisa la lista de tenants antes de volver a intentarlo.",
-    "The request timed out. Check the tenant list before trying again.",
-    "A solicitação demorou demais. Verifique a lista de tenants antes de tentar novamente.",
+  "Savia could not confirm the tenant creation. Check the tenant list before trying again.":
+    [
+      "No se pudo confirmar la creación del tenant. Revisa la lista antes de volver a intentarlo.",
+      "Savia could not confirm the tenant creation. Check the tenant list before trying again.",
+      "O Savia não conseguiu confirmar a criação do tenant. Verifique a lista antes de tentar novamente.",
+    ],
+  "View tenants in a new tab": [
+    "Ver tenants en otra pestaña",
+    "View tenants in a new tab",
+    "Ver tenants em outra aba",
   ],
   "Could not create the tenant. Review the information and try again.": [
     "No se pudo crear el tenant. Revisa los datos e inténtalo de nuevo.",
@@ -118,6 +136,17 @@ export const tenantSettingsMessages = {
       "The tenant name changed or did not match. Refresh the tenant and confirm using its current name.",
       "O nome do tenant mudou ou não corresponde. Atualize o tenant e confirme usando o nome atual.",
     ],
+  "An operation is in progress for this tenant. Wait for it to finish before retrying.":
+    [
+      "Hay una operación en curso para este tenant. Espera a que termine antes de reintentar.",
+      "An operation is in progress for this tenant. Wait for it to finish before retrying.",
+      "Há uma operação em andamento para este tenant. Aguarde até que ela termine antes de tentar novamente.",
+    ],
+  "A conflict interrupted the deletion. Refresh the tenant and try again.": [
+    "Un conflicto interrumpió la eliminación. Actualiza el tenant y vuelve a intentarlo.",
+    "A conflict interrupted the deletion. Refresh the tenant and try again.",
+    "Um conflito interrompeu a exclusão. Atualize o tenant e tente novamente.",
+  ],
   "Some cleanup services are unavailable. Refresh the tenant and retry the deletion.":
     [
       "Algunos servicios de limpieza no están disponibles. Actualiza el tenant e intenta eliminarlo de nuevo.",
@@ -128,6 +157,11 @@ export const tenantSettingsMessages = {
     "No se pudo completar la limpieza de archivos. El tenant quedó inactivo. Intenta eliminarlo de nuevo.",
     "Tenant file cleanup failed. The tenant is inactive. Retry the deletion.",
     "Não foi possível concluir a limpeza dos arquivos. O tenant ficou inativo. Tente excluí-lo novamente.",
+  ],
+  "Savia Request cleanup failed. The tenant is inactive. Retry the deletion.": [
+    "No se pudo completar la limpieza de Savia Request. El tenant quedó inactivo. Intenta eliminarlo de nuevo.",
+    "Savia Request cleanup failed. The tenant is inactive. Retry the deletion.",
+    "Não foi possível concluir a limpeza do Savia Request. O tenant ficou inativo. Tente excluí-lo novamente.",
   ],
   "Tenant authentication settings could not be removed. The tenant is inactive. Retry the deletion.":
     [

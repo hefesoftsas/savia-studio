@@ -1,113 +1,56 @@
-import { cleanup, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { render } from "../studio-engine/test/locale-test-render";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiClientError, type ApiClient } from "@/api/api-client";
+import { beginLogout } from "@/auth/logout-progress";
+import { rotateSessionScope } from "@/auth/session-scope";
 import { PluginWidgetBody } from "./plugin-widget";
 
-afterEach(() => {
-  cleanup();
-  vi.restoreAllMocks();
-});
+afterEach(cleanup);
 
 const widget = {
-  id: "w_plugin1",
-  apiBasePath: "/v1/studio/0",
-  collection: "contracts",
-  kind: "plugin:service.portfolio-dashboard:summary",
+  id: "widget-projects",
+  apiBasePath: "/v1/studio/14",
+  collection: "projects",
+  kind: "plugin:example.projects:overview",
 };
 
-function createApiClient(
-  extensions: Array<{
-    manifest: { id: string };
-    builtIn: boolean;
-    store?: boolean;
-    widgets?: Array<{
-      id: string;
-      collection: string;
-      title: { es: string };
-    }>;
-    installed: { enabled: boolean } | null;
-  }>,
-) {
+function catalog(enabled: boolean) {
   return {
-    get: vi.fn(async (path: string) => {
-      if (path === "/v1/studio/0/api/extensions") {
-        return { data: extensions };
-      }
-      if (
-        path ===
-        "/v1/studio/0/api/extensions/service.portfolio-dashboard/summary"
-      ) {
-        return {
-          data: {
-            total: 10,
-            active: 8,
-            expiring: 2,
-            premiumTotal: 5000000,
-            asOf: "2026-09-21T00:00:00.000Z",
+    data: [
+      {
+        manifest: { id: "example.projects" },
+        builtIn: false,
+        store: true,
+        widgets: [
+          {
+            id: "overview",
+            collection: "projects",
+            title: { es: "Proyectos" },
           },
-        };
-      }
-      if (path.includes("/api/records/contracts")) {
-        return {
-          data: [{ id: "1", name: "POL-001", estado: "Vigente" }],
-          total: 10,
-          page: 1,
-          perPage: 5,
-        };
-      }
-      throw new Error(`unexpected path ${path}`);
-    }),
+        ],
+        installed: { enabled, version: "1.0.0" },
+      },
+    ],
   };
 }
 
-const enabledExtension = [
-  {
-    manifest: { id: "service.portfolio-dashboard" },
-    builtIn: true,
-    installed: null,
-  },
-];
+const enableMessage = "Activa la extensión Proyectos para ver este widget.";
+
+function apiWithCatalog(get: ApiClient["get"]): ApiClient {
+  return { get } as ApiClient;
+}
 
 describe("PluginWidgetBody", () => {
-  it("asks to enable the store extension when it is not active", async () => {
-    render(
-      <PluginWidgetBody
-        apiClient={
-          createApiClient([
-            {
-              manifest: { id: "custom.demo" },
-              builtIn: false,
-              store: true,
-              widgets: [
-                {
-                  id: "resumen",
-                  collection: "contracts",
-                  title: { es: "Resumen" },
-                },
-              ],
-              installed: { enabled: false },
-            },
-          ]) as never
-        }
-        widget={{ ...widget, kind: "plugin:custom.demo:resumen" } as never}
-      />,
-    );
-
-    expect(
-      await screen.findByText(
-        "Activa la extensión Resumen para ver este widget.",
-      ),
-    ).toBeVisible();
+  it("asks to enable the store extension when it is inactive", async () => {
+    const apiClient = apiWithCatalog(vi.fn().mockResolvedValue(catalog(false)));
+    render(<PluginWidgetBody apiClient={apiClient} widget={widget} />);
+    expect(await screen.findByText(enableMessage)).toBeVisible();
   });
 
-  it("asks to enable the extension when it is not active", async () => {
-    render(
-      <PluginWidgetBody
-        apiClient={createApiClient([]) as never}
-        widget={widget as never}
-      />,
-    );
-
+  it("falls back gracefully for an unknown plugin", async () => {
+    const apiClient = apiWithCatalog(vi.fn().mockResolvedValue({ data: [] }));
+    render(<PluginWidgetBody apiClient={apiClient} widget={widget} />);
     expect(
       await screen.findByText(
         "Este tipo de widget estará disponible próximamente. Mientras tanto puedes abrir la colección completa.",
@@ -115,71 +58,99 @@ describe("PluginWidgetBody", () => {
     ).toBeVisible();
   });
 
-  it("falls back gracefully for unknown plugin kinds", async () => {
+  it("lets the user retry catalog verification from the widget", async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiClientError(403, "FORBIDDEN", "Forbidden"))
+      .mockResolvedValueOnce(catalog(true));
     render(
-      <PluginWidgetBody
-        apiClient={createApiClient(enabledExtension) as never}
-        widget={{ ...widget, kind: "plugin:unknown:missing" } as never}
-      />,
+      <PluginWidgetBody apiClient={apiWithCatalog(get)} widget={widget} />,
     );
 
-    expect(
-      await screen.findByText(
-        "Este tipo de widget estará disponible próximamente. Mientras tanto puedes abrir la colección completa.",
+    const retry = await screen.findByRole("button", { name: "Reintentar" });
+    expect(screen.queryByTitle("Proyectos")).not.toBeInTheDocument();
+    fireEvent.click(retry);
+    expect(await screen.findByTitle("Proyectos")).toHaveAttribute(
+      "src",
+      expect.stringContaining(
+        "/v1/studio/14/api/plugin-store/example.projects/widget?widget=overview",
       ),
-    ).toBeVisible();
+    );
+    expect(get).toHaveBeenCalledTimes(2);
   });
 
-  it("shows a recoverable error when the tenant plugin catalog fails", async () => {
-    render(
-      <PluginWidgetBody
-        apiClient={
-          { get: vi.fn().mockRejectedValue(new Error("offline")) } as never
-        }
-        widget={{ ...widget, kind: "plugin:custom.demo:resumen" } as never}
-      />,
-    );
+  it.each(["organization", "account", "API client"])(
+    "rechecks installation before rendering a widget after changing the %s",
+    async (change) => {
+      let finish!: (value: ReturnType<typeof catalog>) => void;
+      const verification = new Promise<ReturnType<typeof catalog>>(
+        (resolve) => {
+          finish = resolve;
+        },
+      );
+      const get = vi
+        .fn()
+        .mockResolvedValueOnce(catalog(true))
+        .mockReturnValueOnce(verification);
+      const apiClient = apiWithCatalog(get);
+      const { rerender } = render(
+        <PluginWidgetBody apiClient={apiClient} widget={widget} />,
+      );
+      expect(await screen.findByTitle("Proyectos")).toBeInTheDocument();
 
-    expect(
-      await screen.findByText(
-        "No pudimos verificar la extensión de este widget. Reintenta desde Actualizar.",
-      ),
-    ).toBeVisible();
-  });
+      const next =
+        change === "organization"
+          ? { ...widget, apiBasePath: "/v1/studio/15" }
+          : widget;
+      const client = change === "API client" ? apiWithCatalog(get) : apiClient;
+      if (change === "account")
+        act(() => rotateSessionScope("principal-change"));
+      else rerender(<PluginWidgetBody apiClient={client} widget={next} />);
 
-  it("renders store widgets in an isolated iframe", async () => {
-    const { container } = render(
-      <PluginWidgetBody
-        apiClient={
-          createApiClient([
-            {
-              manifest: { id: "custom.demo" },
-              builtIn: false,
-              store: true,
-              widgets: [
-                {
-                  id: "resumen",
-                  collection: "contracts",
-                  title: { es: "Resumen" },
-                },
-              ],
-              installed: { enabled: true },
-            },
-          ]) as never
-        }
-        widget={{ ...widget, kind: "plugin:custom.demo:resumen" } as never}
-      />,
-    );
+      expect(screen.queryByTitle("Proyectos")).not.toBeInTheDocument();
+      expect(get).toHaveBeenLastCalledWith(
+        `${next.apiBasePath}/api/extensions`,
+        expect.anything(),
+      );
+      expect(get).toHaveBeenCalledTimes(2);
+      await act(async () => finish(catalog(false)));
+      expect(screen.getByText(enableMessage)).toBeVisible();
+    },
+  );
 
-    const frame = await waitFor(() => {
-      const element = container.querySelector(
-        "iframe[title='Resumen']",
-      ) as HTMLIFrameElement | null;
-      expect(element).not.toBeNull();
-      return element!;
+  it("aborts verification when logout starts and ignores the late response", async () => {
+    let finish!: (value: ReturnType<typeof catalog>) => void;
+    const verification = new Promise<ReturnType<typeof catalog>>((resolve) => {
+      finish = resolve;
     });
-    expect(frame?.getAttribute("src")).toContain(
-      "/v1/studio/0/api/plugin-store/custom.demo/widget?widget=resumen",
+    const get = vi
+      .fn<
+        (
+          path: string,
+          options?: RequestInit,
+        ) => Promise<ReturnType<typeof catalog>>
+      >()
+      .mockReturnValueOnce(verification)
+      .mockResolvedValueOnce(catalog(false));
+    render(
+      <PluginWidgetBody
+        apiClient={apiWithCatalog(get as ApiClient["get"])}
+        widget={widget}
+      />,
     );
+    const signal = get.mock.calls[0]?.[1]?.signal;
+    let cancelLogout!: ReturnType<typeof beginLogout>;
+    act(() => {
+      cancelLogout = beginLogout();
+    });
+    try {
+      await act(async () => finish(catalog(true)));
+      expect(screen.queryByTitle("Proyectos")).not.toBeInTheDocument();
+      expect(signal?.aborted).toBe(true);
+      expect(get).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => cancelLogout());
+    }
+    expect(screen.getByText(enableMessage)).toBeVisible();
   });
 });

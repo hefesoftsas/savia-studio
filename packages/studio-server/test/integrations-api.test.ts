@@ -1,3 +1,4 @@
+import { isDnsOverHttpsRequest } from "./fixtures/is-dns-over-https";
 import { migrationStatements } from "./migration-statements";
 import {
   beforeAll,
@@ -179,8 +180,8 @@ describe("Operational integrations with isolated D1", () => {
     expect(JSON.stringify(await json("/integrations"))).not.toContain(token);
     let calls = 0;
     const mocked = vi.fn(async (input: any, init: any) => {
-      const url = new URL(String(input));
-      if (url.hostname === "cloudflare-dns.com")
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (isDnsOverHttpsRequest(url))
         return Response.json({
           Status: 0,
           Answer: [{ type: 1, data: "1.1.1.1" }],
@@ -221,7 +222,7 @@ describe("Operational integrations with isolated D1", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: any) => {
-        if (new URL(String(input)).hostname === "cloudflare-dns.com")
+        if (isDnsOverHttpsRequest(input))
           return Response.json({
             Status: 0,
             Answer: [{ type: 1, data: "1.1.1.1" }],
@@ -290,9 +291,9 @@ it("keeps dynamic connection secrets and run responses private between users in 
 it("uses the injected transport for OpenAPI DNS validation, import and execution", async () => {
   const calls: string[] = [];
   const integrationFetch: typeof fetch = async (input) => {
-    const url = new URL(String(input));
+    const url = new URL(input instanceof Request ? input.url : String(input));
     calls.push(url.toString());
-    if (url.hostname === "cloudflare-dns.com")
+    if (isDnsOverHttpsRequest(url))
       return Response.json({
         Status: 0,
         Answer: [{ type: 1, data: "1.1.1.1" }],
@@ -335,9 +336,9 @@ it("uses the injected transport for OpenAPI DNS validation, import and execution
     idempotencyKey: "native-transport-1",
   });
   expect(result.run.status).toBe("succeeded");
-  expect(
-    calls.filter((url) => url.includes("cloudflare-dns.com")),
-  ).toHaveLength(4);
-  expect(calls.some((url) => url.endsWith("/contract.json"))).toBe(true);
-  expect(calls.some((url) => url.endsWith("/quotes"))).toBe(true);
+  expect(calls.filter(isDnsOverHttpsRequest)).toHaveLength(4);
+  expect(calls.filter((url) => !isDnsOverHttpsRequest(url))).toEqual([
+    "https://api.provider.com/contract.json",
+    "https://api.provider.com/demo/quotes",
+  ]);
 });

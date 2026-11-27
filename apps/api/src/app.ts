@@ -268,7 +268,7 @@ export function createApp(
     realtime,
   );
   registerRealtimeRoutes(app, db, realtime, realtimeOutboxRecoveryEnabled);
-  registerSaviaRequestRoutes(app, saviaRequestService);
+  registerSaviaRequestRoutes(app, db, saviaRequestService);
   registerSaviaFlowsRoutes(app, saviaFlows);
   registerSaviaCollectionHostRoutes(app, db, saviaFlows);
   registerSaviaNativeHostRoutes(app, {
@@ -291,6 +291,7 @@ export function createApp(
         resolvedAuthService,
         oauthResource,
         new PersonalApiKeys(db, oauthUrls.personalApiKeyDeploymentId ?? null),
+        identityBridgeKey,
       ),
   );
   app.use("/api/tenants/*/quote-links", quoteLinksAuth);
@@ -371,6 +372,7 @@ export function createApp(
         resolvedAuthService,
         oauthResource,
         new PersonalApiKeys(db, oauthUrls.personalApiKeyDeploymentId ?? null),
+        identityBridgeKey,
       ),
   );
   const notificationSession = async (context: Context, next: Next) => {
@@ -401,27 +403,20 @@ export function createApp(
     documents,
     saviaRequestService,
     resolvedAuthService && identityBridgeKey
-      ? async (tenantId) => {
-          await deleteTenantRegistrationSettings(
-            resolvedAuthService,
-            identityBridgeKey,
-            tenantId,
-          );
-          await deleteTenantSocialSettings(
-            resolvedAuthService,
-            identityBridgeKey,
-            tenantId,
-          );
-          await deleteTenantSSOSettings(
-            resolvedAuthService,
-            identityBridgeKey,
-            tenantId,
-          );
-          await deleteTenantEmailSettings(
-            resolvedAuthService,
-            identityBridgeKey,
-            tenantId,
-          );
+      ? async (tenantId, renewLease) => {
+          for (const removeSettings of [
+            deleteTenantRegistrationSettings,
+            deleteTenantSocialSettings,
+            deleteTenantSSOSettings,
+            deleteTenantEmailSettings,
+          ]) {
+            await renewLease();
+            await removeSettings(
+              resolvedAuthService,
+              identityBridgeKey,
+              tenantId,
+            );
+          }
         }
       : undefined,
     resolvedAuthService && identityBridgeKey

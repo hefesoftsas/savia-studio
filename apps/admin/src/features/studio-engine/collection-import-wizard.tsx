@@ -1,6 +1,6 @@
 import { useMessages } from "@/i18n/core";
 import { studioMessages } from "@/i18n/locales/studio";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   Dialog,
@@ -37,6 +37,7 @@ import {
   type ParsedSpreadsheet,
 } from "./spreadsheet-parser";
 import {
+  generateFormSections,
   inferSpreadsheetSchema,
   type InferredColumn,
 } from "@savia/studio-shared/spreadsheet-inference";
@@ -48,7 +49,11 @@ import {
   type StudioConfig,
   type StudioObject,
 } from "@savia/studio-shared/metadata";
-import { csvLine } from "@savia/studio-shared/csv";
+import {
+  CSV_IMPORT_MAX_LENGTH,
+  CSV_IMPORT_MAX_ROWS,
+  csvImportLine,
+} from "@savia/studio-shared/csv";
 import { LookupIconPicker } from "./lookup-icon-picker";
 import "./collection-import-wizard.css";
 
@@ -57,6 +62,62 @@ type WizardStep = "upload" | "screen" | "fields" | "confirm";
 type ExtendedColumn = InferredColumn & {
   included: boolean;
 };
+type ImportColumn = ExtendedColumn & { sourceIndex: number };
+type ImportRecord = {
+  row: ParsedSpreadsheet["rows"][number];
+  position: number;
+};
+
+type ImportCounts = { created: number; skipped: number; errors: number };
+type ImportOutcome = ImportCounts & { firstError?: string };
+type ImportBatchResult = {
+  summary: ImportCounts;
+  data: { status: string; error?: string }[];
+};
+
+function planImportBatches(columns: ImportColumn[], records: ImportRecord[]) {
+  const header =
+    "\uFEFF" +
+    csvImportLine(columns.map(({ originalHeader }) => originalHeader));
+  const batches: { csv: string; count: number; through: number }[] = [];
+  let oversized = 0;
+  let firstOversized: number | undefined;
+  let count = 0;
+  let through = 0;
+  let csv = header;
+
+  const flush = () => {
+    through += count;
+    batches.push({ csv, count, through });
+    count = 0;
+    csv = header;
+  };
+
+  for (const { row, position } of records) {
+    const line = csvImportLine(
+      columns.map(({ sourceIndex, type }) => {
+        const value = row[sourceIndex] ?? null;
+        if (!(value instanceof Date)) return value;
+        const iso = value.toISOString();
+        return type === "DateControl" ? iso.slice(0, 10) : iso;
+      }),
+    );
+    if (header.length + line.length > CSV_IMPORT_MAX_LENGTH) {
+      oversized++;
+      firstOversized ??= position;
+      continue;
+    }
+    if (
+      count === CSV_IMPORT_MAX_ROWS ||
+      csv.length + line.length > CSV_IMPORT_MAX_LENGTH
+    )
+      flush();
+    csv += line;
+    count++;
+  }
+  if (count) flush();
+  return { batches, through, oversized, firstOversized };
+}
 
 const FIELD_TYPES = [
   { value: "Textbox", label: "Texto corto" },
@@ -138,7 +199,7 @@ export function CollectionImportWizard({
   const [spreadsheet, setSpreadsheet] = useState<ParsedSpreadsheet | null>(
     null,
   );
-  const [selectedSheet, setSelectedSheet] = useState<string>("");
+  const spreadsheetFile = useRef<File | null>(null);
 
   // Collection & Screen setup state
   const [collectionLabel, setCollectionLabel] = useState("");
@@ -153,7 +214,6 @@ export function CollectionImportWizard({
 
   // Sections layout state
   const [enableSections, setEnableSections] = useState(true);
-  const [sections, setSections] = useState<{ id: string; label: string }[]>([]);
 
   // Pipeline detection state
   const [enablePipeline, setEnablePipeline] = useState(false);
@@ -162,20 +222,92 @@ export function CollectionImportWizard({
 
   // Field columns state
   const [columns, setColumns] = useState<ExtendedColumn[]>([]);
+  const includedColumns = useMemo(
+    () =>
+      columns.flatMap((column, sourceIndex) =>
+        column.included ? [{ ...column, sourceIndex }] : [],
+      ),
+    [columns],
+  );
+  const recordsToImport = useMemo(
+    () =>
+      spreadsheet?.rows.flatMap((row, index) =>
+        includedColumns.some(({ sourceIndex }) => {
+          const value = row[sourceIndex];
+          return value != null && value !== "";
+        })
+          ? [{ row, position: index + 1 }]
+          : [],
+      ) ?? [],
+    [spreadsheet, includedColumns],
+  );
+  const omittedRows = (spreadsheet?.rows.length ?? 0) - recordsToImport.length;
+  const sectionColumns =
+    enableSections && columns.length > 6
+      ? includedColumns.map((column) => ({ ...column }))
+      : [];
+  const sections = generateFormSections(sectionColumns);
+  const fieldSections = new Map(
+    sectionColumns.map(({ key, section }) => [
+      key,
+      sections.find(({ id }) => id === section),
+    ]),
+  );
+  const numericColumns = includedColumns.filter(
+    ({ type }) => type === "Number" || type === "Currency",
+  );
+  const numericKeys = new Set(numericColumns.map(({ key }) => key));
+  const validFormulas = new Map(
+    numericColumns.flatMap(({ key, formula }) =>
+      formula?.fields.every((field) => numericKeys.has(field))
+        ? [[key, formula] as const]
+        : [],
+    ),
+  );
+  const stageColumns = includedColumns.filter(
+    ({ type, relation }) => type === "Dropdown" && !relation,
+  );
+  const stageField =
+    stageColumns.find(({ key }) => key === pipelineStageField)?.key ?? "";
+  const amountField = numericKeys.has(pipelineAmountField)
+    ? pipelineAmountField
+    : "";
 
   // Import options state
   const [importRows, setImportRows] = useState(true);
+  const importPlan = useMemo(
+    () =>
+      step === "confirm" && importRows && recordsToImport.length
+        ? planImportBatches(includedColumns, recordsToImport)
+        : undefined,
+    [step, importRows, includedColumns, recordsToImport],
+  );
+  const plannedRecords = importPlan?.through ?? 0;
+  const totalBatches = importPlan?.batches.length ?? 0;
+  const oversizedMessage = importPlan?.firstOversized
+    ? t("El registro %{v1} supera el tamaño máximo de un lote.", {
+        v1: importPlan.firstOversized,
+      })
+    : undefined;
+  const [createdObject, setCreatedObject] = useState<StudioObject | null>(null);
+  const [importOutcome, setImportOutcome] = useState<ImportOutcome | null>(
+    null,
+  );
+  const importCheckpoint = useRef<{
+    nextBatch: number;
+    importId?: string;
+    outcome: ImportOutcome;
+  }>({
+    nextBatch: 0,
+    outcome: { created: 0, skipped: 0, errors: 0 },
+  });
 
-  // Drag and drop handler
-  const onDrop = async (acceptedFiles: File[]) => {
-    const file = acceptedFiles[0];
-    if (!file) return;
-
+  const readSpreadsheet = async (file: File, sheetName?: string) => {
     setError("");
     setParsing(true);
     try {
       let currentKnown = knownCollectionsRef.current;
-      if (currentKnown.length === 0) {
+      if (!sheetName && currentKnown.length === 0) {
         try {
           const res = await Promise.resolve(
             api<{ data: Array<{ name: string; label: string }> }>("/objects"),
@@ -191,18 +323,10 @@ export function CollectionImportWizard({
         } catch {}
       }
 
-      const parsed = await parseSpreadsheetFile(file);
+      const parsed = await parseSpreadsheetFile(file, sheetName);
+      processInferredSchema(parsed, currentKnown);
+      spreadsheetFile.current = file;
       setSpreadsheet(parsed);
-      setSelectedSheet(parsed.selectedSheet);
-
-      // Run inference
-      processInferredSchema(
-        parsed,
-        file.name,
-        parsed.selectedSheet,
-        currentKnown,
-        enableSections,
-      );
     } catch (err) {
       setError((err as Error).message || t("No se pudo leer el archivo."));
     } finally {
@@ -211,7 +335,10 @@ export function CollectionImportWizard({
   };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
+    onDrop: ([file]) => {
+      if (file) void readSpreadsheet(file);
+    },
+    disabled: parsing,
     accept: {
       "text/csv": [".csv"],
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [
@@ -223,32 +350,17 @@ export function CollectionImportWizard({
     multiple: false,
   });
 
-  const handleSheetChange = (newSheet: string) => {
-    if (!spreadsheet) return;
-    setSelectedSheet(newSheet);
-    processInferredSchema(
-      spreadsheet,
-      spreadsheet.fileName,
-      newSheet,
-      knownCollections,
-      enableSections,
-    );
-  };
-
   const processInferredSchema = (
     parsed: ParsedSpreadsheet,
-    fileName: string,
-    sheetName: string,
-    knownCols = knownCollections,
-    withSections = enableSections,
+    knownCols: typeof knownCollections,
   ) => {
     const inferred = inferSpreadsheetSchema({
-      fileName,
-      sheetName,
+      fileName: parsed.fileName,
+      sheetName: parsed.selectedSheet,
       headers: parsed.headers,
       rows: parsed.rows,
       knownCollections: knownCols,
-      enableSections: withSections,
+      enableSections: false,
     });
 
     setCollectionLabel(inferred.collectionLabel);
@@ -257,12 +369,6 @@ export function CollectionImportWizard({
     setMenuSection(inferred.suggestedMenuSection);
     setMenuIcon(inferred.suggestedIcon);
     setFormColumns(inferred.config.studio?.columns === 1 ? 1 : 2);
-
-    if (inferred.config.studio?.sections) {
-      setSections(inferred.config.studio.sections);
-    } else {
-      setSections([]);
-    }
 
     if (inferred.suggestedPipeline) {
       setEnablePipeline(true);
@@ -282,137 +388,181 @@ export function CollectionImportWizard({
     );
   };
 
-  // Submit / create collection & screen
+  const createCollection = async () => {
+    if (includedColumns.length === 0) {
+      throw new Error(
+        t("Debes incluir al menos un campo para crear la colección."),
+      );
+    }
+
+    // Build fields config
+    const fields: StudioObject["config"]["fields"] = {};
+    const fieldOrder: string[] = [];
+
+    for (const col of includedColumns) {
+      const config = { ...col.config };
+      const section = fieldSections.get(col.key);
+      if (section) config.section = section.id;
+      const formula = validFormulas.get(col.key);
+      if (formula) config.formula = formula;
+      else delete config.formula;
+      if (col.type !== "Dropdown") {
+        delete config.relation;
+        delete config.collectionRelation;
+      }
+      fields[col.key] = {
+        type: col.type,
+        label: col.label,
+        required: col.required,
+        ...(col.type === "Dropdown" && !col.relation && col.options?.length
+          ? { options: col.options }
+          : {}),
+        ...(Object.keys(config).length ? { config } : {}),
+      };
+      fieldOrder.push(col.key);
+    }
+
+    const studio: StudioConfig = {
+      screen: {
+        hidden: false,
+        section: menuSection,
+        icon: menuIcon,
+        createMode: formMode,
+        editMode: formMode,
+      },
+      columns: formColumns,
+      ...(sections.length > 0 ? { sections } : {}),
+      ...(enablePipeline && stageField
+        ? {
+            pipeline: {
+              field: stageField,
+              ...(amountField ? { amountField } : {}),
+            },
+          }
+        : {}),
+    };
+
+    const createdConfig = {
+      version: 2,
+      fields,
+      fieldOrder,
+      studio,
+    };
+    const res = await api<{ data: StudioObject }>("/objects", "POST", {
+      name: collectionName,
+      label: collectionLabel,
+      description: collectionDescription,
+      config: createdConfig,
+    });
+    return (
+      res?.data ?? {
+        name: collectionName,
+        label: collectionLabel,
+        description: collectionDescription,
+        config: createdConfig,
+      }
+    );
+  };
+
   const handleCreate = async () => {
     setBusy(true);
     setError("");
-    setImportProgress(0);
-    setStatusMessage(t("Creando colección y pantalla en Savia..."));
+    let collection = createdObject;
 
     try {
-      const includedColumns = columns.filter((c) => c.included);
-      if (includedColumns.length === 0) {
-        throw new Error(
-          t("Debes incluir al menos un campo para crear la colección."),
-        );
+      if (!collection) {
+        setStatusMessage(t("Creando colección y pantalla en Savia..."));
+        collection = await createCollection();
+        setCreatedObject(collection);
+      }
+      if (importOutcome) {
+        await onCreated(collection.name, collection);
+        return;
       }
 
-      // Build fields config
-      const fields: Record<string, any> = {};
-      const fieldOrder: string[] = [];
-
-      for (const col of includedColumns) {
-        fields[col.key] = {
-          type: col.type,
-          label: col.label,
-          required: col.required,
-          ...(col.options && col.options.length > 0
-            ? { options: col.options }
-            : {}),
-          ...(col.config ? { config: col.config } : {}),
-        };
-        fieldOrder.push(col.key);
-      }
-
-      const studio: StudioConfig = {
-        screen: {
-          hidden: false,
-          section: menuSection,
-          icon: menuIcon,
-          createMode: formMode,
-          editMode: formMode,
-        },
-        columns: formColumns,
-        ...(enableSections && sections.length > 0 ? { sections } : {}),
-        ...(enablePipeline && pipelineStageField
-          ? {
-              pipeline: {
-                field: pipelineStageField,
-                ...(pipelineAmountField
-                  ? { amountField: pipelineAmountField }
-                  : {}),
-              },
-            }
-          : {}),
-      };
-
-      const createdConfig = {
-        version: 2,
-        fields,
-        fieldOrder,
-        studio,
-      };
-      const res = await api<{ data: StudioObject }>("/objects", "POST", {
-        name: collectionName,
-        label: collectionLabel,
-        description: collectionDescription,
-        config: createdConfig,
-      });
-      const createdObject: StudioObject = res?.data ?? {
-        name: collectionName,
-        label: collectionLabel,
-        description: collectionDescription,
-        config: createdConfig,
-      };
-
-      // 2. Import Initial Data with Chunked Sequential Batching (> 1,000 rows)
       if (importRows && spreadsheet && spreadsheet.rows.length > 0) {
-        const BATCH_SIZE = 1000;
-        const allRows = spreadsheet.rows;
-        const totalBatches = Math.ceil(allRows.length / BATCH_SIZE);
-
-        const mapping: Record<string, string> = {};
-        for (const col of includedColumns) {
-          mapping[col.originalHeader] = col.key;
-        }
-
-        for (let b = 0; b < totalBatches; b++) {
-          const startIdx = b * BATCH_SIZE;
-          const endIdx = Math.min(startIdx + BATCH_SIZE, allRows.length);
-          const chunk = allRows.slice(startIdx, endIdx);
+        const mapping = Object.fromEntries(
+          includedColumns.map(({ originalHeader, key }) => [
+            originalHeader,
+            key,
+          ]),
+        );
+        const checkpoint = importCheckpoint.current;
+        const importPath = `/import/${encodeURIComponent(collection.name)}`;
+        const batches = importPlan?.batches ?? [];
+        for (let b = checkpoint.nextBatch; b < batches.length; b++) {
+          const { csv, count, through } = batches[b];
           const currentBatch = b + 1;
 
-          setImportProgress(Math.round((b / totalBatches) * 100));
+          setImportProgress(
+            Math.round(((through - count) / plannedRecords) * 100),
+          );
           setStatusMessage(
-            totalBatches > 1
+            batches.length > 1
               ? t(
                   "Importando lote %{v1} de %{v2} (%{v3} de %{v4} registros)...",
                   {
                     v1: currentBatch,
-                    v2: totalBatches,
-                    v3: endIdx,
-                    v4: allRows.length,
+                    v2: batches.length,
+                    v3: through,
+                    v4: plannedRecords,
                   },
                 )
               : t("Importando %{v1} registros en %{v2}...", {
-                  v1: chunk.length,
+                  v1: count,
                   v2: collectionLabel,
                 }),
           );
 
-          const csvPayload =
-            "\uFEFF" +
-            csvLine(spreadsheet.headers) +
-            chunk.map((r) => csvLine(r)).join("");
-
-          const previewRes = await api<{ importId: string }>(
-            `/import/${collectionName}/preview`,
-            "POST",
-            {
-              csv: csvPayload,
-              mapping,
-            },
-          );
-
-          if (previewRes?.importId) {
-            await api(`/import/${collectionName}/commit`, "POST", {
-              csv: csvPayload,
-              mapping,
-              importId: previewRes.importId,
-            });
+          if (!checkpoint.importId) {
+            const preview = await api<{ importId: string }>(
+              `${importPath}/preview`,
+              "POST",
+              { csv, mapping },
+            );
+            if (!preview?.importId)
+              throw new Error(t("No se pudo validar el lote de importación."));
+            checkpoint.importId = preview.importId;
           }
+          const confirmed = await api<ImportBatchResult>(
+            `${importPath}/commit`,
+            "POST",
+            { csv, mapping, importId: checkpoint.importId },
+          );
+          const counts = confirmed?.summary;
+          if (
+            !counts ||
+            ![counts.created, counts.skipped, counts.errors].every(
+              (count) => Number.isInteger(count) && count >= 0,
+            ) ||
+            !Array.isArray(confirmed.data)
+          )
+            throw new Error(t("No se pudo confirmar el resultado del lote."));
+          const previous = checkpoint.outcome;
+          checkpoint.outcome = {
+            created: previous.created + counts.created,
+            skipped: previous.skipped + counts.skipped,
+            errors: previous.errors + counts.errors,
+            firstError:
+              previous.firstError ??
+              confirmed.data.find((row) => row.status === "error" && row.error)
+                ?.error,
+          };
+          checkpoint.nextBatch = b + 1;
+          checkpoint.importId = undefined;
         }
         setImportProgress(100);
+        const { outcome } = checkpoint;
+        const oversized = importPlan?.oversized ?? 0;
+        if (omittedRows || outcome.skipped || outcome.errors || oversized) {
+          setImportOutcome({
+            ...outcome,
+            skipped: outcome.skipped + omittedRows,
+            errors: outcome.errors + oversized,
+            firstError: oversizedMessage ?? outcome.firstError,
+          });
+          return;
+        }
       }
 
       toast.success(
@@ -420,10 +570,15 @@ export function CollectionImportWizard({
           v1: collectionLabel,
         }),
       );
-      await onCreated(collectionName, createdObject);
+      await onCreated(collection.name, collection);
     } catch (e) {
       setError(
-        (e as Error).message || t("Ocurrió un error al crear la colección."),
+        (e as Error).message ||
+          t(
+            collection
+              ? "No se pudo continuar la importación."
+              : "Ocurrió un error al crear la colección.",
+          ),
       );
     } finally {
       setBusy(false);
@@ -512,7 +667,10 @@ export function CollectionImportWizard({
 
         <div className="import-wizard-body">
           {error && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm flex items-center gap-2">
+            <div
+              role="alert"
+              className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm flex items-center gap-2"
+            >
               <AlertCircle size={16} />
               <span>{error}</span>
             </div>
@@ -575,12 +733,16 @@ export function CollectionImportWizard({
                             {spreadsheet.headers.length}{" "}
                             {t("columnas detectadas")}
                           </span>
-                          {spreadsheet.totalRowsCount > 1000 && (
+                          {spreadsheet.totalRowsCount > CSV_IMPORT_MAX_ROWS && (
                             <>
                               <span>•</span>
                               <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded text-xs border border-amber-200 font-medium">
-                                {Math.ceil(spreadsheet.totalRowsCount / 1000)}{" "}
-                                {t("lotes automáticos")}
+                                {t("Al menos %{v1} lotes automáticos", {
+                                  v1: Math.ceil(
+                                    spreadsheet.totalRowsCount /
+                                      CSV_IMPORT_MAX_ROWS,
+                                  ),
+                                })}
                               </span>
                             </>
                           )}
@@ -591,7 +753,12 @@ export function CollectionImportWizard({
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setSpreadsheet(null)}
+                      disabled={parsing}
+                      onClick={() => {
+                        spreadsheetFile.current = null;
+                        setSpreadsheet(null);
+                        setError("");
+                      }}
                     >
                       {t("Cambiar archivo")}
                     </Button>
@@ -600,7 +767,10 @@ export function CollectionImportWizard({
                   {spreadsheet.sheetNames.length > 1 && (
                     <div className="wizard-card-option">
                       <div>
-                        <Label className="font-semibold text-sm">
+                        <Label
+                          htmlFor="spreadsheet-sheet"
+                          className="font-semibold text-sm"
+                        >
                           {t("Hoja de cálculo activa")}
                         </Label>
                         <p className="text-xs text-muted-foreground">
@@ -610,9 +780,14 @@ export function CollectionImportWizard({
                         </p>
                       </div>
                       <select
+                        id="spreadsheet-sheet"
                         className="border rounded p-1 text-sm bg-white"
-                        value={selectedSheet}
-                        onChange={(e) => handleSheetChange(e.target.value)}
+                        disabled={parsing}
+                        value={spreadsheet.selectedSheet}
+                        onChange={(e) => {
+                          const file = spreadsheetFile.current;
+                          if (file) void readSpreadsheet(file, e.target.value);
+                        }}
                       >
                         {spreadsheet.sheetNames.map((s) => (
                           <option key={s} value={s}>
@@ -783,19 +958,9 @@ export function CollectionImportWizard({
                   </p>
                 </div>
                 <Switch
+                  aria-label={t("Organizar campos en Secciones")}
                   checked={enableSections}
-                  onCheckedChange={(checked) => {
-                    setEnableSections(checked);
-                    if (spreadsheet) {
-                      processInferredSchema(
-                        spreadsheet,
-                        spreadsheet.fileName,
-                        selectedSheet,
-                        knownCollections,
-                        checked,
-                      );
-                    }
-                  }}
+                  onCheckedChange={setEnableSections}
                 />
               </div>
 
@@ -821,40 +986,38 @@ export function CollectionImportWizard({
               {enablePipeline && (
                 <div className="p-4 bg-white border border-border rounded-lg grid grid-cols-2 gap-4">
                   <div className="wizard-field">
-                    <Label>{t("Campo de etapa / estado")}</Label>
+                    <Label htmlFor="spreadsheet-pipeline-stage">
+                      {t("Campo de etapa / estado")}
+                    </Label>
                     <select
-                      value={pipelineStageField}
+                      id="spreadsheet-pipeline-stage"
+                      value={stageField}
                       onChange={(e) => setPipelineStageField(e.target.value)}
                     >
                       <option value="">{t("Selecciona campo...")}</option>
-                      {columns
-                        .filter(
-                          (c) => c.type === "Dropdown" || c.type === "Textbox",
-                        )
-                        .map((c) => (
-                          <option key={c.key} value={c.key}>
-                            {c.label} ({c.key})
-                          </option>
-                        ))}
+                      {stageColumns.map((c) => (
+                        <option key={c.key} value={c.key}>
+                          {c.label} ({c.key})
+                        </option>
+                      ))}
                     </select>
                   </div>
 
                   <div className="wizard-field">
-                    <Label>{t("Campo de importe (opcional)")}</Label>
+                    <Label htmlFor="spreadsheet-pipeline-amount">
+                      {t("Campo de importe (opcional)")}
+                    </Label>
                     <select
-                      value={pipelineAmountField}
+                      id="spreadsheet-pipeline-amount"
+                      value={amountField}
                       onChange={(e) => setPipelineAmountField(e.target.value)}
                     >
                       <option value="">{t("Ninguno")}</option>
-                      {columns
-                        .filter(
-                          (c) => c.type === "Currency" || c.type === "Number",
-                        )
-                        .map((c) => (
-                          <option key={c.key} value={c.key}>
-                            {c.label} ({c.key})
-                          </option>
-                        ))}
+                      {numericColumns.map((c) => (
+                        <option key={c.key} value={c.key}>
+                          {c.label} ({c.key})
+                        </option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -925,11 +1088,10 @@ export function CollectionImportWizard({
                               }}
                               className="h-8 text-xs font-medium"
                             />
-                            {enableSections && col.section && (
+                            {fieldSections.has(col.key) && (
                               <div className="mt-1">
                                 <span className="wizard-section-badge">
-                                  {sections.find((s) => s.id === col.section)
-                                    ?.label || col.section}
+                                  {fieldSections.get(col.key)?.label}
                                 </span>
                               </div>
                             )}
@@ -959,7 +1121,7 @@ export function CollectionImportWizard({
                                 ))}
                               </select>
 
-                              {col.formula && (
+                              {col.formula && validFormulas.has(col.key) && (
                                 <span
                                   className="wizard-formula-badge"
                                   title={t(
@@ -982,7 +1144,7 @@ export function CollectionImportWizard({
                                 </span>
                               )}
 
-                              {col.relation && (
+                              {col.relation && col.type === "Dropdown" && (
                                 <div className="flex items-center gap-1 mt-0.5">
                                   <span className="wizard-relation-badge">
                                     <Link2 size={11} /> {t("Relación:")}
@@ -990,24 +1152,29 @@ export function CollectionImportWizard({
                                   <select
                                     className="text-[11px] h-6 border rounded px-1 bg-white max-w-[130px]"
                                     value={col.relation?.targetObject || ""}
+                                    disabled={!col.included}
                                     onChange={(e) => {
                                       const target = e.target.value;
                                       const next = [...columns];
+                                      const config = { ...col.config };
                                       if (!target) {
-                                        delete next[index].relation;
-                                        delete next[index].config?.relation;
-                                        delete next[index].config
-                                          ?.collectionRelation;
+                                        delete config.relation;
+                                        delete config.collectionRelation;
                                       } else {
-                                        next[index].relation = {
-                                          targetObject: target,
-                                        };
-                                        next[index].config = {
-                                          ...next[index].config,
-                                          relation: target,
-                                          collectionRelation: "manual",
-                                        };
+                                        config.relation = target;
+                                        config.collectionRelation = "manual";
                                       }
+                                      next[index] = {
+                                        ...col,
+                                        type:
+                                          target || col.options?.length
+                                            ? "Dropdown"
+                                            : "Textbox",
+                                        relation: target
+                                          ? { targetObject: target }
+                                          : undefined,
+                                        config,
+                                      };
                                       setColumns(next);
                                     }}
                                   >
@@ -1103,11 +1270,10 @@ export function CollectionImportWizard({
                       {t("Campos")}
                     </div>
                     <div className="wizard-summary-metric-val">
-                      {columns.filter((c) => c.included).length}
+                      {includedColumns.length}
                     </div>
                     <span className="text-xs text-muted-foreground">
-                      {columns.filter((c) => !c.included).length}{" "}
-                      {t("excluidos")}
+                      {columns.length - includedColumns.length} {t("excluidos")}
                     </span>
                   </div>
 
@@ -1125,41 +1291,83 @@ export function CollectionImportWizard({
                 </div>
               </div>
 
-              {/* Data Import Toggle */}
-              <div className="wizard-card-option">
-                <div className="space-y-1">
-                  <Label className="font-semibold text-sm">
-                    {t("¿Importar los registros iniciales ahora?")}
-                  </Label>
-                  <p className="text-xs text-muted-foreground">
-                    {importRows
-                      ? t(
-                          "Se crearán %{v1} registros en la pantalla inmediatamente%{v2}",
-                          {
-                            v1: spreadsheet?.totalRowsCount ?? 0,
-                            v2:
-                              (spreadsheet?.totalRowsCount ?? 0) > 1000
-                                ? t(" (en %{v1} lotes secuenciales).", {
-                                    v1: Math.ceil(
-                                      (spreadsheet?.totalRowsCount ?? 0) / 1000,
-                                    ),
-                                  })
-                                : ".",
-                          },
-                        )
-                      : t(
-                          "Se creará la pantalla vacía, lista para capturar nuevos registros.",
-                        )}
-                  </p>
+              {importOutcome ? (
+                <div role="status" className="wizard-card-option">
+                  <div className="space-y-1">
+                    <p className="font-semibold text-sm">
+                      {t("Resultado de la importación")}
+                    </p>
+                    <p className="text-sm">
+                      {t(
+                        "%{created} importados · %{skipped} omitidos · %{errors} con errores",
+                        {
+                          created: importOutcome.created,
+                          skipped: importOutcome.skipped,
+                          errors: importOutcome.errors,
+                        },
+                      )}
+                    </p>
+                    {importOutcome.firstError && (
+                      <p className="text-sm text-muted-foreground">
+                        {importOutcome.firstError}
+                      </p>
+                    )}
+                  </div>
                 </div>
-                <Switch
-                  checked={importRows}
-                  onCheckedChange={setImportRows}
-                  disabled={busy}
-                />
-              </div>
+              ) : (
+                <div className="wizard-card-option">
+                  <div className="space-y-1">
+                    <Label className="font-semibold text-sm">
+                      {t("¿Importar los registros iniciales ahora?")}
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      {plannedRecords > 0
+                        ? t(
+                            "Se crearán %{v1} registros en la pantalla inmediatamente%{v2}",
+                            {
+                              v1: plannedRecords,
+                              v2:
+                                totalBatches > 1
+                                  ? t(" (en %{v1} lotes secuenciales).", {
+                                      v1: totalBatches,
+                                    })
+                                  : ".",
+                            },
+                          )
+                        : t(
+                            "Se creará la pantalla vacía, lista para capturar nuevos registros.",
+                          )}
+                    </p>
+                    {importRows && omittedRows > 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        {t(
+                          "Se omitirán las filas sin datos en los campos seleccionados (%{v1}).",
+                          {
+                            v1: omittedRows,
+                          },
+                        )}
+                      </p>
+                    )}
+                    {oversizedMessage && (
+                      <p className="text-xs text-muted-foreground">
+                        {t(
+                          "Registros que exceden el tamaño máximo por lote (%{v1}).",
+                          {
+                            v1: importPlan?.oversized ?? 0,
+                          },
+                        )}
+                      </p>
+                    )}
+                  </div>
+                  <Switch
+                    checked={importRows}
+                    onCheckedChange={setImportRows}
+                    disabled={busy || Boolean(createdObject)}
+                  />
+                </div>
+              )}
 
-              {busy && (
+              {busy && !importOutcome && (
                 <div className="flex flex-col gap-3 p-4 bg-emerald-50/90 border border-emerald-200 rounded-lg text-emerald-900">
                   <div className="flex items-center gap-3">
                     <LoaderCircle
@@ -1174,7 +1382,7 @@ export function CollectionImportWizard({
                     </div>
                   </div>
 
-                  {spreadsheet && spreadsheet.rows.length > 0 && importRows && (
+                  {plannedRecords > 0 && (
                     <div className="wizard-progress-box mt-2">
                       <div className="wizard-progress-header">
                         <span>{t("Progreso de importación")}</span>
@@ -1207,7 +1415,7 @@ export function CollectionImportWizard({
                   else if (step === "fields") setStep("screen");
                   else if (step === "confirm") setStep("fields");
                 }}
-                disabled={busy}
+                disabled={busy || Boolean(createdObject)}
                 className="gap-2"
               >
                 <ArrowLeft size={16} />
@@ -1256,7 +1464,7 @@ export function CollectionImportWizard({
             {step === "fields" && (
               <Button
                 className="wizard-button-primary gap-2"
-                disabled={columns.filter((c) => c.included).length === 0}
+                disabled={includedColumns.length === 0}
                 onClick={() => setStep("confirm")}
               >
                 {t("Confirmar e Importar")}
@@ -1278,11 +1486,15 @@ export function CollectionImportWizard({
                 ) : (
                   <>
                     <Sparkles size={16} />
-                    {importRows
-                      ? t("Crear e Importar %{v1} registros", {
-                          v1: spreadsheet?.totalRowsCount ?? 0,
-                        })
-                      : t("Crear Colección y Pantalla")}
+                    {importOutcome
+                      ? t("Abrir pantalla")
+                      : createdObject
+                        ? t("Reanudar importación")
+                        : plannedRecords > 0
+                          ? t("Crear e Importar %{v1} registros", {
+                              v1: plannedRecords,
+                            })
+                          : t("Crear Colección y Pantalla")}
                   </>
                 )}
               </Button>

@@ -4,14 +4,21 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./combined-app";
+import { createApiShell } from "../src/api-shell";
+import { betterAuthUserAdministrator } from "../src/auth/better-auth";
 import { authenticationMiddleware } from "../src/auth/middleware";
 import { registerIdentityRoutes } from "../src/routes/identity";
 import {
+  deletePrincipal,
   ensureBootstrapAdministrator,
   findPrincipalBySubject,
+  grantMembership,
+  setPlatformAdministrator,
   upsertPrincipal,
   setPrincipalActive,
 } from "../src/auth/identity-repository";
+import { AuthenticationError } from "../src/auth/types";
+import { beginPrincipalDeletion } from "../src/auth/tenant-membership-invariants";
 import {
   createOAuthResourceAuthenticator,
   serviceBoundOAuthAccessTokenVerifier,
@@ -309,6 +316,316 @@ function identityUserAdministrator(
 }
 
 describe("Identity and access", () => {
+  it("requires a new MFA-backed sign-in after promoting a tenant member", async () => {
+    await seedAgency(101);
+    const member = await upsertPrincipal(env.DB, {
+      issuer: "savia:better-auth",
+      subject: "promoted-member",
+      email: "promoted-member@example.test",
+      displayName: "Promoted member",
+    });
+    const peer = await upsertPrincipal(env.DB, {
+      issuer: "savia:better-auth",
+      subject: "promoted-member-peer",
+      email: "promoted-member-peer@example.test",
+      displayName: "Peer",
+    });
+    await grantMembership(env.DB, member.id, 101, "viewer");
+    await grantMembership(env.DB, peer.id, 101, "viewer");
+    const oldSessionStartedAt = Date.now() - 60_000;
+    let claims = validOAuthClaims({
+      sub: member.subject,
+      "https://savia.hefesoft.com/email": member.email,
+      "https://savia.hefesoft.com/name": member.displayName,
+      "https://savia.hefesoft.com/roles": [],
+      "https://savia.hefesoft.com/two-factor-enabled": false,
+    });
+    const app = createApiShell(
+      env.DB,
+      undefined,
+      undefined,
+      createOAuthResourceAuthenticator({
+        issuer: oauthIssuer,
+        resource: oauthResource,
+        verifyAccessToken: async () => claims,
+      }),
+    );
+    registerIdentityRoutes(app, env.DB);
+    const identity = () => app.request(bearerRequest(oauthBearer));
+    expect((await identity()).status).toBe(200);
+    claims = {
+      ...claims,
+      "https://savia.hefesoft.com/roles": ["admin"],
+      "https://savia.hefesoft.com/two-factor-enabled": true,
+    };
+    // Auth may report the role before the API finishes assigning it.
+    expect(await (await identity()).json()).toMatchObject({
+      data: { attributes: { globalRoles: [] } },
+    });
+    await setPlatformAdministrator(env.DB, member.id, true);
+    expect((await identity()).status).toBe(401);
+
+    claims = {
+      ...claims,
+      "https://savia.hefesoft.com/two-factor-enabled": false,
+    };
+    expect((await identity()).status).toBe(401);
+
+    claims = {
+      ...claims,
+      "https://savia.hefesoft.com/two-factor-enabled": true,
+      "https://savia.hefesoft.com/session-created-at": oldSessionStartedAt,
+    };
+    expect((await identity()).status).toBe(401);
+
+    claims = {
+      ...claims,
+      "https://savia.hefesoft.com/roles": [],
+      "https://savia.hefesoft.com/two-factor-enabled": false,
+    };
+    expect((await identity()).status).toBe(401);
+
+    claims = {
+      ...claims,
+      "https://savia.hefesoft.com/roles": ["admin"],
+      "https://savia.hefesoft.com/two-factor-enabled": true,
+      "https://savia.hefesoft.com/session-created-at": Date.now() + 1,
+    };
+    const fresh = await identity();
+    expect(fresh.status, await fresh.clone().text()).toBe(200);
+    expect(await fresh.json()).toMatchObject({
+      data: { attributes: { globalRoles: ["platform_admin"] } },
+    });
+  });
+
+  it.each(["OAuth", "directory"])(
+    "preserves an explicit platform demotion when %s still reports the old role",
+    async (source) => {
+      await seedAgency(101);
+      await seedPlatformAdministratorForAccessControl();
+      const issuer = "savia:better-auth";
+      const principal = await upsertPrincipal(env.DB, {
+        issuer,
+        subject: "demoted-administrator",
+        email: "demoted-administrator@example.test",
+        displayName: "Demoted Administrator",
+      });
+      await ensureBootstrapAdministrator(env.DB, principal.id);
+      const peer = await upsertPrincipal(env.DB, {
+        issuer,
+        subject: "commercial-peer",
+        email: "commercial-peer@example.test",
+        displayName: "Commercial Peer",
+      });
+      await grantMembership(env.DB, peer.id, 101, "viewer");
+      const administrator = identityUserAdministrator({
+        async listUsers() {
+          return [
+            {
+              subject: principal.subject,
+              email: principal.email,
+              displayName: principal.displayName,
+              role: "admin",
+              isBanned: false,
+              twoFactorEnabled: true,
+            },
+          ];
+        },
+      });
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        platformAdministratorAuthenticator(),
+        administrator,
+      );
+      const changeRole = (body: object) =>
+        app.request(`/v1/identity/users/${principal.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const demoted = await changeRole({
+        platformAdmin: false,
+        membership: { tenantId: 101, role: "viewer" },
+      });
+      expect(demoted.status, await demoted.clone().text()).toBe(200);
+
+      const appWithOldToken = createApiShell(
+        env.DB,
+        undefined,
+        undefined,
+        oauthAuthenticator(
+          validOAuthClaims({
+            sub: principal.subject,
+            "https://savia.hefesoft.com/email": principal.email,
+            "https://savia.hefesoft.com/name": principal.displayName,
+          }),
+        ),
+      );
+      registerIdentityRoutes(appWithOldToken, env.DB, administrator);
+      const response =
+        source === "OAuth"
+          ? await appWithOldToken.request(bearerRequest(oauthBearer))
+          : await app.request("/v1/identity/users");
+      expect(response.status, await response.clone().text()).toBe(200);
+      const { data } = await response.json<{ data: unknown }>();
+      const identity = Array.isArray(data) ? data[0] : data;
+      expect(identity).toMatchObject({
+        id: principal.id,
+        attributes: { globalRoles: [] },
+        relationships: {
+          memberships: [
+            {
+              role: "viewer",
+              relationships: { tenant: { id: "101" } },
+            },
+          ],
+        },
+      });
+      expect(
+        (
+          await appWithOldToken.request("/v1/identity/users", {
+            headers: { authorization: `Bearer ${oauthBearer}` },
+          })
+        ).status,
+      ).toBe(403);
+
+      const promoted = await changeRole({ platformAdmin: true });
+      expect(promoted.status, await promoted.clone().text()).toBe(200);
+      expect(await promoted.json()).toMatchObject({
+        data: { attributes: { globalRoles: ["platform_admin"] } },
+      });
+    },
+  );
+
+  it.each(["OAuth token", "session lookup"])(
+    "does not restore a permanently deleted principal from an old %s",
+    async (credential) => {
+      const issuer = "savia:better-auth";
+      const account = await upsertPrincipal(env.DB, {
+        issuer,
+        subject: "removed-oauth-user",
+        email: "removed-oauth-user@example.test",
+        displayName: "Removed OAuth User",
+      });
+      await deletePrincipal(env.DB, account.id);
+      const authService = {
+        fetch: vi.fn(async (request: Request) => {
+          if (new URL(request.url).pathname === "/_internal/session")
+            return Response.json({
+              user: {
+                id: account.subject,
+                email: account.email,
+                name: account.displayName,
+                role: "user",
+                twoFactorEnabled: false,
+              },
+            });
+          return Response.json({ error: "User not found" }, { status: 404 });
+        }),
+      };
+      const app = createApiShell(
+        env.DB,
+        undefined,
+        authService,
+        oauthAuthenticator(
+          validOAuthClaims({
+            sub: account.subject,
+            "https://savia.hefesoft.com/email": account.email,
+            "https://savia.hefesoft.com/name": account.displayName,
+            "https://savia.hefesoft.com/roles": [],
+          }),
+        ),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        "local-directory-test",
+      );
+      registerIdentityRoutes(app, env.DB);
+
+      const response = await (credential === "OAuth token"
+        ? app.request(bearerRequest(oauthBearer))
+        : app.request("/v1/identity/me", {
+            headers: { cookie: "savia.session_token=fixture" },
+          }));
+      expect(response.status, await response.clone().text()).toBe(401);
+      expect(
+        await findPrincipalBySubject(env.DB, issuer, account.subject),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each(["active", "deleted during lookup"])(
+    "checks a new managed Auth account and only imports it when it is still %s",
+    async (state) => {
+      const issuer = "savia:better-auth";
+      const user = {
+        id: "fresh-directory-user",
+        email: "fresh-directory-user@example.test",
+        name: "Fresh Directory User",
+        role: "user",
+        isBanned: false,
+        twoFactorEnabled: false,
+      };
+      const fetch = vi.fn(async (request: Request) => {
+        expect(new URL(request.url).pathname).toBe(
+          `/_internal/users/${user.id}`,
+        );
+        expect(request.headers.get("x-savia-bridge-key")).toBe(
+          "local-directory-test",
+        );
+        if (state === "deleted during lookup") {
+          const imported = await upsertPrincipal(env.DB, {
+            issuer,
+            subject: user.id,
+            email: user.email,
+            displayName: user.name,
+          });
+          await deletePrincipal(env.DB, imported.id);
+        }
+        return Response.json({ user });
+      });
+      const app = createApiShell(
+        env.DB,
+        undefined,
+        { fetch },
+        oauthAuthenticator(
+          validOAuthClaims({
+            sub: user.id,
+            "https://savia.hefesoft.com/email": user.email,
+            "https://savia.hefesoft.com/name": user.name,
+            "https://savia.hefesoft.com/roles": [],
+          }),
+        ),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        "local-directory-test",
+      );
+      registerIdentityRoutes(app, env.DB);
+
+      const response = await app.request(bearerRequest(oauthBearer));
+      const saved = await findPrincipalBySubject(env.DB, issuer, user.id);
+      if (state === "active") {
+        expect(response.status, await response.clone().text()).toBe(200);
+        expect(saved).toMatchObject({
+          email: user.email,
+          displayName: user.name,
+        });
+        expect((await app.request(bearerRequest(oauthBearer))).status).toBe(
+          200,
+        );
+      } else {
+        expect(response.status, await response.clone().text()).toBe(401);
+        expect(saved).toBeUndefined();
+      }
+      expect(fetch).toHaveBeenCalledOnce();
+    },
+  );
+
   beforeAll(applyMigrations);
   beforeEach(async () => {
     await env.DB.prepare(
@@ -2011,6 +2328,109 @@ describe("Identity and access", () => {
     ).toEqual({ display_name: principal.displayName });
   });
 
+  it("restores the Auth role of a platform administrator when demotion loses its destination", async () => {
+    await seedAgency(101);
+    await seedPlatformAdministratorForAccessControl();
+    const principal = await upsertPrincipal(env.DB, {
+      issuer: "savia:better-auth",
+      subject: "rejected-platform-demotion",
+      email: "rejected-platform-demotion@example.test",
+      displayName: "Platform Rollback",
+    });
+    await setPlatformAdministrator(env.DB, principal.id, true);
+    const account = {
+      id: principal.subject,
+      email: principal.email,
+      name: principal.displayName,
+      role: "admin",
+      isBanned: false,
+      twoFactorEnabled: true,
+      tenantId: null as number | null,
+    };
+    const auth = betterAuthUserAdministrator(
+      {
+        async fetch(request) {
+          expect(request.method).toBe("PATCH");
+          const input = (await request.json()) as {
+            role: string;
+            tenantId: number | null;
+          };
+          // Auth uses null for the platform and accepts only positive tenant IDs.
+          if (input.tenantId !== null && input.tenantId < 1)
+            return Response.json(
+              { error: { code: "VALIDATION_ERROR" } },
+              { status: 400 },
+            );
+          Object.assign(account, input);
+          if (input.tenantId === 101)
+            await env.DB.prepare(
+              "UPDATE tenants SET is_active=0 WHERE id=101",
+            ).run();
+          return Response.json({ user: account });
+        },
+      },
+      "synthetic-auth-bridge",
+    );
+    const app = createApp(
+      env.DB,
+      env.DOCUMENTS,
+      undefined,
+      platformAdministratorAuthenticator(),
+      auth,
+    );
+
+    const response = await app.request(`/v1/identity/users/${principal.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        platformAdmin: false,
+        membership: { tenantId: 101, role: "viewer" },
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { code: "COMMERCIAL_TENANT_REQUIRED" },
+    });
+    expect(account).toMatchObject({ role: "admin", tenantId: null });
+    expect(
+      await env.DB.prepare(
+        "SELECT tenant_id FROM identity_tenant_membership WHERE principal_id=?",
+      )
+        .bind(principal.id)
+        .first(),
+    ).toEqual({ tenant_id: 0 });
+  });
+
+  it("does not update Auth when a user membership is unchanged by DELETE", async () => {
+    await seedAgency(101);
+    await seedAgency(202);
+    const principal = await upsertPrincipal(env.DB, {
+      issuer: "savia:better-auth",
+      subject: "membership-delete-noop",
+      email: "membership-delete-noop@example.test",
+      displayName: "Existing Member",
+    });
+    await grantMembership(env.DB, principal.id, 101, "viewer");
+    const administrator = identityUserAdministrator();
+    const updateUser = vi.spyOn(administrator, "updateUser");
+    const app = createApp(
+      env.DB,
+      env.DOCUMENTS,
+      undefined,
+      platformAdministratorAuthenticator(),
+      administrator,
+    );
+    const path = `/v1/identity/users/${principal.id}/memberships/`;
+    expect((await app.request(path + "101", { method: "DELETE" })).status).toBe(
+      409,
+    );
+    expect((await app.request(path + "202", { method: "DELETE" })).status).toBe(
+      204,
+    );
+    expect(updateUser).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["tenant", agencyAdministratorAuthenticator],
     ["platform", platformAdministratorAuthenticator],
@@ -2636,6 +3056,293 @@ describe("Identity and access", () => {
         principal.subject,
         expect.objectContaining({ displayName: expected }),
         expect.any(Request),
+      );
+    },
+  );
+
+  it("keeps a member active when a transfer arrives while Auth deletes another user", async () => {
+    await seedAgency(101);
+    await seedAgency(102);
+    const issuer = "savia:better-auth";
+    const departing = await upsertPrincipal(env.DB, {
+      issuer,
+      subject: "departure",
+      email: "departure@example.test",
+      displayName: "Departure",
+    });
+    const staying = await upsertPrincipal(env.DB, {
+      issuer,
+      subject: "stays",
+      email: "stays@example.test",
+      displayName: "Remaining Member",
+    });
+    await grantMembership(env.DB, departing.id, 101, "viewer");
+    await grantMembership(env.DB, staying.id, 101, "viewer");
+    let transfer: PromiseSettledResult<unknown> | undefined;
+    const administrator = identityUserAdministrator({
+      async deleteUser() {
+        [transfer] = await Promise.allSettled([
+          grantMembership(env.DB, staying.id, 102, "viewer"),
+        ]);
+      },
+    });
+    const app = createApp(
+      env.DB,
+      env.DOCUMENTS,
+      undefined,
+      platformAdministratorAuthenticator(),
+      administrator,
+    );
+    const deleted = await app.request(`/v1/identity/users/${departing.id}`, {
+      method: "DELETE",
+    });
+    expect(deleted.status, await deleted.clone().text()).toBe(204);
+    expect(transfer).toMatchObject({
+      status: "rejected",
+      reason: { code: "LAST_ACTIVE_MEMBER" },
+    });
+    expect(
+      await env.DB.prepare(
+        "SELECT tenant_id FROM identity_tenant_membership WHERE principal_id=?",
+      )
+        .bind(staying.id)
+        .first("tenant_id"),
+    ).toBe(101);
+  });
+
+  it("keeps a pending user disabled after an Auth error and permits retrying deletion", async () => {
+    await seedAgency(101);
+    await seedAgency(102);
+    const issuer = "savia:better-auth";
+    const departing = await upsertPrincipal(env.DB, {
+      issuer,
+      subject: "pending",
+      email: "pending@example.test",
+      displayName: "Pending Deletion",
+    });
+    const staying = await upsertPrincipal(env.DB, {
+      issuer,
+      subject: "other",
+      email: "other@example.test",
+      displayName: "Remaining Member",
+    });
+    await grantMembership(env.DB, departing.id, 101, "viewer");
+    await grantMembership(env.DB, staying.id, 101, "viewer");
+    const deleteUser = vi
+      .fn(async () => {})
+      .mockRejectedValueOnce(
+        new AuthenticationError(
+          "AUTHENTICATION_UNAVAILABLE",
+          "Auth did not respond",
+        ),
+      );
+    const administrator = identityUserAdministrator({ deleteUser });
+    const activate = vi.spyOn(administrator, "setAccountActive");
+    const app = createApp(
+      env.DB,
+      env.DOCUMENTS,
+      undefined,
+      platformAdministratorAuthenticator(),
+      administrator,
+    );
+    const url = `/v1/identity/users/${departing.id}`;
+    const initial = await app.request(url, { method: "DELETE" });
+    expect(initial.status).toBe(503);
+    expect(
+      await findPrincipalBySubject(env.DB, issuer, departing.subject),
+    ).toMatchObject({ isActive: false });
+    const reactivated = await app.request(`${url}/suspension`, {
+      method: "DELETE",
+    });
+    expect(reactivated.status).toBe(409);
+    expect(await reactivated.json()).toMatchObject({
+      error: { code: "IDENTITY_DELETION_IN_PROGRESS" },
+    });
+    expect(activate).not.toHaveBeenCalled();
+    await expect(
+      grantMembership(env.DB, departing.id, 102, "operator"),
+    ).rejects.toMatchObject({ code: "IDENTITY_DELETION_IN_PROGRESS" });
+    const retried = await app.request(url, { method: "DELETE" });
+    expect(retried.status, await retried.clone().text()).toBe(204);
+    expect(deleteUser).toHaveBeenCalledTimes(2);
+    expect(
+      await findPrincipalBySubject(env.DB, issuer, departing.subject),
+    ).toBeUndefined();
+  });
+
+  it.each(["tenant", "platform"] as const)(
+    "does not restore a deleted user from a stale %s directory response",
+    async (scope) => {
+      await seedAgency(101);
+      const issuer = "savia:better-auth";
+      const departing = await upsertPrincipal(env.DB, {
+        issuer,
+        subject: "deleted-during-list",
+        email: "deleted-during-list@example.test",
+        displayName: "Deleted During List",
+      });
+      const staying = await upsertPrincipal(env.DB, {
+        issuer,
+        subject: "staying-during-list",
+        email: "staying-during-list@example.test",
+        displayName: "Staying During List",
+      });
+      await grantMembership(env.DB, departing.id, 101, "viewer");
+      await grantMembership(env.DB, staying.id, 101, "viewer");
+      const account = (principal: typeof departing) => ({
+        subject: principal.subject,
+        email: principal.email,
+        displayName: principal.displayName,
+        role: "user" as const,
+        isBanned: false,
+        twoFactorEnabled: false,
+      });
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const administrator = identityUserAdministrator({
+        async listUsers() {
+          if (removed) return [account(staying)];
+          entered.resolve();
+          await release.promise;
+          return [account(departing), account(staying)];
+        },
+        async getUser(subject) {
+          if (subject === departing.subject) {
+            entered.resolve();
+            await release.promise;
+            return account(departing);
+          }
+          return account(staying);
+        },
+      });
+      let removed = false;
+      vi.spyOn(administrator, "deleteUser").mockImplementation(async () => {
+        removed = true;
+      });
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        scope === "tenant"
+          ? agencyAdministratorAuthenticator()
+          : platformAdministratorAuthenticator(),
+        administrator,
+      );
+      const listing = app.request("/v1/identity/users");
+      await entered.promise;
+      try {
+        const deleted = await app.request(
+          `/v1/identity/users/${departing.id}`,
+          {
+            method: "DELETE",
+          },
+        );
+        expect(deleted.status, await deleted.clone().text()).toBe(204);
+      } finally {
+        release.resolve();
+      }
+      const response = await listing;
+      expect(response.status, await response.clone().text()).toBe(200);
+      expect(await response.json()).toEqual({
+        data: [expect.objectContaining({ id: staying.id })],
+      });
+      expect(
+        await findPrincipalBySubject(env.DB, issuer, departing.subject),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each(["tenant", "platform", "platform with an Auth account"] as const)(
+    "keeps a pending deletion visible to the %s administrator",
+    async (scope) => {
+      await seedAgency(101);
+      const issuer = "savia:better-auth";
+      const departing = await upsertPrincipal(env.DB, {
+        issuer,
+        subject: "pending-deletion",
+        email: "pending-deletion@example.test",
+        displayName: "Pending Deletion",
+      });
+      const staying = await upsertPrincipal(env.DB, {
+        issuer,
+        subject: "active-account",
+        email: "active-account@example.test",
+        displayName: "Active Account",
+      });
+      await grantMembership(env.DB, departing.id, 101, "viewer");
+      await grantMembership(env.DB, staying.id, 101, "viewer");
+      await beginPrincipalDeletion(env.DB, departing.id);
+      const activeAccount = {
+        subject: staying.subject,
+        email: staying.email,
+        displayName: staying.displayName,
+        role: "user" as const,
+        isBanned: false,
+        twoFactorEnabled: true,
+      };
+      const getUser = vi.fn(async (subject: string) => {
+        if (subject === staying.subject) return activeAccount;
+        throw new AuthenticationError(
+          "AUTHENTICATION_UNAVAILABLE",
+          "Auth account missing",
+        );
+      });
+      const administrator = identityUserAdministrator({
+        getUser,
+        async listUsers() {
+          return scope === "platform with an Auth account"
+            ? [
+                activeAccount,
+                {
+                  ...activeAccount,
+                  subject: departing.subject,
+                  email: departing.email,
+                  displayName: departing.displayName,
+                  role: "admin",
+                },
+              ]
+            : [activeAccount];
+        },
+      });
+      const app = createApp(
+        env.DB,
+        env.DOCUMENTS,
+        undefined,
+        scope === "tenant"
+          ? agencyAdministratorAuthenticator()
+          : platformAdministratorAuthenticator(),
+        administrator,
+      );
+      const pending = {
+        id: departing.id,
+        attributes: expect.objectContaining({
+          account: null,
+          deletionPending: true,
+          email: departing.email,
+          isActive: false,
+          globalRoles: [],
+        }),
+      };
+      const list = await app.request("/v1/identity/users");
+      expect(list.status, await list.clone().text()).toBe(200);
+      expect(await list.json()).toMatchObject({
+        data: expect.arrayContaining([
+          expect.objectContaining(pending),
+          expect.objectContaining({
+            id: staying.id,
+            attributes: expect.objectContaining({
+              account: expect.objectContaining({ twoFactorEnabled: true }),
+            }),
+          }),
+        ]),
+      });
+      const details = await app.request(`/v1/identity/users/${departing.id}`);
+      expect(details.status, await details.clone().text()).toBe(200);
+      expect(await details.json()).toMatchObject({
+        data: expect.objectContaining(pending),
+      });
+      expect(getUser.mock.calls.map(([subject]) => subject)).not.toContain(
+        departing.subject,
       );
     },
   );

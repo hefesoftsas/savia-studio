@@ -628,8 +628,6 @@ it("retains cleanup tracking when R2 stores an upload but its acknowledgement fa
   ).toBe(1);
 });
 it("preserves deletion tracking on cleanup failure and removes objects before deleting tenant rows", async () => {
-  const { deleteTenantBrandingAssets } =
-    await import("../src/tenant-branding/service");
   const t = await tenant();
   expect((await upload(app(member(t.id), env.DOCUMENTS), t.id)).status).toBe(
     201,
@@ -644,9 +642,14 @@ it("preserves deletion tracking on cleanup failure and removes objects before de
       throw Error("offline");
     },
   } as unknown as R2Bucket;
-  await expect(
-    deleteTenantBrandingAssets(env.DB, failed, t.id),
-  ).rejects.toThrow("Image cleanup failed");
+  const removeTenant = (documents: R2Bucket) =>
+    createTestApp({
+      auth: platformAdministratorAuthenticator(),
+      documents,
+    }).request(`https://api.test/v1/tenants/${t.id}`, { method: "DELETE" });
+  const failure = await removeTenant(failed);
+  expect(failure.status).toBe(503);
+  expect(await failure.text()).toContain("Image cleanup failed");
   expect(
     await env.DB.prepare(
       "SELECT state FROM tenant_branding_assets WHERE tenant_id=?",
@@ -659,7 +662,8 @@ it("preserves deletion tracking on cleanup failure and removes objects before de
       .bind(t.id)
       .first("is_active"),
   ).toBe(0);
-  await deleteTenantBrandingAssets(env.DB, env.DOCUMENTS, t.id);
+  const retry = await removeTenant(env.DOCUMENTS);
+  expect(retry.status, await retry.clone().text()).toBe(204);
   expect(await env.DOCUMENTS.get(key!)).toBe(null);
   expect(
     await env.DB.prepare(
@@ -670,7 +674,7 @@ it("preserves deletion tracking on cleanup failure and removes objects before de
   ).toBe(0);
 });
 it("blocks tenant deletion while an image upload is in flight", async () => {
-  const { deleteTenantBrandingAssets } =
+  const { deactivateTenantForDeletion } =
     await import("../src/tenant-branding/service");
   const t = await tenant();
   const id = crypto.randomUUID();
@@ -684,9 +688,9 @@ it("blocks tenant deletion while an image upload is in flight", async () => {
       new Date().toISOString(),
     )
     .run();
-  await expect(
-    deleteTenantBrandingAssets(env.DB, env.DOCUMENTS, t.id),
-  ).rejects.toThrow("upload is in progress");
+  await expect(deactivateTenantForDeletion(env.DB, t.id)).rejects.toThrow(
+    "upload is in progress",
+  );
   expect(
     await env.DB.prepare("SELECT is_active FROM tenants WHERE id=?")
       .bind(t.id)

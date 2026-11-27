@@ -29,6 +29,7 @@ export function RichTextValue({ value }: { value: unknown }) {
             href && /^(https?:|mailto:)/i.test(href) ? (
               <a
                 href={href}
+                target={/^mailto:/i.test(href) ? undefined : "_blank"}
                 rel="noopener noreferrer"
                 onClick={(event) => event.stopPropagation()}
               >

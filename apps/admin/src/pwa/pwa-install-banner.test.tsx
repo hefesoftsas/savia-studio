@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { I18nContextProvider } from "ra-core";
-import { i18nProvider } from "@/lib/i18nProvider";
+import { createAppI18nProvider, i18nProvider } from "@/lib/i18nProvider";
 import { PwaInstallBanner, PWA_BANNER_DISMISS_KEY } from "./pwa-install-banner";
 import * as pwaHook from "./use-pwa-install";
 
@@ -61,6 +61,27 @@ describe("PwaInstallBanner", () => {
       screen.getByText(/Instalar Savia en tu dispositivo/i),
     ).toBeInTheDocument();
   });
+
+  it.each([
+    ["en", "Install Savia on your device", "Quick access", "Not now"],
+    ["pt", "Instale o Savia no seu dispositivo", "Acesso rápido", "Agora não"],
+  ] as const)(
+    "translates the install notice to %s",
+    (locale, title, copy, dismiss) => {
+      mockPwaState();
+
+      render(
+        <I18nContextProvider value={createAppI18nProvider(locale)}>
+          <PwaInstallBanner />
+        </I18nContextProvider>,
+      );
+
+      expect(screen.getByRole("region", { name: title })).toHaveTextContent(
+        copy,
+      );
+      expect(screen.getByRole("button", { name: dismiss })).toBeVisible();
+    },
+  );
 
   it("calls native prompt when available", async () => {
     const mockPrompt = vi.fn().mockResolvedValue(true);

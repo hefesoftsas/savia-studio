@@ -1,14 +1,72 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ApiClient } from "@/api/api-client";
+import { REQUEST_TIMEOUT_MS, RequestTimeoutError } from "@/api/request-timeout";
 import {
   availablePluginWidgets,
   isPluginWidgetEnabled,
   parsePluginKind,
   pluginContributionFor,
+  pluginRequestFor,
   pluginWidgetTitle,
   storeWidgetContributions,
   storeWidgetFor,
 } from "./plugins";
 import { releaseCatalog } from "@savia/release-catalog";
+
+describe("pluginRequestFor", () => {
+  it.each([
+    { operation: "download", status: 200 },
+    { operation: "download", status: 503 },
+    { operation: "upload", status: 201 },
+  ])(
+    "stops an attachment $operation waiting for the HTTP $status body",
+    async ({ operation, status }) => {
+      vi.useFakeTimers();
+      const cancel = vi.fn();
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      const rejected = vi.fn();
+      try {
+        const response = new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller;
+              controller.enqueue(Uint8Array.of(1));
+            },
+            cancel,
+          }),
+          { status },
+        );
+        const api = new ApiClient({
+          baseUrl: "https://savia.example.test",
+          tokenSource: { getAccessToken: async () => null },
+          fetcher: async () => response,
+        });
+        const request = pluginRequestFor(api, "");
+        if (operation === "upload") {
+          const data = new FormData();
+          data.set("file", new File(["content"], "report.txt"));
+          void request("/files/reports/1", "POST", data).catch(rejected);
+        } else {
+          void request("/file/report/download", "GET", undefined, {
+            responseType: "blob",
+          }).catch(rejected);
+        }
+        await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
+        expect(rejected).toHaveBeenCalledWith(
+          status === 503
+            ? expect.objectContaining({ message: "Error 503" })
+            : expect.any(RequestTimeoutError),
+        );
+        expect(cancel).toHaveBeenCalledExactlyOnceWith(
+          expect.any(RequestTimeoutError),
+        );
+      } finally {
+        if (!cancel.mock.calls.length) stream?.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+});
 
 describe("parsePluginKind", () => {
   it("parses dotted extension ids", () => {

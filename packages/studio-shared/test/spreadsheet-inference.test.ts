@@ -5,6 +5,7 @@ import {
   inferSpreadsheetSchema,
 } from "../src/spreadsheet-inference";
 import { objectSchema } from "../src/metadata";
+import { prepareRecord } from "../src/rules";
 
 describe("spreadsheet-inference", () => {
   describe("normalizeHeaderToIdentifier", () => {
@@ -64,6 +65,10 @@ describe("spreadsheet-inference", () => {
       const eurRes = detectColumnType(["150 €", "200.50 €"]);
       expect(eurRes.type).toBe("Currency");
       expect(eurRes.config?.currency).toBe("EUR");
+
+      const mxnRes = detectColumnType(["MXN 1.500,00", "2,300.50 MXN"]);
+      expect(mxnRes.type).toBe("Currency");
+      expect(mxnRes.config?.currency).toBe("MXN");
     });
 
     it("detects numbers and integers", () => {
@@ -74,6 +79,7 @@ describe("spreadsheet-inference", () => {
       const decRes = detectColumnType(["12.5", "14.8", "20.1"]);
       expect(decRes.type).toBe("Number");
       expect(decRes.config?.integer).toBe(false);
+      expect(detectColumnType(["1.500,00", "1,900.75"]).type).toBe("Number");
     });
 
     it("detects currency when header implies amount/price", () => {
@@ -219,6 +225,60 @@ describe("spreadsheet-inference", () => {
       });
     });
 
+    it("keeps subtraction operands in the order that reproduces the source balance", () => {
+      const schema = inferSpreadsheetSchema({
+        headers: ["Saldo", "Abono", "Total"],
+        rows: [
+          [80, 20, 100],
+          [210, 40, 250],
+          [150, 50, 200],
+        ],
+      });
+
+      expect(schema.config.fields.saldo?.config?.formula).toEqual({
+        op: "difference",
+        fields: ["total", "abono"],
+      });
+      expect(
+        prepareRecord(
+          {
+            name: "import",
+            label: "Import",
+            description: "",
+            config: schema.config,
+          },
+          { saldo: 80, abono: 20, total: 100 },
+        ).saldo,
+      ).toBe(80);
+    });
+
+    it("keeps the original values when subtraction changes direction between rows", () => {
+      const schema = inferSpreadsheetSchema({
+        headers: ["Saldo", "Abono", "Total"],
+        rows: [
+          [80, 20, 100],
+          [210, 250, 40],
+          [150, 50, 200],
+        ],
+      });
+
+      expect(schema.config.fields.saldo?.config?.formula).toBeUndefined();
+    });
+
+    it("does not calculate a field when later rows disagree with the sample", () => {
+      const rows = Array.from({ length: 52 }, (_, index) => {
+        const quantity = index + 2;
+        const unitPrice = index + 31;
+        const correction = index === 51 ? 1 : 0;
+        return [quantity, unitPrice, quantity * unitPrice + correction];
+      });
+      const schema = inferSpreadsheetSchema({
+        headers: ["Cantidad", "Precio Unitario", "Total"],
+        rows,
+      });
+      expect(schema.config.fields.total?.config?.formula).toBeUndefined();
+    });
+
     it("detects foreign key relations when column matches known collection", () => {
       const headers = ["ID Contrato", "Cliente ID", "Valor"];
       const rows = [
@@ -243,12 +303,20 @@ describe("spreadsheet-inference", () => {
         targetObject: "clientes",
         label: "Clientes Declarados",
       });
+      expect(schema.config.fields.cliente_id?.type).toBe("Dropdown");
       expect(schema.config.fields.cliente_id?.config).toEqual(
         expect.objectContaining({
           relation: "clientes",
           collectionRelation: "manual",
         }),
       );
+      expect(
+        objectSchema.safeParse({
+          name: schema.collectionName,
+          label: schema.collectionLabel,
+          config: schema.config,
+        }).success,
+      ).toBe(true);
     });
 
     it("generates form sections when column count exceeds threshold", () => {

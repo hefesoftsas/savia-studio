@@ -70,6 +70,7 @@ export const collectionCapabilitiesSchema = z.object({
   create: z.boolean(),
   update: z.boolean(),
   delete: z.boolean(),
+  restore: z.boolean().optional(),
   schema: z.boolean(),
   customFields: z.boolean(),
 });
@@ -144,6 +145,13 @@ export type StudioObject = {
   /** Exportable fields for the current principal. An empty list denies CSV. */
   exportFields?: string[];
 };
+
+/** Whether Studio stores the collection's records directly. */
+export function usesNativeRecordStorage(object: StudioObject): boolean {
+  const studio = object.config.studio;
+  return !studio?.collection && !studio?.business;
+}
+
 export type StudioRecord = {
   id: string;
   created_at: string;
@@ -151,6 +159,7 @@ export type StudioRecord = {
   _version?: number;
   [key: string]: unknown;
 };
+export const MAX_BULK_RECORDS = 200;
 export {
   fieldLabelLocales,
   fieldLabelsSchema,
@@ -163,6 +172,16 @@ export {
 export const identifier = z
   .string()
   .regex(/^[a-z][a-z0-9_]{0,47}$/, "Usa minúsculas, números y guion bajo.");
+export const reservedRecordFields: ReadonlySet<string> = new Set([
+  "id",
+  "created_at",
+  "updated_at",
+  "deleted_at",
+  "version",
+  "constructor",
+  "prototype",
+  "_version",
+]);
 export const R2_ATTACHMENT_TYPE = "R2Attachment" as const;
 export const FORM_HTML_TYPE = "FormHtml" as const;
 export const DISPLAY_TEXT_TYPE = "DisplayText" as const;
@@ -511,16 +530,7 @@ export const configSchema = z
     if (
       names.some(
         (n) =>
-          [
-            "id",
-            "created_at",
-            "updated_at",
-            "deleted_at",
-            "version",
-            "constructor",
-            "prototype",
-            "_version",
-          ].includes(n) &&
+          reservedRecordFields.has(n) &&
           // Postgres externo: la PK suele llamarse `id` y coincide con el
           // identificador del sobre (solo lectura, sin escrituras locales).
           !(

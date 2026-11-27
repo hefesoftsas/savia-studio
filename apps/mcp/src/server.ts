@@ -327,6 +327,14 @@ export function createSaviaMcpServer(
         object: studioObject,
         page: z.number().int().min(1).default(1),
         perPage: z.number().int().min(1).max(100).default(25),
+        cursor: z
+          .string()
+          .min(1)
+          .max(4096)
+          .optional()
+          .describe(
+            "Use nextCursor from the previous page with the next page number and the same query, sort, filters, and page size.",
+          ),
         query: nonEmptyString
           .max(500)
           .optional()
@@ -372,10 +380,11 @@ export function createSaviaMcpServer(
           ),
       }),
     },
-    async ({ object, page, perPage, query, sort, order, filters }) =>
+    async ({ object, page, perPage, cursor, query, sort, order, filters }) =>
       clientForRequest().listStudioRecords(object, {
         page,
         perPage,
+        cursor,
         query,
         sort,
         order,

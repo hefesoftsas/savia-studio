@@ -449,3 +449,112 @@ it("keeps page visibility separate from authorized data reads", async () => {
     (await f.request("viewer", 101, base + "/records/acl_contacts")).status,
   ).toBe(200);
 });
+
+it("restores only readable rows without committing a rejected restore", async () => {
+  const admin = await f.actor("agency_admin");
+  const revision = (await loadAccessPolicy(f.db, admin, "tenant:101")).revision;
+  const role = await saveAccessRole(f.db, admin, {
+    scope: "tenant:101",
+    name: "trash-restorer",
+    label: "Trash restorer",
+    description: "",
+    enabled: true,
+    expectedRevision: revision,
+    grants: [
+      {
+        resource: "page:acl_contacts",
+        action: "read",
+        predicate: { all: true },
+        fields: [],
+      },
+      {
+        resource: "collection:acl_contacts",
+        action: "read",
+        predicate: { field: "commission", op: "lt", value: { literal: 150 } },
+        fields: ["name"],
+      },
+      {
+        resource: "collection:acl_contacts",
+        action: "restore",
+        predicate: { all: true },
+        fields: [],
+      },
+    ],
+  });
+  await replaceAccessAssignments(f.db, admin, {
+    scope: "tenant:101",
+    principalId: f.principalId("operator"),
+    roleIds: [role.id],
+    expectedRevision: role.revision,
+  });
+  const records = base + "/records/acl_contacts";
+  const json = (body: unknown) => ({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const inTrash = async (name: string, commission: number) => {
+    const created = await f.request(
+      "agency_admin",
+      101,
+      records,
+      json({ name, commission }),
+    );
+    expect(created.status).toBe(201);
+    const { data } = (await created.json()) as { data: { id: string } };
+    expect(
+      (
+        await f.request(
+          "agency_admin",
+          101,
+          `${records}/${data.id}?version=1`,
+          { method: "DELETE" },
+        )
+      ).status,
+    ).toBe(200);
+    return data.id;
+  };
+  const allowed = await inTrash("Readable", 100);
+  const denied = await inTrash("Restricted", 200);
+  const restore = (id: string) =>
+    f.request(
+      "operator",
+      101,
+      `${records}/${id}/restore`,
+      json({ version: 2 }),
+    );
+  expect((await restore(denied)).status).toBe(403);
+  expect(
+    await f.db
+      .prepare(
+        "SELECT deleted_at, version FROM studio_records WHERE tenant_id='tenant:101' AND id=?",
+      )
+      .bind(denied)
+      .first(),
+  ).toMatchObject({ deleted_at: expect.any(String), version: 2 });
+  const metadata = await f.request(
+    "operator",
+    101,
+    base + "/objects/acl_contacts",
+  );
+  expect(await metadata.json()).toMatchObject({
+    data: {
+      config: { studio: { capabilities: { delete: false, restore: true } } },
+    },
+  });
+  const trash = await f.request("operator", 101, records + "?trash=true");
+  expect(await trash.json()).toMatchObject({
+    data: [{ id: allowed, name: "Readable", _version: 2 }],
+    total: 1,
+  });
+  const restored = await restore(allowed);
+  expect(restored.status).toBe(200);
+  const { data } = (await restored.json()) as { data: unknown };
+  expect(data).toMatchObject({
+    id: allowed,
+    name: "Readable",
+    _version: 3,
+    deleted_at: null,
+  });
+  expect(data).not.toHaveProperty("commission");
+});

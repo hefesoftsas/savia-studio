@@ -5,7 +5,7 @@ import {
 } from "@/api/tenant-workspaces-client";
 
 export type StudioTenant = TenantWorkspace;
-export const STUDIO_TENANTS_CHANGED = "savia-studio-tenants-changed";
+export { STUDIO_TENANTS_CHANGED } from "@/api/tenant-workspaces-client";
 
 export function listStudioTenants(
   services: AppServices,

@@ -1,3 +1,4 @@
+import { isDnsOverHttpsRequest } from "./is-dns-over-https";
 import {
   acceptWorkflowWebhook,
   readWebhookJson,
@@ -40,7 +41,7 @@ export default {
       await processWorkflows(env.DB, async () => true, {
         webhooks: {
           fetcher: (async (url: RequestInfo | URL) => {
-            if (String(url).includes("cloudflare-dns.com"))
+            if (isDnsOverHttpsRequest(url))
               return Response.json({
                 Status: 0,
                 Answer: [{ type: 1, data: "93.184.216.34" }],

@@ -20,6 +20,7 @@ import {
 } from "react";
 import { Building2 } from "lucide-react";
 import {
+  type CoreLayoutProps,
   CustomRoutes,
   memoryStore,
   Resource,
@@ -28,17 +29,26 @@ import {
 } from "ra-core";
 import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import { createAdminQueryClient } from "./queries/query-policy";
-import { usePrincipalGeneration } from "./auth/session-scope";
+import {
+  usePrincipalGeneration,
+  useSessionGeneration,
+} from "./auth/session-scope";
+import { useSessionReadsPaused } from "./auth/logout-progress";
 import { OAuthCallbackError, type CallbackResult } from "./auth/auth-session";
-import { Navigate, Route } from "react-router-dom";
+import { Navigate, Route, useLocation } from "react-router-dom";
+import { readBookingRouteQuery } from "@savia/tenant-host/bookings-route";
 import { getDefaultAppServices, type AppServices } from "@/app-services";
 import { preloadRouteModules } from "@/route-preload";
 import { tenants } from "@/features/tenants";
 import { users } from "@/features/users";
 import { PasswordResetPage } from "@/features/users/password-reset-page";
-import { AppServicesProvider } from "@/features/assistant/assistant-context";
+import {
+  AppServicesProvider,
+  useAppServices,
+} from "@/features/assistant/assistant-context";
 import { ActiveScreenContextProvider } from "@/features/assistant/active-screen-context";
 import { Admin } from "@/components/admin";
+import { Layout } from "@/components/admin/layout";
 import { AppLocaleProvider } from "@/i18n/app-locale-provider";
 import { resolveInitialAppLocale } from "@/i18n/locale-storage";
 import { OfflineBanner } from "@/offline/offline-banner";
@@ -50,6 +60,7 @@ import { TenantHostMismatchError } from "@/components/admin/tenant-mismatch-erro
 import { useCurrentTenant } from "@/features/tenants/use-current-tenant";
 import { sharedLinkRouteAfterAuth } from "@/pwa/share-target";
 import { BookingWorkspacePicker } from "@/features/bookings/booking-workspace-picker";
+import { isBookingPlatformHost } from "@/features/bookings/booking-organization-link";
 
 const RolePages = lazy(async () => ({
   default: (await import("@/features/access-control/role-pages")).RolePages,
@@ -121,18 +132,34 @@ const BookingPage = lazy(() =>
 );
 
 function BookingRoute({ services }: { services: AppServices }) {
+  const readsPaused = useSessionReadsPaused();
+  const sessionGeneration = useSessionGeneration();
   const tenant = useCurrentTenant();
+  const { search } = useLocation();
+  const hostname = window.location.hostname;
+  if (readsPaused) return null;
   if (tenant.isLoading) return <RouteLoading />;
-  if (tenant.id === null)
+  const allowSameOriginSelection =
+    !tenant.isDedicated && !isBookingPlatformHost(hostname);
+  const tenantId =
+    tenant.id ??
+    (allowSameOriginSelection
+      ? readBookingRouteQuery(new URLSearchParams(search)).tenantId
+      : null);
+  if (tenantId === null)
     return (
       <BookingWorkspacePicker
         apiClient={services.apiClient}
-        hostname={window.location.hostname}
+        hostname={hostname}
       />
     );
   return (
     <Suspense fallback={<RouteLoading variant="cards" />}>
-      <BookingPage services={services} tenantId={tenant.id} />
+      <BookingPage
+        key={sessionGeneration}
+        services={services}
+        tenantId={tenantId}
+      />
     </Suspense>
   );
 }
@@ -318,6 +345,15 @@ function AuthLoadingFallback() {
   return <PwaSplash recoveryHref={getAdminAuthorizeUrl()} />;
 }
 
+function AuthenticatedLayout(props: CoreLayoutProps) {
+  const { apiClient } = useAppServices();
+  return (
+    <OfficeAvailabilityProvider apiClient={apiClient}>
+      <Layout {...props} />
+    </OfficeAvailabilityProvider>
+  );
+}
+
 export function App({ services }: { services?: AppServices } = {}) {
   const appServices = useMemo(
     () => services ?? getDefaultAppServices(),
@@ -422,7 +458,7 @@ function AppContent({
   }
 
   return (
-    <OfficeAvailabilityProvider apiClient={appServices.apiClient}>
+    <>
       <TenantTitleSync title={pageTitle} />
       <OfflineBanner />
       <Admin
@@ -430,6 +466,7 @@ function AppContent({
         dataProvider={appServices.dataProvider}
         disableTelemetry
         error={TenantHostMismatchError}
+        layout={AuthenticatedLayout}
         // Same branded splash as the boot sequence: cold start shows a
         // single continuous visual through the auth check.
         loading={AuthLoadingFallback}
@@ -563,7 +600,7 @@ function AppContent({
           />
         </CustomRoutes>
       </Admin>
-    </OfficeAvailabilityProvider>
+    </>
   );
 }
 

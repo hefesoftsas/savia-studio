@@ -1,55 +1,140 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("../", import.meta.url);
+const root = fileURLToPath(new URL("../", import.meta.url));
+const checkout = { cwd: root };
 const trackedFiles = execFileSync("git", ["ls-files", "-z"], {
-  cwd: root,
+  ...checkout,
   encoding: "utf8",
 })
   .split("\0")
   .filter(Boolean);
 
-const firstPartyPaths = trackedFiles.filter(
-  (path) =>
-    path.startsWith(".hosted-plugins/") ||
-    path.startsWith("integrations/bruno/") ||
-    path.startsWith("solutions/") ||
-    path.startsWith("deployment/plugins/"),
-);
-const examplePorts = new Set(["store-ports/http-echo/savia-extension.json"]);
-for (const path of trackedFiles.filter((path) =>
-  /^store-ports\/[^/]+\/savia-extension\.json$/.test(path),
-)) {
-  if (!examplePorts.has(path)) firstPartyPaths.push(path);
+function firstPartyPluginPaths(files) {
+  return files.filter(
+    (path) =>
+      path.startsWith(".hosted-plugins/") ||
+      path.startsWith("integrations/bruno/") ||
+      path.startsWith("solutions/") ||
+      path.startsWith("deployment/plugins/") ||
+      (/^store-ports\/[^/]+\//.test(path) &&
+        !path.startsWith("store-ports/http-echo/")) ||
+      /\.store\.zip(?:\.sha256)?$/i.test(path),
+  );
 }
 assert.deepEqual(
-  firstPartyPaths,
+  firstPartyPluginPaths([
+    "packages/plugin-sdk/src/index.ts",
+    "store-ports/README.md",
+    "store-ports/http-echo/entry.js",
+    "store-ports/http-echo/savia-extension.json",
+    "store-ports/internal-example/entry.js",
+    "store-ports/internal-example/assets/ui.js",
+    "artifacts/internal-example-1.0.0.store.zip",
+    "artifacts/internal-example-1.0.0.store.zip.sha256",
+  ]),
+  [
+    "store-ports/internal-example/entry.js",
+    "store-ports/internal-example/assets/ui.js",
+    "artifacts/internal-example-1.0.0.store.zip",
+    "artifacts/internal-example-1.0.0.store.zip.sha256",
+  ],
+  "release checks must catch packaged artifacts and incomplete store ports",
+);
+
+assert.deepEqual(
+  firstPartyPluginPaths(trackedFiles),
   [],
   "First-party plugin source and rollout files belong in the private repository",
 );
 
-assert.deepEqual(
-  JSON.parse(
-    readFileSync(
-      new URL("apps/savia-request/src/server/catalog.json", root),
-      "utf8",
+function locallyModifiedPaths(repository) {
+  return new Set(
+    execFileSync("git", ["diff", "--name-only", "--no-renames", "-z", "--"], {
+      ...repository,
+      encoding: "utf8",
+    })
+      .split("\0")
+      .filter(Boolean),
+  );
+}
+
+function candidateSnapshots(repository, path, modifiedPaths) {
+  let working;
+  try {
+    working = readFileSync(join(repository.cwd, path));
+  } catch {
+    // The staged file can still exist when the checkout copy is missing.
+  }
+  if (working && !modifiedPaths.has(path)) return [working];
+  const staged = execFileSync("git", ["cat-file", "blob", `:${path}`], {
+    ...repository,
+    maxBuffer: Infinity,
+  });
+  return working && !working.equals(staged) ? [staged, working] : [staged];
+}
+
+test("reads both the staged blob and the edited tracked file", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "savia-public-release-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const localGitOptions = new Set(
+    execFileSync("git", ["rev-parse", "--local-env-vars"], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n"),
+  );
+  const fixture = {
+    cwd: directory,
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !localGitOptions.has(key)),
     ),
-  ),
-  [],
-  "Hosted provider definitions are supplied only during deployment assembly",
-);
-assert.equal(
-  JSON.parse(
-    readFileSync(
-      new URL("apps/savia-request/src/server/seed.json", root),
-      "utf8",
+  };
+  execFileSync("git", ["init", "--quiet"], fixture);
+  const path = "example#draft.txt";
+  writeFileSync(join(directory, path), "staged fixture");
+  execFileSync("git", ["add", "--", path], fixture);
+  writeFileSync(join(directory, path), "working fixture");
+
+  assert.deepEqual(
+    candidateSnapshots(fixture, path, locallyModifiedPaths(fixture)).map(
+      (contents) => contents.toString("utf8"),
     ),
-  ),
-  null,
-  "Hosted provider seeds are supplied only during deployment assembly",
-);
+    ["staged fixture", "working fixture"],
+  );
+});
+
+function isEmptyProviderData(bytes, expectEmptyCatalog) {
+  try {
+    const value = JSON.parse(bytes.toString("utf8"));
+    return expectEmptyCatalog
+      ? Array.isArray(value) && value.length === 0
+      : value === null;
+  } catch {
+    return false;
+  }
+}
+
+const modifiedPaths = locallyModifiedPaths(checkout);
+for (const [file, emptyCatalog, label] of [
+  ["catalog.json", true, "definitions"],
+  ["seed.json", false, "seeds"],
+]) {
+  const path = `apps/savia-request/src/server/${file}`;
+  assert.ok(trackedFiles.includes(path), `Missing public stub ${path}`);
+  assert.ok(
+    candidateSnapshots(checkout, path, modifiedPaths).every((bytes) =>
+      isEmptyProviderData(bytes, emptyCatalog),
+    ),
+    `Hosted provider ${label} are supplied only during deployment assembly`,
+  );
+}
 
 const dumpExtensions =
   /\.(?:dump|bak|backup|sqlite|sqlite3|db|sql\.gz|dump\.gz|tar\.gz)$/i;
@@ -146,30 +231,23 @@ for (const [file, content] of [
   assert.ok(searchableWorkflowContent(file, content).includes(workflowKeyword));
 }
 
-const privateIdentifierFiles = [];
+const privateIdentifierFiles = new Set();
 const dumpFiles = trackedFiles.filter((file) => dumpExtensions.test(file));
-const registrationFiles = [];
-const privateKeyFiles = [];
+const registrationFiles = new Set();
+const privateKeyFiles = new Set();
 const localConfigFiles = trackedFiles.filter((file) =>
   /(?:^|\/)(?:\.env(?!\.example$)|\.dev\.vars|infra\/secrets\/|\.wrangler\/)|wrangler\.(?:production|preview)\.jsonc$/.test(
     file,
   ),
 );
 
-for (const file of trackedFiles) {
-  let bytes;
-  try {
-    bytes = readFileSync(new URL(`../${file}`, import.meta.url));
-  } catch {
-    continue;
-  }
-
+function scanFile(file, bytes) {
   const approvedHash = approvedVendorHashes.get(file);
   if (
     approvedHash &&
     createHash("sha256").update(bytes).digest("hex") === approvedHash
   )
-    continue;
+    return;
 
   const pathHasPrivateIdentifier = privateIdentifiers.some((value) =>
     file.toLowerCase().includes(value),
@@ -177,8 +255,8 @@ for (const file of trackedFiles) {
 
   // Binary media has arbitrary byte sequences and is not source text to scan.
   if (bytes.includes(0)) {
-    if (pathHasPrivateIdentifier) privateIdentifierFiles.push(file);
-    continue;
+    if (pathHasPrivateIdentifier) privateIdentifierFiles.add(file);
+    return;
   }
 
   const content = bytes.toString("utf8");
@@ -186,7 +264,7 @@ for (const file of trackedFiles) {
   if (
     /-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----/.test(content)
   )
-    privateKeyFiles.push(file);
+    privateKeyFiles.add(file);
 
   if (
     pathHasPrivateIdentifier ||
@@ -194,23 +272,32 @@ for (const file of trackedFiles) {
       searchableWorkflowContent(file, content).toLowerCase().includes(value),
     )
   ) {
-    privateIdentifierFiles.push(file);
+    privateIdentifierFiles.add(file);
   }
 
   const matches = [...content.matchAll(vehicleRegistration)]
     .map((match) => match[0])
     .filter((value) => !technicalIdentifiers.has(value));
-  if (matches.length) registrationFiles.push(file);
+  if (matches.length) registrationFiles.add(file);
+}
+
+for (const file of trackedFiles) {
+  for (const bytes of candidateSnapshots(checkout, file, modifiedPaths))
+    scanFile(file, bytes);
 }
 
 assert.deepEqual(dumpFiles, [], "tracked dump files must not be published");
 assert.deepEqual(
-  registrationFiles,
+  [...registrationFiles],
   [],
   "tracked source must not retain literal vehicle registration values",
 );
 
-assert.deepEqual(privateKeyFiles, [], "private keys must not be published");
+assert.deepEqual(
+  [...privateKeyFiles],
+  [],
+  "private keys must not be published",
+);
 assert.deepEqual(
   localConfigFiles,
   [],
@@ -218,7 +305,7 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
-  privateIdentifierFiles,
+  [...privateIdentifierFiles],
   [],
   "private identifiers must not be published",
 );

@@ -366,6 +366,22 @@ function pointer(document: Record<string, unknown>, path: string): unknown {
   }
   return value;
 }
+
+function consistentPageTotal(
+  total: number | undefined,
+  page: number,
+  perPage: number,
+  recordCount: number,
+  hasNext = false,
+): number | undefined {
+  // An empty page past the end can still return the correct total.
+  if (total === undefined || (recordCount === 0 && !hasNext)) return total;
+  const minimum = hasNext
+    ? page * perPage + 1
+    : (page - 1) * perPage + recordCount;
+  return total >= minimum ? total : undefined;
+}
+
 /** The collection gateway authorizes operation capabilities before invoking this adapter. */
 export async function executeJsonApi(
   input: JsonApiInput,
@@ -629,11 +645,20 @@ export async function executeJsonApi(
           "La respuesta no respeta la paginación configurada.",
           502,
         );
-      const total = endpoint.totalPointer
+      const reportedTotal = endpoint.totalPointer
         ? jsonPointer(document, endpoint.totalPointer)
         : undefined;
-      if (total !== undefined && (!Number.isSafeInteger(total) || total < 0))
+      if (
+        reportedTotal !== undefined &&
+        (!Number.isSafeInteger(reportedTotal) || reportedTotal < 0)
+      )
         fail("INVALID_RESPONSE", "Total inválido.", 502);
+      const total = consistentPageTotal(
+        reportedTotal,
+        page,
+        perPage,
+        raw.length,
+      );
       return {
         data: raw.map(convert),
         ...(total !== undefined ? { total } : {}),
@@ -675,12 +700,12 @@ export async function executeJsonApi(
         "El servicio no respetó la página JSON:API solicitada.",
         502,
       );
-    const total = input.source.totalPointer
+    const reportedTotal = input.source.totalPointer
       ? pointer(document, input.source.totalPointer)
       : undefined;
     if (
-      total !== undefined &&
-      (!Number.isSafeInteger(total) || Number(total) < 0)
+      reportedTotal !== undefined &&
+      (!Number.isSafeInteger(reportedTotal) || Number(reportedTotal) < 0)
     )
       fail("INVALID_RESPONSE", "El servicio devolvió un total inválido.", 502);
     const next =
@@ -698,15 +723,19 @@ export async function executeJsonApi(
         "El servicio devolvió un enlace de paginación inválido.",
         502,
       );
+    const hasNextLink = next === undefined ? null : next !== null;
+    const total = consistentPageTotal(
+      reportedTotal === undefined ? undefined : Number(reportedTotal),
+      page,
+      perPage,
+      document.data.length,
+      hasNextLink === true,
+    );
     const hasNext =
-      total !== undefined
-        ? page * perPage < Number(total)
-        : next === undefined
-          ? null
-          : next !== null;
+      hasNextLink ?? (total === undefined ? null : page * perPage < total);
     return {
       data: document.data.map(project),
-      ...(total === undefined ? {} : { total: Number(total) }),
+      ...(total === undefined ? {} : { total }),
       hasNext,
       page,
       perPage,

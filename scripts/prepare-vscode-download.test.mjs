@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { prepareVscodeDownload } from "./lib/prepare-vscode-download.mjs";
 
 test("all admin distribution builds prepare the VSIX through the common asset build", async () => {
@@ -19,8 +22,6 @@ test("all admin distribution builds prepare the VSIX through the common asset bu
       command.indexOf("build:downloads") < command.indexOf("vite build"),
     );
   }
-  assert.match(admin.scripts["build:downloads"], /@savia\/vscode build/);
-  assert.match(admin.scripts["build:downloads"], /@savia\/vscode package/);
   assert.match(
     admin.scripts["build:downloads"],
     /prepare-vscode-download\.mjs/,
@@ -39,6 +40,49 @@ test("all admin distribution builds prepare the VSIX through the common asset bu
     docker,
     /RUN pnpm --filter @savia\/admin exec vite build/,
   );
+});
+
+test("concurrent admin builds package and stage independent VSIX downloads", async (t) => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "savia-vsix-build-test-"),
+  );
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const script = fileURLToPath(
+    new URL("./prepare-vscode-download.mjs", import.meta.url),
+  );
+  const run = promisify(execFile);
+  const outputs = ["first", "second"].map((name) => path.join(root, name));
+  const results = await Promise.allSettled(
+    outputs.map((publicDirectory) =>
+      run(process.execPath, [script], {
+        env: {
+          ...process.env,
+          TMPDIR: root,
+          TEMP: root,
+          TMP: root,
+          SAVIA_ADMIN_PUBLIC_DIR: publicDirectory,
+        },
+      }),
+    ),
+  );
+  for (const result of results) {
+    if (result.status === "rejected") throw result.reason;
+  }
+  for (const publicDirectory of outputs) {
+    const downloads = path.join(publicDirectory, "downloads");
+    const files = await fs.readdir(downloads);
+    const vsix = files.find((entry) => entry.endsWith(".vsix"));
+    assert.match(vsix, /^savia-plugin-authoring-/);
+    assert.deepEqual(files.sort(), [vsix, `${vsix}.sha256`]);
+    const checksum = createHash("sha256")
+      .update(await fs.readFile(path.join(downloads, vsix)))
+      .digest("hex");
+    assert.equal(
+      await fs.readFile(path.join(downloads, `${vsix}.sha256`), "utf8"),
+      `${checksum} *${vsix}\n`,
+    );
+  }
+  assert.deepEqual((await fs.readdir(root)).sort(), ["first", "second"]);
 });
 
 async function fixture(t, { validChecksum = true, separator = " *" } = {}) {

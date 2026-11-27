@@ -6,7 +6,10 @@ import { useQuery, QueryClient } from "@tanstack/react-query";
 import type { ApiClient } from "@/api/api-client";
 import { createAdminQueryClient } from "@/queries/query-policy";
 import { readKey } from "@/queries/query-keys";
-import { isReadAccessDenied } from "@/queries/read-state";
+import {
+  isReadAccessDenied,
+  isReadAuthenticationRequired,
+} from "@/queries/read-state";
 import { useSessionGeneration } from "@/auth/session-scope";
 import { useOptionalAppServices } from "@/features/assistant/assistant-context";
 import { currentTenantQueryOptions } from "./current-tenant-query";
@@ -34,6 +37,7 @@ export type CurrentTenantInfo = {
   isLoading: boolean;
   scopeStatus?: "platform" | "loading" | "resolved" | "error" | "unavailable";
   scopeError?: string;
+  requiresSignIn?: boolean;
   retry?: () => void | Promise<unknown>;
 };
 
@@ -139,6 +143,7 @@ export function useCurrentTenant(options?: {
     ...(scopeStatus === "error"
       ? {
           scopeError: "Unable to resolve this tenant. Retry to try again.",
+          requiresSignIn: isReadAuthenticationRequired(tenantQuery.error),
           retry: () => tenantQuery.refetch(),
         }
       : {}),

@@ -94,6 +94,9 @@ even though the API listens on a different local port.
 
 Setting `SAVIA_FLOWS_ENABLED=0` skips Flows in the full local stack. Admin hides
 the Flows menu entry and shows an availability message for saved links.
+Preview builds without the embedded editor return HTTP 404 for its
+`/flows-ui/` shell and deep links. The gateway checks for the manifest emitted
+with the editor assets and serves the child shell from its directory URL.
 
 ## Persistence and recovery
 

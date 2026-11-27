@@ -6,12 +6,10 @@ import {
   normalizeCanonicalHost,
   normalizeTenantSlug,
   parseTenantSlugFromHostname,
+  TENANT_SLUG_HEADER,
 } from "@savia/tenant-host/tenant-host";
 import { actorFromContext } from "./middleware";
 import type { AppActor } from "./types";
-
-/** Set by the edge gateway; falls back to Host parsing when absent. */
-export const TENANT_SLUG_HEADER = "x-savia-tenant-slug";
 
 export const TENANT_HOST_MISMATCH = "TENANT_HOST_MISMATCH";
 

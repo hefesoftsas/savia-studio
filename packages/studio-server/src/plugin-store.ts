@@ -345,7 +345,13 @@ export async function persistParsedStoreArtifact(
   tenant: string,
   principalId: string | null,
   parsed: ParsedStoreZip,
-  guardedWrite?: { start: D1PreparedStatement[]; end: D1PreparedStatement[] },
+  {
+    guardedWrite,
+    requireSameDigest,
+  }: {
+    guardedWrite?: { start: D1PreparedStatement[]; end: D1PreparedStatement[] };
+    requireSameDigest?: boolean;
+  } = {},
 ): Promise<StoreUploadResult> {
   const storedSourceFiles = parsed.sourceFiles
     ? await encodePluginFilesJson(canonicalJson(parsed.sourceFiles))
@@ -359,9 +365,15 @@ export async function persistParsedStoreArtifact(
       manifest: string;
       entry_js: string;
       store_json?: string | null;
+      sha256: string;
     }>();
   if (existing) {
     if (guardedWrite) fail("Plugin head changed before publication.", 409);
+    if (requireSameDigest && existing.sha256 !== parsed.sha256)
+      fail(
+        "El espacio ya tiene esta versión con otro archivo. Revisa la copia en Mis plugins.",
+        409,
+      );
     let existingStore: unknown = null;
     if (existing.store_json) {
       try {
@@ -558,7 +570,9 @@ export async function persistParsedStoreArtifact(
       .bind(tenant, parsed.manifest.id, parsed.manifest.version)
       .first();
     if (sameVersion)
-      return persistParsedStoreArtifact(db, tenant, principalId, parsed);
+      return persistParsedStoreArtifact(db, tenant, principalId, parsed, {
+        requireSameDigest,
+      });
     const latestVersions = await db
       .prepare(
         "SELECT version FROM plugin_store_artifacts WHERE tenant_id=? AND id=?",
@@ -893,6 +907,7 @@ export type StoredPluginManifestRecord = {
   manifest: PluginStoreManifest;
   version: string;
   storedManifest: string;
+  sha256: string;
 };
 
 export async function storePluginManifestRecord(
@@ -905,15 +920,15 @@ export async function storePluginManifestRecord(
   const row = version
     ? await db
         .prepare(
-          "SELECT version,manifest FROM plugin_store_artifacts WHERE tenant_id=? AND id=? AND version=?",
+          "SELECT version,manifest,sha256 FROM plugin_store_artifacts WHERE tenant_id=? AND id=? AND version=?",
         )
         .bind(tenant, id, version)
-        .first<{ version: string; manifest: string }>()
-    : await latestArtifactRow<{ manifest: string }>(
+        .first<{ version: string; manifest: string; sha256: string }>()
+    : await latestArtifactRow<{ manifest: string; sha256: string }>(
         db,
         tenant,
         id,
-        "version,manifest",
+        "version,manifest,sha256",
       );
   if (!row) return null;
   try {
@@ -921,6 +936,7 @@ export async function storePluginManifestRecord(
       manifest: pluginStoreManifestSchema.parse(JSON.parse(row.manifest)),
       version: row.version,
       storedManifest: row.manifest,
+      sha256: row.sha256,
     };
   } catch {
     return null;

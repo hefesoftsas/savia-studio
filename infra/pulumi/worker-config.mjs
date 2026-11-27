@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { resolveInfraNames, validateFlowsResources } from "./naming.mjs";
 import { flowsWorkerConfig } from "./flows-worker-config.mjs";
 import { pluginEditorWorkerConfig } from "./auxiliary-worker-config.mjs";
+import { adminGatewayWorkerFirstRoutes } from "./admin-gateway-routes.mjs";
 import { normalizeTenantSlug } from "../../packages/tenant-host/src/tenant-slug.mjs";
 
 const defaultDocumentsBucket = "savia-documents";
@@ -87,7 +88,10 @@ function apiConfig({
     $schema: "../../node_modules/wrangler/config-schema.json",
     name: "savia-agencies",
     compatibility_date: "2026-08-31",
-    compatibility_flags: ["global_fetch_strictly_public"],
+    compatibility_flags: [
+      "global_fetch_strictly_public",
+      "enable_request_signal",
+    ],
     main: "src/index.ts",
     workers_dev: false,
     keep_vars: true,
@@ -283,6 +287,7 @@ function gatewayConfig({
     $schema: "../../node_modules/wrangler/config-schema.json",
     name: "savia",
     compatibility_date: "2026-08-31",
+    compatibility_flags: ["enable_request_signal"],
     main: "src/edge-gateway.ts",
     vars: { CANONICAL_HOST: hostname },
     routes:
@@ -303,28 +308,7 @@ function gatewayConfig({
       run_worker_first:
         runWorkerFirst && hostname === "savia.hefesoft.com"
           ? true
-          : [
-              "/companion-downloads.json",
-              "/downloads/*",
-              "/register",
-              "/public/forms",
-              "/public/forms/*",
-              "/public/bookings",
-              "/public/bookings/*",
-              "/public/quotes",
-              "/public/quotes/*",
-              "/office",
-              "/office/*",
-              "/api/*",
-              "/v1/*",
-              "/webhooks/whatsapp",
-              "/s/*",
-              "/.well-known/*",
-              "/mcp",
-              "/health",
-              "/docs",
-              "/openapi.json",
-            ],
+          : [...adminGatewayWorkerFirstRoutes],
     },
   };
 }

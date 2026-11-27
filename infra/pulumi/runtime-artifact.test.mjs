@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { freezeRuntimeRelease } from "./runtime-artifact.mjs";
@@ -220,14 +227,64 @@ test("Preview freezes independent Workers in parallel and waits before publishin
   }
 });
 
-test("Preview can freeze a Worker without assets while the frontend builds", async () => {
+test("Preview refuses to freeze a Worker that fails to start", async (t) => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "savia-freeze-invalid-worker-"),
+  );
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "wrangler.json");
+  const destination = join(directory, "release");
+  await writeFile(
+    path,
+    JSON.stringify({ name: "savia-preview", main: "worker.ts" }),
+  );
+  const runWrangler = async (args) => {
+    const entry = join(args[args.indexOf("--outdir") + 1], "worker.mjs");
+    await writeFile(
+      entry,
+      'export const invalidExport = "not a handler";\nexport default {};',
+    );
+    await writeFile(
+      args[args.indexOf("--metafile") + 1],
+      JSON.stringify({
+        outputs: { [entry]: { entryPoint: "worker.ts" } },
+      }),
+    );
+  };
+  await assert.rejects(
+    freezeRuntimeRelease(
+      { environment: "preview", configs: [path], destination },
+      { runWrangler },
+    ),
+    (error) => {
+      assert.match(
+        error.message,
+        /Prepared Preview Workers failed to start locally/,
+      );
+      assert.match(
+        error.cause?.message ?? "",
+        /invalidExport.*ExportedHandler/,
+      );
+      return true;
+    },
+  );
+  await assert.rejects(stat(destination), { code: "ENOENT" });
+});
+
+test("Preview freezes a WebAssembly Worker while the frontend assets build", async () => {
   const directory = await mkdtemp(join(tmpdir(), "savia-freeze-assets-"));
   try {
     const backend = join(directory, "backend.json");
     const frontend = join(directory, "frontend.json");
     await writeFile(
       backend,
-      JSON.stringify({ name: "savia-mcp-preview", main: "worker.ts" }),
+      JSON.stringify({
+        name: "savia-hook-executor-preview",
+        main: "worker.ts",
+        rules: [
+          { type: "CompiledWasm", globs: ["**/*.wasm"], fallthrough: true },
+        ],
+      }),
     );
     await writeFile(
       frontend,
@@ -252,7 +309,18 @@ test("Preview can freeze a Worker without assets while the frontend builds", asy
         assert.equal(assetsBuilt, true);
       }
       const out = args[args.indexOf("--outdir") + 1];
-      await writeFile(join(out, "worker.mjs"), "export default {};");
+      if (config === backend) {
+        await writeFile(
+          join(out, "script.wasm"),
+          Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0),
+        );
+        await writeFile(
+          join(out, "worker.mjs"),
+          'import wasm from "./script.wasm";\nexport default { fetch: () => new Response(String(wasm instanceof WebAssembly.Module)) };',
+        );
+      } else {
+        await writeFile(join(out, "worker.mjs"), "export default {};");
+      }
       await writeFile(
         args[args.indexOf("--metafile") + 1],
         JSON.stringify({

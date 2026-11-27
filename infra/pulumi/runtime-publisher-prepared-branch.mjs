@@ -7,7 +7,10 @@ import {
   previewNames,
 } from "../../scripts/preview-environment.mjs";
 import { resolveEnvironment } from "./environments.mjs";
-import { workerDeploymentOrder } from "./runtime-publisher-branch.mjs";
+import {
+  requireBranchBootstrapPassword,
+  workerDeploymentOrder,
+} from "./runtime-publisher-branch.mjs";
 import { verifyRuntimeArtifact } from "./runtime-publisher.mjs";
 
 const required = {
@@ -89,6 +92,9 @@ export async function createBranchPublisher(
     throw new Error(
       "Partial branch secret custody; existing encryption keys must be recovered before publication",
     );
+  const bootstrapPassword = fresh
+    ? requireBranchBootstrapPassword(env)
+    : undefined;
   const databaseId = configs
     .get("api")
     .config.d1_databases?.find(
@@ -123,9 +129,7 @@ export async function createBranchPublisher(
         )
           .update("savia:auth-tenant-user-administration:v1")
           .digest("hex");
-        if (env.BETTER_AUTH_BOOTSTRAP_PASSWORD?.trim())
-          secrets.BETTER_AUTH_BOOTSTRAP_PASSWORD =
-            env.BETTER_AUTH_BOOTSTRAP_PASSWORD;
+        secrets.BETTER_AUTH_BOOTSTRAP_PASSWORD = bootstrapPassword;
         for (const [role, { path }] of configs)
           if (required[role].length)
             await runWrangler(["secret", "bulk", "--config", path], {
@@ -135,8 +139,7 @@ export async function createBranchPublisher(
                 Object.fromEntries(
                   [
                     ...required[role],
-                    ...(role === "auth" &&
-                    secrets.BETTER_AUTH_BOOTSTRAP_PASSWORD
+                    ...(role === "auth"
                       ? ["BETTER_AUTH_BOOTSTRAP_PASSWORD"]
                       : []),
                   ].map((key) => [key, secrets[key]]),

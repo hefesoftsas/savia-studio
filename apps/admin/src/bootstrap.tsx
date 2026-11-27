@@ -110,7 +110,6 @@ function PublicApplication({ pathname }: { pathname: string }) {
       <AppLocaleProvider>
         <LocaleHtmlSync />
         <LocalePersistenceSync />
-        <CookieConsentBanner />
         <PublicApplicationContent pathname={pathname} />
       </AppLocaleProvider>
     </StoreContextProvider>
@@ -154,6 +153,7 @@ function PublicApplicationContent({ pathname }: { pathname: string }) {
           </select>
         </label>
       </div>
+      <CookieConsentBanner />
       <Suspense fallback={<PwaSplash message={t("Cargando…")} />}>
         {pathname === "/register" ? (
           <PublicRegistration />

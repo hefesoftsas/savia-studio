@@ -123,6 +123,10 @@ Rust/Tauri or Flutter toolchains described in their respective guides.
 | `assistant-api.dev.env`                       | assistant's OpenRouter + Nango | assistant disabled                                           |
 | `mcp.dev.env` (`SAVIA_MCP_SHARED_SECRET=...`) | MCP worker on `:8789`          | MCP does not start                                           |
 
+The local API reads `assistant-api.dev.env`. The launcher passes an exported
+`OPENROUTER_API_KEY` exclusively to the API. The file takes precedence when it
+defines the key.
+
 The API runtime creates a cryptographically random `STUDIO_INTEGRATION_KEY`
 when neither the core `.dev.vars` nor local secret files or environment provide
 one. It stores the key in `apps/api/.wrangler/local-runtime/` with private file
@@ -141,15 +145,25 @@ This applies local D1 migrations, starts auth (`:8788`), savia-request
 Vite (`:5173`). Startup stages the VS Code extension so the download in the
 local plugin catalog serves the same packaged file as a distribution build.
 Startup checks the fixed backend ports before building or applying migrations.
-It finishes local migrations and builds, including the Flows build when
+The launcher reserves the local stack before checking ports or preparing data.
+A second launch from the same user and temporary directory exits early, even
+when the first stack is still starting. The lock releases when the launcher exits.
+The launcher finishes local migrations and builds, including the Flows build when
 enabled, before starting any service.
 If another checkout already owns a backend port, use that stack or stop it
 before starting a new one. Admin can use the next available port when no
 explicit Admin port is configured, and OAuth uses that same port.
-Admin starts after the API's health check confirms the API can query local D1.
-A health response in maintenance mode keeps Admin waiting.
+Set `SAVIA_DEV_HOST=localhost` to use `localhost` for the browser and OAuth,
+including when setting a custom `SAVIA_ADMIN_PORT`. Vite forwards API
+requests to `127.0.0.1:8787` in either case.
+Admin starts after the API can query local D1 and the Request and hook executor
+Workers answer their loopback probes. A maintenance response from the API keeps
+Admin waiting. The private Workers retain their access rules during these checks.
 If a local service exits on its own, the launcher reports the service and
 its exit status and stops the rest of that stack.
+The local API launcher also stops the detached runtime process group after a
+terminal hangup or a Wrangler exit. It gives remaining processes one second
+to shut down before forcing them to stop and release their ports.
 When no bridge key or MCP secret is configured, startup generates a temporary
 key shared by API and Auth so tenant user administration works locally.
 The tenant form checks the administrator's email format and the name lengths
@@ -175,7 +189,8 @@ curl -i http://127.0.0.1:8797/api/health     # 403 "Acceso privado.": correct,
                                              # service binding or authed API
 ```
 
-Open `http://127.0.0.1:5173/` and log in with the bootstrap admin
+Open the local Admin URL printed by Vite, which defaults to
+`http://127.0.0.1:5173/`, and log in with the bootstrap admin
 (`BETTER_AUTH_BOOTSTRAP_*` in `apps/auth/wrangler.jsonc`; see
 `ensureBootstrapAdministrator` in `apps/auth/src/index.ts`). The interactive
 API reference lives at `http://127.0.0.1:8787/docs` (Scalar).
@@ -193,11 +208,35 @@ Set `API_URL` if the API is using a different port. The verifier uses Node.js
 to check both JSON responses and reports any endpoint that serves unexpected
 content.
 
+After editing the checked-in Wrangler configurations, regenerate the Worker
+declarations from a checkout without local variable files. Use `--strict-vars=false`
+so the declarations describe variable types instead of including their values.
+
+```sh
+for worker in api auth connector-gateway; do
+  pnpm --filter "@savia/$worker" exec wrangler types --config wrangler.jsonc --strict-vars=false
+done
+```
+
+## Run local tests
+
+Run the core unit tests and release contracts with the dedicated Flows tests
+disabled by setting the same flag used by CI.
+
+```sh
+SAVIA_CI_FLOWS_ENABLED=false pnpm test
+```
+
+`pnpm test` includes the dedicated Flows tests by default. Use
+`pnpm run flows:test` to run that suite directly.
+
 ## Typical issues
 
 - **Port taken**: admin bumps its own port; pin it with `SAVIA_ADMIN_PORT`.
-  Stop the stack with Ctrl-C before restarting. If the terminal sends a
-  hangup signal, the launcher shuts down the local Workers.
+  Use a number from 1 to 65535. The launcher checks the port before
+  building assets or applying migrations. Stop the stack with Ctrl-C
+  before restarting. If the terminal sends a hangup signal, the launcher
+  shuts down the local Workers.
 - **Two Wrangers on the same state**: a single runtime owns
   `apps/api/.wrangler/state`; do not start another one over it.
 - **Postgres**: only a source for legacy imports (`pnpm legacy:postgres`).

@@ -2,6 +2,11 @@
 
 set -eu
 
+if [ "${1:-}" != "--with-local-lock" ]; then
+  exec node --disable-warning=ExperimentalWarning scripts/dev-local-lock.mjs
+fi
+shift
+
 load_environment_file() {
   if [ -f "$1" ]; then
     . "$1"
@@ -12,10 +17,12 @@ secrets_directory="${SAVIA_SECRETS_DIR:-infra/secrets}"
 export SAVIA_FLOWS_ENABLED="${SAVIA_FLOWS_ENABLED:-1}"
 export WRANGLER_REGISTRY_PATH="${WRANGLER_REGISTRY_PATH:-$PWD/.wrangler/savia-local-dev-registry}"
 load_environment_file "$secrets_directory/auth.dev.env"
-load_environment_file "$secrets_directory/assistant-api.dev.env"
 load_environment_file "$secrets_directory/mcp.dev.env"
 load_environment_file "$secrets_directory/connector-gateway.dev.env"
 
+# Hold any caller key until the API starts so other child processes cannot read it.
+local_api_openrouter_key="${OPENROUTER_API_KEY:-}"
+unset OPENROUTER_API_KEY
 export SAVIA_MCP_URL="${SAVIA_MCP_URL:-http://127.0.0.1:8789/mcp}"
 
 processes=""
@@ -62,20 +69,29 @@ check_processes() {
 }
 
 wait_for_service() {
+  label="$1"
+  shift
   attempts=0
-  while :; do
-    if service_response="$(curl --fail --silent --max-time 2 "$2")" &&
-      { [ "$#" -eq 2 ] || "$3" "$service_response"; }; then
-      return 0
-    fi
+  until "$@"; do
     check_processes
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 100 ]; then
-      printf 'Local Savia %s did not become ready.\n' "$1" >&2
+      printf 'Local Savia %s did not become ready.\n' "$label" >&2
       return 1
     fi
     sleep 0.1
   done
+}
+
+http_is_ready() {
+  service_response="$(curl --fail --silent --max-time 2 "$1")" &&
+    { [ "$#" -eq 1 ] || "$2" "$service_response"; }
+}
+
+private_http_is_ready() {
+  service_response="$(curl --silent --max-time 2 --write-out '\n%{http_code}' "$1")" &&
+    [ "$service_response" = "$3
+$2" ]
 }
 
 api_is_ready() {
@@ -91,7 +107,16 @@ api_is_ready() {
 
 select_admin_port() {
   if [ -n "${SAVIA_ADMIN_PORT:-}" ]; then
-    printf '%s\n' "$SAVIA_ADMIN_PORT"
+    node -e '
+      const configured = process.argv[1];
+      const port = Number(configured);
+      if (/[^0-9]/.test(configured) || port < 1 || port > 65535) {
+        console.error("SAVIA_ADMIN_PORT must be an integer from 1 to 65535.");
+        process.exitCode = 1;
+      } else {
+        console.log(port);
+      }
+    ' -- "$SAVIA_ADMIN_PORT"
     return
   fi
 
@@ -115,7 +140,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 admin_port="$(select_admin_port)"
-admin_origin="http://127.0.0.1:$admin_port"
+admin_host="${SAVIA_DEV_HOST:-127.0.0.1}"
+admin_origin_host=127.0.0.1
+api_host="$admin_host"
+if [ "$admin_host" = "localhost" ]; then
+  admin_origin_host=localhost
+  # Vite always forwards local API requests to IPv4 loopback.
+  api_host=127.0.0.1
+fi
+admin_origin="http://$admin_origin_host:$admin_port"
 
 backend_ports="8787 8788 8797 8798 9230 9232 9233 9234"
 if [ "$SAVIA_FLOWS_ENABLED" = "1" ]; then
@@ -187,7 +220,7 @@ if [ -n "${SAVIA_SMTP_PASSWORD:-}" ]; then
 fi
 
 start_process Auth "$@"
-wait_for_service Auth http://127.0.0.1:8788/_internal/session
+wait_for_service Auth http_is_ready http://127.0.0.1:8788/_internal/session
 
 if [ -n "${SAVIA_MCP_SHARED_SECRET:-}" ]; then
   start_process MCP env -i PATH="$PATH" HOME="${HOME:-}" TMPDIR="${TMPDIR:-/tmp}" \
@@ -204,13 +237,27 @@ start_process Request pnpm --filter @savia/request exec wrangler dev --local \
 
 if [ "$SAVIA_FLOWS_ENABLED" = "1" ]; then
   start_process Flows env "SAVIA_FLOWS_PUBLIC_ORIGIN=$admin_origin" pnpm flows:dev
-  wait_for_service Flows http://127.0.0.1:8796/health
+  wait_for_service Flows http_is_ready http://127.0.0.1:8796/health
 fi
 
-start_process API env "SAVIA_PUBLIC_ORIGIN=$admin_origin" "SAVIA_INTERNAL_BRIDGE_KEY=$identity_bridge_key" "SAVIA_DISABLE_CAPTCHA=1" "SAVIA_MOCK_QUOTES=${SAVIA_MOCK_QUOTES:-1}" pnpm exec node scripts/dev-api-runtime.mjs
-wait_for_service API http://127.0.0.1:8787/health api_is_ready
+start_api() {
+  export OPENROUTER_API_KEY="$local_api_openrouter_key"
+  load_environment_file "$secrets_directory/assistant-api.dev.env"
+  SAVIA_DEV_HOST="$api_host" \
+    SAVIA_PUBLIC_ORIGIN="$admin_origin" \
+    SAVIA_INTERNAL_BRIDGE_KEY="$identity_bridge_key" \
+    SAVIA_DISABLE_CAPTCHA=1 \
+    SAVIA_MOCK_QUOTES="${SAVIA_MOCK_QUOTES:-1}" \
+    exec pnpm exec node scripts/dev-api-runtime.mjs
+}
+start_process API start_api
+wait_for_service API http_is_ready http://127.0.0.1:8787/health api_is_ready
+wait_for_service Request private_http_is_ready http://127.0.0.1:8797/api/health \
+  403 '{"error":"Acceso privado."}'
+wait_for_service Hook-Executor private_http_is_ready http://127.0.0.1:8798/execute \
+  404 'Not found'
 start_process Admin env SAVIA_DEV_USE_LOCAL_API=true \
-  pnpm --filter @savia/admin exec vite --host "${SAVIA_DEV_HOST:-127.0.0.1}" \
+  pnpm --filter @savia/admin exec vite --host "$admin_host" \
   --port "$admin_port" --strictPort
 
 while [ -n "$processes" ]; do

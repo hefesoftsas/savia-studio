@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { PageEditor } from "./editor";
 import { PagesClient } from "./client";
 import { ApiClient } from "@/api/api-client";
+import { REQUEST_TIMEOUT_MS } from "@/api/request-timeout";
 import { IssueCard } from "./issue-card";
 const api = new ApiClient({
   baseUrl: "https://savia.test",
@@ -171,6 +172,91 @@ it("keeps the upload pending signal until the request settles, including a faile
   finish(Response.json({ error: { code: "UNAVAILABLE" } }, { status: 503 }));
   await waitFor(() => expect(pending).toHaveBeenLastCalledWith(false));
   expect(screen.getByRole("alert")).toHaveTextContent("Could not load");
+});
+it("lets readers retry an attachment whose download stops making progress", async () => {
+  const cancel = vi.fn();
+  const fetcher = vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start: (stream) => stream.enqueue(new Uint8Array([1])),
+          cancel,
+        }),
+      ),
+    )
+    .mockImplementationOnce(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(stream) {
+              stream.enqueue(new Uint8Array([1]));
+              setTimeout(
+                () => stream.enqueue(new Uint8Array([2])),
+                REQUEST_TIMEOUT_MS / 2,
+              );
+              setTimeout(() => stream.close(), REQUEST_TIMEOUT_MS + 100);
+            },
+          }),
+          { headers: { "Content-Type": "text/plain" } },
+        ),
+    );
+  const downloadApi = new ApiClient({
+    baseUrl: "https://savia.test",
+    tokenSource: { getAccessToken: async () => null },
+    fetcher,
+  });
+  const NativeURL = URL;
+  vi.stubGlobal(
+    "URL",
+    class extends NativeURL {
+      static createObjectURL = vi.fn(() => "blob:attachment");
+      static revokeObjectURL = vi.fn();
+    },
+  );
+  vi.useFakeTimers();
+  try {
+    render(
+      <PageEditor
+        pageId="one"
+        api={downloadApi}
+        pages={new PagesClient(downloadApi)}
+        readOnly
+        initialValue={[
+          {
+            type: "attachment",
+            fileId: "file",
+            name: "note.txt",
+            mimeType: "text/plain",
+            children: [{ text: "" }],
+          },
+        ]}
+        onChange={() => {}}
+      />,
+    );
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading");
+    await act(() => vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS));
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load");
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("link", { name: /note\.txt/ }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading");
+    await act(() => vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 100));
+    expect(screen.getByRole("link", { name: /note\.txt/ })).toHaveAttribute(
+      "href",
+      "blob:attachment",
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+    cleanup();
+    vi.unstubAllGlobals();
+  }
 });
 it("keeps original issue links usable when the reader cannot resolve a preview", async () => {
   render(

@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { render } from "../studio-engine/test/locale-test-render";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -8,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import type { AppServices } from "@/app-services";
 import { ApiClientError } from "@/api/api-client";
+import { rotateSessionScope } from "@/auth/session-scope";
 import { invalidateTenantWorkspaces } from "@/api/tenant-workspaces-client";
 import { getStudioRuntime } from "@/features/studio-engine/runtime";
 import { PluginStudioPage, StudioPage } from "./studio-page";
@@ -85,6 +92,56 @@ function mountPluginStudio(services: AppServices, route = "/plugin-studio") {
   );
 }
 describe("Studio tenant integration", () => {
+  it.each([
+    {
+      name: "Studio",
+      mountPage: mount,
+      route: "/studio",
+      workspace: /Espacio CRM/,
+    },
+    {
+      name: "Plugin Studio",
+      mountPage: mountPluginStudio,
+      route: "/plugin-studio",
+      workspace: /Plugin projects for tenant/,
+    },
+  ])(
+    "unmounts $name until the new account's workspace is authorized",
+    async ({ mountPage, route, workspace }) => {
+      let authorize!: (result: { data: unknown[] }) => void;
+      const pending = new Promise<{ data: unknown[] }>((resolve) => {
+        authorize = resolve;
+      });
+      const get = vi.fn(async (path: string): Promise<{ data: unknown[] }> => {
+        if (path !== "/v1/tenant-workspaces") return { data: [] };
+        return { data: [platform, tenant] };
+      });
+      const services = {
+        ...servicesFor([]),
+        apiClient: { get },
+      } as unknown as AppServices;
+      mountPage(services, `${route}?tenantId=101`);
+      const previous = await screen.findByText(workspace);
+      expect(screen.getByLabelText("Tenant")).toBeVisible();
+      get.mockImplementation((path: string) =>
+        path === "/v1/tenant-workspaces"
+          ? pending
+          : Promise.resolve({ data: [] }),
+      );
+
+      act(() => rotateSessionScope("principal-change"));
+      expect(previous).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Tenant")).not.toBeInTheDocument();
+      expect(getStudioRuntime().embedded).toBe(false);
+
+      await act(async () => authorize({ data: [tenant] }));
+      expect(await screen.findByText(workspace)).not.toBe(previous);
+      expect(getStudioRuntime().apiBasePath).toBe(tenant.apiBasePath);
+      expect(
+        get.mock.calls.filter(([path]) => path === "/v1/tenant-workspaces"),
+      ).toHaveLength(2);
+    },
+  );
   it("loads the dedicated plugin workspace under the selected authorized tenant", async () => {
     mountPluginStudio(
       servicesFor([platform, tenant]),
@@ -198,6 +255,52 @@ describe("Studio tenant integration", () => {
     });
     expect(screen.getByRole("alert")).toHaveTextContent("Denied");
   });
+
+  it.each(["initial", "background"])(
+    "offers a retry after a failed %s workspace catalog read",
+    async (timing) => {
+      let reads = 0;
+      const failureRead = timing === "initial" ? 1 : 2;
+      const services = {
+        ...servicesFor([]),
+        apiClient: {
+          get: vi.fn(async (path: string) => {
+            if (path !== "/v1/tenant-workspaces") return { data: [] };
+            if (++reads === failureRead)
+              throw new ApiClientError(
+                503,
+                "unavailable",
+                "Workspace catalog unavailable",
+              );
+            return { data: [tenant] };
+          }),
+        },
+      } as unknown as AppServices;
+      mount(services, "/studio?tenantId=101");
+
+      const previous =
+        timing === "background"
+          ? await screen.findByText(/Espacio CRM/)
+          : undefined;
+      if (previous)
+        act(() => window.dispatchEvent(new Event(STUDIO_TENANTS_CHANGED)));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Workspace catalog unavailable",
+      );
+      expect(
+        screen.queryByText(/No tienes tenants disponibles/),
+      ).not.toBeInTheDocument();
+      if (previous) expect(screen.getByText(/Espacio CRM/)).toBe(previous);
+
+      fireEvent.click(screen.getByRole("button", { name: "Reintentar" }));
+      expect(await screen.findByText(/Espacio CRM/)).toBeVisible();
+      await waitFor(() =>
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+      );
+      if (previous) expect(screen.getByText(/Espacio CRM/)).toBe(previous);
+      expect(reads).toBe(failureRead + 1);
+    },
+  );
 
   it("closes the local workspace when leaving Studio", async () => {
     const close = vi.fn();

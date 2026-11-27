@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { rotateSessionScope } from "@/auth/session-scope";
 import type { ApiClient } from "./api-client";
 import {
   fetchTenantWorkspaces,
@@ -54,4 +55,61 @@ describe("tenant workspace catalog", () => {
     await fetchTenantWorkspaces(client);
     expect(get).toHaveBeenCalledTimes(1);
   });
+
+  it("only shares the cached workspace list with callers using the same client", async () => {
+    const first = {
+      get: vi.fn().mockResolvedValue({ data: workspaces }),
+    } as unknown as ApiClient;
+    const second = {
+      get: vi.fn().mockResolvedValue({ data: [] }),
+    } as unknown as ApiClient;
+
+    await expect(fetchTenantWorkspaces(first)).resolves.toEqual(workspaces);
+    await expect(fetchTenantWorkspaces(second)).resolves.toEqual([]);
+    await expect(fetchTenantWorkspaces(first)).resolves.toEqual(workspaces);
+    expect(first.get).toHaveBeenCalledTimes(1);
+    expect(second.get).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["invalidation", "account change"])(
+    "discards a pending workspace read from before %s",
+    async (change) => {
+      let resolveOld!: (result: { data: TenantWorkspace[] }) => void;
+      let resolveCurrent!: (result: { data: TenantWorkspace[] }) => void;
+      const oldResponse = new Promise<{ data: TenantWorkspace[] }>(
+        (resolve) => {
+          resolveOld = resolve;
+        },
+      );
+      const newResponse = new Promise<{ data: TenantWorkspace[] }>(
+        (resolve) => {
+          resolveCurrent = resolve;
+        },
+      );
+      const get = vi
+        .fn()
+        .mockReturnValueOnce(oldResponse)
+        .mockReturnValue(newResponse);
+      const client = { get } as unknown as ApiClient;
+
+      const previous = fetchTenantWorkspaces(client);
+      const obsolete = expect(previous).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      if (change === "invalidation") invalidateTenantWorkspaces();
+      else rotateSessionScope("principal-change");
+      const current = fetchTenantWorkspaces(client);
+      resolveOld({ data: workspaces });
+      await obsolete;
+
+      const concurrent = fetchTenantWorkspaces(client);
+      resolveCurrent({ data: [] });
+      await expect(Promise.all([current, concurrent])).resolves.toEqual([
+        [],
+        [],
+      ]);
+      await expect(fetchTenantWorkspaces(client)).resolves.toEqual([]);
+      expect(get).toHaveBeenCalledTimes(2);
+    },
+  );
 });

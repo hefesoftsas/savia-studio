@@ -35,6 +35,54 @@ remain visible values. Existing relation and attachment controls retain their
 specialized displays. Currency formatting uses the configured currency and
 precision, defaulting to COP and two decimals.
 
+## Attachments
+
+Each file shows its own progress when several files are selected in the same
+field. The form waits for all active uploads before continuing or saving.
+For workspaces with collection permissions, a temporary attachment belongs to
+its uploader and the intended record or create request. Savia checks the field
+grant and rechecks the record permissions before associating the file.
+If the attachment list fails to load, use **Retry**. After an interrupted
+deletion response, Savia shows the error and reloads the list to reflect the
+server's current attachments.
+
+Deleting an attachment removes it from the record and queues its stored file and
+revisions for removal. If the storage service is unavailable, scheduled
+maintenance retries the pending deletion.
+
+Studio reports an upload error when the server starts sending the confirmation
+but the response takes longer than the standard 15-second response deadline.
+For existing records, refresh the attachment list before repeating the upload.
+The server may already have saved the file when the confirmation was interrupted.
+If the database reply is interrupted, Savia checks whether the upload was saved
+before confirming it. Storage left by an unsuccessful upload is queued for cleanup.
+
+If a selected attachment expires while the form is open, Savia uploads the
+selected file again and asks you to save once the upload finishes. If the record
+is already saved, re-uploading uses its current edit permissions and keeps the
+same record.
+
+When a confirmation stalls while associating temporary attachments, save the
+record again. Savia recognizes attachments already associated with that record
+and continues with the pending attachments. If an attachment was edited since
+the first save, Savia verifies its original association in the revision history
+and returns the current file version.
+The retry reuses the confirmed record when its fields are unchanged. If any
+fields were edited after that confirmation, Savia saves those changes first.
+
+Concurrent uploads share the field and record limits. Savia automatically retries
+a temporary database write conflict without uploading the file again. If another
+upload fills the remaining slot, Savia reports the limit and keeps a temporary
+attachment available to retry after space is freed.
+
+Cancelling closes the form immediately and discards any remaining drafts in
+the background. Drafts still present on the server expire after 24 hours.
+Scheduled maintenance removes expired drafts even when nobody opens the form again.
+Uploads, associations, and download attempts for expired drafts can also trigger
+cleanup. If storage is unavailable, a later cleanup attempt retries the deletion.
+Expired drafts remain unavailable during that time, valid uploads can proceed,
+and associated files stay with their records.
+
 ## Multiple choice
 
 `MultiSelect` stores a JSON array of distinct option values. The designer provides
@@ -60,11 +108,12 @@ and a preview. It is a Markdown editor with formatting shortcuts, not a WYSIWYG
 HTML editor. Required values cannot contain whitespace alone. The designer can
 set minimum and maximum lengths, enforced when saving.
 
-Tables, details and summaries render supported Markdown formatting. Raw HTML,
-scripts and images are not rendered. Links allow HTTP, HTTPS and mailto only;
-unsupported link destinations become plain text. Existing HTML presentation
-blocks are separate from editable rich-text data. Rich text is eligible for
-record history; multi-select history remains unsupported.
+Tables, details and summaries render supported Markdown formatting and omit raw
+HTML, scripts and images. Links support HTTP, HTTPS and mailto. Unsupported
+destinations render as plain text. Web links open in a new tab so the form stays
+open. Mail links use the configured email handler. Existing HTML presentation
+blocks are separate from editable rich-text data. Record history supports rich
+text. Multi-select history remains unsupported.
 
 ## Percentage and rating
 

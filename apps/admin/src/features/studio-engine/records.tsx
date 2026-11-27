@@ -10,21 +10,41 @@ import { recordsMessages } from "@/i18n/locales/records";
 import { FieldValueDisplay } from "./field-value-display";
 import RecordHistorySettingsButton from "./record-history-settings";
 import { useDebouncedSearch } from "./use-debounced-search";
-import { RetainedListResults } from "./retained-list-results";
+import {
+  RetainedListResults,
+  type RecordListTotal,
+} from "./retained-list-results";
 import { RecordOriginLinks } from "./record-origin-links";
 import {
   collectionCapabilities,
   supportsLocalRecordTools,
 } from "./collection-capabilities";
-import React, { lazy, Suspense, useState, useEffect, useRef } from "react";
+import React, {
+  lazy,
+  Suspense,
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ListBase, useListContext, useRecordContext } from "ra-core";
+import {
+  ListBase,
+  ListContextProvider,
+  removeEmpty,
+  useListContext,
+  useRecordContext,
+  type ListBaseProps,
+} from "ra-core";
 import { BulkActionsToolbar } from "@/components/admin/bulk-actions-toolbar";
 import { DataTable } from "@/components/admin/data-table";
 import { TableSkeleton } from "@/components/admin/table-skeleton";
 import { Confirm } from "@/components/admin/confirm";
-import { ListPagination } from "@/components/admin/list-pagination";
-import { SelectAllButton } from "@/components/admin/select-all-button";
+import {
+  getListRecordOffset,
+  ListPagination,
+} from "@/components/admin/list-pagination";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import {
@@ -56,16 +76,20 @@ import {
   GripVertical,
   X,
 } from "lucide-react";
-import { api, downloadCrm } from "./api";
-import { formatRetryTime } from "@/api/retry-after";
-import { recordPath } from "./record-path";
+import { api, createStudioRequest, downloadCrm, listRecordIds } from "./api";
+import { formatRetryTime, retryDeadlineFromError } from "@/api/retry-after";
+import { useRetryDeadline } from "@/hooks/use-retry-blocked";
+import { isReadAccessDenied } from "@/queries/read-state";
+import { recordDeletionPath, recordPath } from "./record-path";
 import { getListObjectsQueryKey } from "./generated/studio";
 import { getStudioRuntime } from "./runtime";
 import { invalidateStudioRealtimeEvent } from "./studio-realtime";
 import {
   fieldEntries,
   getPipeline,
+  MAX_BULK_RECORDS,
   R2_ATTACHMENT_TYPE,
+  usesNativeRecordStorage,
   type StudioObject,
   type StudioRecord,
 } from "@savia/studio-shared/metadata";
@@ -365,10 +389,12 @@ export default function Records({
   object,
   onOpen,
   initialConfigTab,
+  onCollectionTotal,
 }: {
   object: StudioObject;
   onOpen: (record: StudioRecord) => void;
   initialConfigTab?: ConfigTab;
+  onCollectionTotal?: (result: RecordListTotal) => void;
 }) {
   const labelLocale = useAppLocale();
   const uiLocale = intlLocale(labelLocale);
@@ -376,6 +402,10 @@ export default function Records({
   const t = useMessages(recordsMessages);
 
   const capabilities = collectionCapabilities(object);
+  const showTrash =
+    usesNativeRecordStorage(object) &&
+    capabilities.read &&
+    capabilities.restore === true;
   const isLinkedCollection = Boolean(object.config.studio?.collection);
   const canConfigureSourceForm =
     !capabilities.schema && !capabilities.customFields;
@@ -434,7 +464,7 @@ export default function Records({
     [draggedColumn, setDraggedColumn] = useState<string | null>(null),
     [dropColumn, setDropColumn] = useState<string | null>(null),
     [name, setName] = useState(""),
-    [trash, setTrash] = useState(false),
+    [trashOpen, setTrash] = useState(false),
     [viewId, setViewId] = useState(""),
     [pendingViewDeletion, setPendingViewDeletion] = useState<SavedView | null>(
       null,
@@ -452,6 +482,7 @@ export default function Records({
   const appliedDefaultFor = useRef<string | null>(null);
   const [exportingCsv, setExportingCsv] = useState(false);
   const exportInProgress = useRef(false);
+  const exportRetry = useRetryDeadline();
   const client = useQueryClient();
   const pipeline = isLinkedCollection ? undefined : getPipeline(object);
   const mode = pipeline ? s.mode : "table";
@@ -480,6 +511,10 @@ export default function Records({
     setConfigTab("form");
     setConfig(true);
   }, [canConfigureSourceForm, initialConfigTab]);
+  const trash = showTrash && trashOpen;
+  useEffect(() => {
+    if (!showTrash) setTrash(false);
+  }, [showTrash]);
   const patch = (value: Partial<Settings>) => {
     setS((prev) => ({ ...prev, ...value }));
     setViewId("");
@@ -518,8 +553,32 @@ export default function Records({
     }
   };
   const querySearch = useDebouncedSearch(s.q);
-  const csvSearchPending = capabilities.search !== false && s.q !== querySearch;
   const querySettings = { ...s, q: querySearch, stage };
+  const listFilter = removeEmpty({
+    ...params(querySettings, trash),
+    __collectionSearch: capabilities.search,
+    __collectionFilter: capabilities.filter,
+    __collectionSort: capabilities.sort,
+  });
+  const [appliedListFilter, setAppliedListFilter] = useState<string>();
+  const csvSearchPending =
+    (capabilities.search !== false && s.q !== querySearch) ||
+    (mode === "table" && appliedListFilter !== JSON.stringify(listFilter));
+  const unfiltered =
+    !trash &&
+    (capabilities.search === false || !querySearch) &&
+    (capabilities.filter === false ||
+      (!stage && s.filters?.conditions?.length === 0));
+  const reportListTotal = useCallback(
+    (result: RecordListTotal) => {
+      onCollectionTotal?.(
+        result.status === "verified" && !unfiltered
+          ? { status: "unavailable" }
+          : result,
+      );
+    },
+    [onCollectionTotal, unfiltered],
+  );
   const summary = useQuery({
     queryKey: [
       "summary",
@@ -602,7 +661,12 @@ export default function Records({
     if (target) reorderColumn(key, target);
   };
   const exportCsv = async () => {
-    if (exportInProgress.current || csvSearchPending) return;
+    if (
+      exportInProgress.current ||
+      csvSearchPending ||
+      exportRetry.isBlockedNow()
+    )
+      return;
     const exportableColumnKeys = visibleColumnKeys.filter(
       (key) =>
         key !== CRM_INTEGRATION_COLUMN_KEY &&
@@ -638,13 +702,14 @@ export default function Records({
     exportInProgress.current = true;
     setExportingCsv(true);
     try {
-      await downloadCrm(
+      const downloaded = await downloadCrm(
         `/api/export/${encodeURIComponent(object.name)}?${query}`,
         recordsCsvFilename(object.name),
         "text/csv",
       );
-      toast.success(t("CSV descargado"));
+      if (downloaded) toast.success(t("CSV descargado"));
     } catch (error) {
+      exportRetry.remember(retryDeadlineFromError(error));
       const retryTime = formatRetryTime(error, uiLocale);
       toast.error(
         (error as Error).message,
@@ -803,7 +868,7 @@ export default function Records({
             filters={s.filters}
             onFiltersChange={(filters) => patch({ filters })}
             canExportCsv={canExportCsv}
-            csvSearchPending={csvSearchPending}
+            csvExportBlocked={csvSearchPending || exportRetry.blocked}
             exportingCsv={exportingCsv}
             onExportCsv={() => void exportCsv()}
             trash={trash}
@@ -836,8 +901,7 @@ export default function Records({
                   )
                 : []
             }
-            supportsLocalRecordTools={supportsLocalRecordTools(object)}
-            showDelete={collectionCapabilities(object).delete}
+            showTrash={showTrash}
           />
         </div>
         <div className="records-panel-body">
@@ -901,22 +965,19 @@ export default function Records({
               )}
             </div>
           ) : (
-            <ListBase
+            <RecordsList
               key={`${object.name}:${trash}`}
               resource={object.name}
               perPage={s.perPage}
               sort={s.sort}
-              filter={{
-                ...params(querySettings, trash),
-                __collectionSearch: capabilities.search,
-                __collectionFilter: capabilities.filter,
-                __collectionSort: capabilities.sort,
-              }}
+              filter={listFilter}
+              onFilterApplied={setAppliedListFilter}
               disableSyncWithLocation
               storeKey={false}
             >
               <RetainedListResults
                 scope={`${getStudioRuntime().localWorkspace?.scope ?? getStudioRuntime().apiBasePath}:${object.name}:${trash}`}
+                onListTotal={onCollectionTotal ? reportListTotal : undefined}
               >
                 <RecordTable
                   object={object}
@@ -936,7 +997,7 @@ export default function Records({
                   }}
                 />
               </RetainedListResults>
-            </ListBase>
+            </RecordsList>
           )}
         </div>
       </div>
@@ -1498,6 +1559,61 @@ export default function Records({
     </>
   );
 }
+function RecordsList({
+  children,
+  filter,
+  onFilterApplied,
+  ...props
+}: ListBaseProps & {
+  filter: Record<string, unknown>;
+  onFilterApplied: (key: string) => void;
+}) {
+  const initialFilter = useRef(filter);
+  return (
+    <ListBase {...props} filterDefaultValues={initialFilter.current}>
+      <RecordsListContent filter={filter} onFilterApplied={onFilterApplied}>
+        {children}
+      </RecordsListContent>
+    </ListBase>
+  );
+}
+
+function RecordsListContent({
+  children,
+  filter,
+  onFilterApplied,
+}: {
+  children: React.ReactNode;
+  filter: Record<string, unknown>;
+  onFilterApplied: (key: string) => void;
+}) {
+  const context = useListContext();
+  const { setFilters, filterValues } = context;
+  const filterKey = JSON.stringify(filter);
+  const appliedKey = JSON.stringify(filterValues);
+  const requestedFilter = useRef(filterKey);
+  useLayoutEffect(() => {
+    if (requestedFilter.current === filterKey) return;
+    requestedFilter.current = filterKey;
+    // setFilters updates the filter and the first page in one controller action.
+    setFilters(filter);
+  }, [filter, filterKey, setFilters]);
+  useLayoutEffect(() => {
+    onFilterApplied(appliedKey);
+  }, [appliedKey, onFilterApplied]);
+  return (
+    <ListContextProvider
+      value={
+        appliedKey === filterKey
+          ? context
+          : { ...context, isPlaceholderData: true }
+      }
+    >
+      {children}
+    </ListContextProvider>
+  );
+}
+
 function RecordTable({
   object,
   columns,
@@ -1533,6 +1649,7 @@ function RecordTable({
     setSort,
     page,
     perPage,
+    meta,
     setPerPage,
   } = useListContext<StudioRecord>();
   const { canScrollLeft, canScrollRight, hasOverflow, scrollByPage, shellRef } =
@@ -1552,6 +1669,11 @@ function RecordTable({
   const primaryColumnKey = columns.find(
     (key) => key !== CRM_INTEGRATION_COLUMN_KEY,
   );
+  const canBulkDelete =
+    columns.length > 0 &&
+    !trash &&
+    usesNativeRecordStorage(object) &&
+    collectionCapabilities(object).delete;
   if (error) return <div role="alert">{error.message}</div>;
   if (isPending)
     return (
@@ -1561,7 +1683,7 @@ function RecordTable({
           4,
         )}
         rows={Math.min(perPage || 6, 8)}
-        hasCheckbox={true}
+        hasCheckbox={canBulkDelete}
         ariaLabel="Cargando registros…"
       />
     );
@@ -1609,15 +1731,15 @@ function RecordTable({
             <DataTable
               virtualize
               total={total}
-              rowOffset={((page ?? 1) - 1) * perPage}
+              rowOffset={getListRecordOffset(
+                page ?? 1,
+                perPage,
+                meta?.recordOffset,
+              )}
               className="records-table"
               resource={object.name}
               bulkActionButtons={false}
-              bulkActionsToolbar={
-                collectionCapabilities(object).delete && !trash ? (
-                  <RecordsBulkActionsToolbar object={object} />
-                ) : undefined
-              }
+              hasBulkActions={canBulkDelete}
               rowClick={(_id, _resource, record) => {
                 if (!trash && collectionCapabilities(object).read)
                   onOpen(record as StudioRecord);
@@ -1760,6 +1882,7 @@ function RecordTable({
       {!data.length && (
         <RecordsFooter dataLength={data.length} object={object} total={total} />
       )}
+      {canBulkDelete && <RecordsBulkActionsToolbar object={object} />}
     </>
   );
 }
@@ -1773,9 +1896,7 @@ function RecordTableRowActions({
 }) {
   const t = useMessages(recordsMessages);
 
-  const canDelete = collectionCapabilities(object).delete;
-  const canRestore = trash && supportsLocalRecordTools(object);
-  if (!canDelete && !canRestore) return null;
+  if (!trash && !collectionCapabilities(object).delete) return null;
   return (
     <DataTable.Col
       label={t("Acciones")}
@@ -1789,93 +1910,198 @@ function RecordTableRowActions({
 }
 
 async function recordVersionsForBulkDelete(
+  request: typeof api,
   objectName: string,
   ids: Array<string | number>,
   records: StudioRecord[],
+  isCurrent: () => boolean,
 ) {
-  const versions: Record<string, number> = {};
+  const versions = new Map<string, number>();
+  const visible = new Map(
+    records.map((record) => [record.id, record._version]),
+  );
   const missing: string[] = [];
   for (const id of ids) {
-    const record = records.find((row) => row.id === id);
-    if (record?._version != null) versions[String(id)] = record._version;
+    const version = visible.get(String(id));
+    if (validRecordVersion(version)) versions.set(String(id), version);
     else missing.push(String(id));
   }
-  if (missing.length) {
-    const fetched = await Promise.all(
-      missing.map((id) =>
-        api<{ data: StudioRecord }>(
-          `/records/${objectName}/${encodeURIComponent(id)}`,
-        ).then((response) => response.data),
-      ),
-    );
-    for (const record of fetched) {
-      if (record._version != null)
-        versions[String(record.id)] = record._version;
-    }
-  }
-  const unresolved = ids.filter((id) => versions[String(id)] == null);
-  if (unresolved.length) {
-    throw new Error(
-      "No se pudieron obtener las versiones de algunos registros. Recarga e inténtalo de nuevo.",
+  const concurrentVersionReads = 10;
+  for (
+    let offset = 0;
+    offset < missing.length && isCurrent();
+    offset += concurrentVersionReads
+  ) {
+    const group = missing.slice(offset, offset + concurrentVersionReads);
+    await Promise.all(
+      group.map(async (id) => {
+        try {
+          const { data } = await request<{ data: StudioRecord }>(
+            recordPath(objectName, id),
+          );
+          if (data?.id === id && validRecordVersion(data._version))
+            versions.set(id, data._version);
+        } catch (error) {
+          if (
+            isReadAccessDenied(error) ||
+            (error as Error)?.name === "AbortError"
+          )
+            throw error;
+        }
+      }),
     );
   }
   return versions;
 }
 
+function validRecordVersion(version: unknown): version is number {
+  return (
+    typeof version === "number" && Number.isSafeInteger(version) && version > 0
+  );
+}
+
 function RecordsBulkActionsToolbar({ object }: { object: StudioObject }) {
   const t = useMessages(recordsMessages);
 
-  const { selectedIds, data, onUnselectItems, refetch } =
-    useListContext<StudioRecord>();
+  const {
+    selectedIds,
+    data,
+    onSelect,
+    onUnselectItems,
+    refetch,
+    sort,
+    filter,
+    filterValues,
+  } = useListContext<StudioRecord>();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const hubspotArchive = isHubspotArchive(
-    object.config.studio?.collection?.sourceId,
-    object.config.studio?.collection?.kind,
+  const [selecting, setSelecting] = useState(false);
+  const workspace = useRef(getStudioRuntime()).current;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const isCurrent = () => mounted.current && workspace === getStudioRuntime();
+  const activeFilter = { ...filterValues, ...filter };
+  const selectionScope = JSON.stringify([sort, activeFilter]);
+  const pendingSelection = useRef<AbortController | null>(null);
+  useLayoutEffect(
+    () => () => pendingSelection.current?.abort(),
+    [selectionScope, selectedIds],
   );
-  const permanent = !supportsLocalRecordTools(object);
+  const selectAll = async () => {
+    if (pendingSelection.current || !isCurrent()) return;
+    const controller = new AbortController();
+    pendingSelection.current = controller;
+    setSelecting(true);
+    try {
+      const ids = await listRecordIds(
+        object.name,
+        { sort, filter: activeFilter, signal: controller.signal },
+        workspace,
+      );
+      if (!ids) throw new Error("Incomplete record selection");
+      if (isCurrent() && !controller.signal.aborted) onSelect(ids);
+    } catch (error) {
+      if (
+        isCurrent() &&
+        !controller.signal.aborted &&
+        (error as Error)?.name !== "AbortError"
+      )
+        toast.error(
+          t("No se pudieron seleccionar todos los registros. Reintenta."),
+        );
+    } finally {
+      pendingSelection.current = null;
+      setSelecting(false);
+    }
+  };
   const count = selectedIds?.length ?? 0;
   const runDelete = async () => {
-    if (!selectedIds?.length) return;
+    if (!selectedIds?.length || !isCurrent()) return;
+    const request = createStudioRequest(workspace);
     setBusy(true);
     try {
       const versions = await recordVersionsForBulkDelete(
+        request,
         object.name,
         selectedIds,
         data ?? EMPTY_RECORDS,
+        isCurrent,
       );
-      const result = await api<{
-        data: Array<{ id: string; ok: boolean; error?: string }>;
-      }>(`/records/${object.name}/bulk`, "POST", {
-        action: "delete",
-        records: selectedIds.map((id) => ({
-          id: String(id),
-          version: versions[String(id)],
-        })),
+      if (!isCurrent()) return;
+      const records = selectedIds.flatMap((id) => {
+        const version = versions.get(String(id));
+        return version === undefined ? [] : [{ id: String(id), version }];
       });
-      const failures = result.data.filter((row) => !row.ok);
-      if (failures.length) {
-        throw new Error(
-          failures
-            .map((row) => row.error)
-            .filter(Boolean)
-            .join(" ") || t("No se pudieron eliminar algunos registros."),
+      const completed = new Set<string>();
+      const errors = new Set<string>();
+      if (records.length !== selectedIds.length)
+        errors.add(
+          t(
+            "No se pudieron obtener las versiones de algunos registros. Recarga e inténtalo de nuevo.",
+          ),
         );
+      for (
+        let offset = 0;
+        offset < records.length && isCurrent();
+        offset += MAX_BULK_RECORDS
+      ) {
+        const batch = records.slice(offset, offset + MAX_BULK_RECORDS);
+        try {
+          const result = await request<{
+            data: Array<{ id: string; ok: boolean; error?: string }>;
+          }>(`/records/${encodeURIComponent(object.name)}/bulk`, "POST", {
+            action: "delete",
+            records: batch,
+          });
+          const submitted = new Set(batch.map(({ id }) => id));
+          for (const row of result.data) {
+            if (!submitted.has(row.id)) continue;
+            if (row.ok) completed.add(row.id);
+            else if (row.error) errors.add(row.error);
+          }
+        } catch (error) {
+          if ((error as Error)?.name === "AbortError") return;
+          if (error instanceof Error && error.message)
+            errors.add(error.message);
+          // Keep earlier confirmations and stop when a batch result is unknown.
+          break;
+        }
       }
-      toast.success(
-        permanent
-          ? count === 1
-            ? t("Registro eliminado")
-            : t("%{p0} registros eliminados", { p0: count })
-          : count === 1
+      if (!isCurrent()) return;
+      const remaining = selectedIds.filter((id) => !completed.has(String(id)));
+      if (remaining.length) {
+        const description =
+          [...errors].join(" ") ||
+          t("No se pudieron eliminar algunos registros.");
+        const deleted = selectedIds.length - remaining.length;
+        if (deleted)
+          toast.warning(
+            t("Se completó la eliminación de %{p0} de %{p1} registros.", {
+              p0: deleted,
+              p1: selectedIds.length,
+            }),
+            { description },
+          );
+        else toast.error(description);
+        onSelect(remaining);
+      } else {
+        toast.success(
+          count === 1
             ? t("Registro movido a la papelera")
             : t("%{p0} registros movidos a la papelera", { p0: count }),
-      );
+        );
+        onUnselectItems(true);
+      }
       setConfirmOpen(false);
-      onUnselectItems(true);
       await refetch();
     } catch (error) {
-      toast.error((error as Error).message);
+      if (isCurrent() && (error as Error).name !== "AbortError")
+        toast.error((error as Error).message);
     } finally {
       setBusy(false);
     }
@@ -1883,12 +2109,21 @@ function RecordsBulkActionsToolbar({ object }: { object: StudioObject }) {
   return (
     <>
       <BulkActionsToolbar>
-        <SelectAllButton />
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-9"
+          disabled={busy || selecting}
+          onClick={() => void selectAll()}
+        >
+          {selecting ? t("Seleccionando registros…") : t("Seleccionar todo")}
+        </Button>
         <Button
           type="button"
           variant="destructive"
           className="h-9"
-          disabled={busy}
+          disabled={busy || selecting}
           aria-label={t("Eliminar seleccionados")}
           onClick={() => setConfirmOpen(true)}
         >
@@ -1904,33 +2139,11 @@ function RecordsBulkActionsToolbar({ object }: { object: StudioObject }) {
             : t("Eliminar %{p0} registros", { p0: count })
         }
         content={
-          hubspotArchive
-            ? t("¿Archivar %{p0} en HubSpot?", {
-                p0:
-                  count === 1
-                    ? t("este registro")
-                    : t("%{p0} registros", { p0: count }),
-              })
-            : permanent
-              ? count === 1
-                ? t(
-                    "¿Eliminar permanentemente este registro? Esta acción no se puede deshacer.",
-                  )
-                : t(
-                    "¿Eliminar permanentemente %{p0} registros? Esta acción no se puede deshacer.",
-                    { p0: count },
-                  )
-              : count === 1
-                ? "¿Mover este registro a la papelera?"
-                : t("¿Mover %{p0} registros a la papelera?", { p0: count })
+          count === 1
+            ? t("¿Mover este registro a la papelera?")
+            : t("¿Mover %{p0} registros a la papelera?", { p0: count })
         }
-        confirm={
-          hubspotArchive
-            ? t("Archivar en HubSpot")
-            : permanent
-              ? t("Eliminar permanentemente")
-              : t("Mover a papelera")
-        }
+        confirm={t("Mover a papelera")}
         confirmColor="warning"
         loading={busy}
         onClose={() => setConfirmOpen(false)}
@@ -1956,13 +2169,10 @@ function RecordRowAction({
     object.config.studio?.collection?.sourceId,
     object.config.studio?.collection?.kind,
   );
-  const permanent = !supportsLocalRecordTools(object);
+  const permanent = !usesNativeRecordStorage(object);
   const [pending, setPending] = useState<"delete" | "restore" | null>(null);
   const [busy, setBusy] = useState(false);
-  const canDelete = collectionCapabilities(object).delete;
-  const canRestore = trash && supportsLocalRecordTools(object);
   const label = recordLabel(record);
-  if (!canDelete && !canRestore) return null;
   const close = () => setPending(null);
   const run = async () => {
     setBusy(true);
@@ -1973,20 +2183,30 @@ function RecordRowAction({
         });
         toast.success(t("Registro restaurado"));
       } else {
-        await api(
-          `${recordPath(object.name, record.id)}?version=${record._version}`,
+        const result = await api<{ local?: boolean } | undefined>(
+          recordDeletionPath(object.name, record.id, record._version),
           "DELETE",
         );
         toast.success(
-          permanent
-            ? t("Registro eliminado")
-            : t("Registro movido a la papelera"),
+          result?.local === true
+            ? t(
+                "Movido a la papelera en este dispositivo · sincronización pendiente",
+              )
+            : permanent
+              ? t("Registro eliminado")
+              : t("Registro movido a la papelera"),
         );
       }
       close();
       await refetch();
     } catch (error) {
-      toast.error((error as Error).message);
+      toast.error(
+        (error as { code?: string })?.code === "LOCAL_RECORD_CHANGES_PENDING"
+          ? t(
+              "Hay cambios locales pendientes. Sincroniza o resuelve los conflictos antes de restaurar.",
+            )
+          : (error as Error).message,
+      );
     } finally {
       setBusy(false);
     }
@@ -1996,7 +2216,7 @@ function RecordRowAction({
       className="records-table-row-actions"
       onClick={(event) => event.stopPropagation()}
     >
-      {canRestore ? (
+      {trash ? (
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -2042,7 +2262,7 @@ function RecordRowAction({
               ? t(
                   "¿Eliminar permanentemente este registro? Esta acción no se puede deshacer.",
                 )
-              : "¿Mover este registro a la papelera?"
+              : t("¿Mover este registro a la papelera?")
         }
         confirm={
           hubspotArchive
@@ -2059,8 +2279,10 @@ function RecordRowAction({
       <Confirm
         isOpen={pending === "restore"}
         title={t("Restaurar %{p0}", { p0: label })}
-        content="El registro volverá a la lista principal si cumple la estructura actual."
-        confirm="Restaurar"
+        content={t(
+          "El registro volverá a la lista principal si cumple la estructura actual y el servidor confirma la restauración.",
+        )}
+        confirm={t("Restaurar")}
         loading={busy}
         onClose={close}
         onConfirm={() => void run()}

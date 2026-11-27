@@ -99,10 +99,10 @@ export const studioMessages = {
     "columns detected",
     "colunas detectadas",
   ],
-  "lotes automáticos": [
-    "lotes automáticos",
-    "automatic batches",
-    "lotes automáticos",
+  "Al menos %{v1} lotes automáticos": [
+    "Al menos %{v1} lotes automáticos",
+    "At least %{v1} automatic batches",
+    "Pelo menos %{v1} lotes automáticos",
   ],
   "Cambiar archivo": ["Cambiar archivo", "Change file", "Trocar arquivo"],
   "Hoja de cálculo activa": [
@@ -1865,6 +1865,37 @@ export const studioMessages = {
     "An error occurred while creating the collection.",
     "Ocorreu um erro ao criar a coleção.",
   ],
+  "No se pudo validar el lote de importación.": [
+    "No se pudo validar el lote de importación.",
+    "Could not validate the import batch.",
+    "Não foi possível validar o lote de importação.",
+  ],
+  "No se pudo continuar la importación.": [
+    "No se pudo continuar la importación.",
+    "Could not continue the import.",
+    "Não foi possível continuar a importação.",
+  ],
+  "Reanudar importación": [
+    "Reanudar importación",
+    "Resume import",
+    "Retomar importação",
+  ],
+  "No se pudo confirmar el resultado del lote.": [
+    "No se pudo confirmar el resultado del lote.",
+    "Could not confirm the batch result.",
+    "Não foi possível confirmar o resultado do lote.",
+  ],
+  "Resultado de la importación": [
+    "Resultado de la importación",
+    "Import result",
+    "Resultado da importação",
+  ],
+  "%{created} importados · %{skipped} omitidos · %{errors} con errores": [
+    "%{created} importados · %{skipped} omitidos · %{errors} con errores",
+    "%{created} imported · %{skipped} skipped · %{errors} with errors",
+    "%{created} importados · %{skipped} ignorados · %{errors} com erros",
+  ],
+  "Abrir pantalla": ["Abrir pantalla", "Open screen", "Abrir tela"],
   "Agrupa los campos automáticamente en bloques visuales colapsables en el formulario.":
     [
       "Agrupa los campos automáticamente en bloques visuales colapsables en el formulario.",
@@ -1876,6 +1907,21 @@ export const studioMessages = {
     "Se creará la pantalla vacía, lista para capturar nuevos registros.",
     "An empty screen will be created, ready for new records.",
     "Uma tela vazia será criada, pronta para novos registros.",
+  ],
+  "Se omitirán las filas sin datos en los campos seleccionados (%{v1}).": [
+    "Se omitirán las filas sin datos en los campos seleccionados (%{v1}).",
+    "Rows with empty selected fields will be skipped (%{v1}).",
+    "As linhas sem dados nos campos selecionados serão ignoradas (%{v1}).",
+  ],
+  "Registros que exceden el tamaño máximo por lote (%{v1}).": [
+    "Registros que exceden el tamaño máximo por lote (%{v1}).",
+    "Records above the batch size limit (%{v1}).",
+    "Registros acima do limite de tamanho do lote (%{v1}).",
+  ],
+  "El registro %{v1} supera el tamaño máximo de un lote.": [
+    "El registro %{v1} supera el tamaño máximo de un lote.",
+    "Record %{v1} exceeds the batch size limit.",
+    "O registro %{v1} excede o limite de tamanho do lote.",
   ],
   "Crear Colección y Pantalla": [
     "Crear Colección y Pantalla",

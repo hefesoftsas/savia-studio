@@ -108,10 +108,11 @@ it("subscribes only after the dedicated tenant resolves and uses its ID", async 
   };
   rerender();
   await waitFor(() =>
-    expect(post).toHaveBeenCalledWith("/v1/realtime/ticket", {
-      topics: ["settings"],
-      tenantId: 42,
-    }),
+    expect(post).toHaveBeenCalledWith(
+      "/v1/realtime/ticket",
+      { topics: ["settings"], tenantId: 42 },
+      { signal: expect.any(AbortSignal) },
+    ),
   );
   expect(post).toHaveBeenCalledTimes(1);
 });
@@ -120,9 +121,10 @@ it("preserves platform workspace subscriptions for platform administrators", asy
   state.tenant.isPlatformAdmin = true;
   const { post } = fixture();
   await waitFor(() =>
-    expect(post).toHaveBeenCalledWith("/v1/realtime/ticket", {
-      topics: ["settings"],
-      tenantId: 0,
-    }),
+    expect(post).toHaveBeenCalledWith(
+      "/v1/realtime/ticket",
+      { topics: ["settings"], tenantId: 0 },
+      { signal: expect.any(AbortSignal) },
+    ),
   );
 });

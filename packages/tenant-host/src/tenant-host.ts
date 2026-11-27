@@ -25,6 +25,8 @@ export {
 
 export const DEFAULT_CANONICAL_HOST = "savia.hefesoft.com";
 export const PREVIEW_CANONICAL_HOST = "savia-preview.hefesoft.com";
+/** Header carrying the tenant slug resolved by the gateway. */
+export const TENANT_SLUG_HEADER = "x-savia-tenant-slug";
 export const KNOWN_CANONICAL_HOSTS: ReadonlyArray<string> = [
   DEFAULT_CANONICAL_HOST,
   PREVIEW_CANONICAL_HOST,

@@ -28,6 +28,18 @@ const ERROR_CATEGORIES = [
       /d1 query result exceeded the maximum response size|query result.{0,80}response size.{0,20}50\s*mb/,
   },
   {
+    code: "D1_MIGRATION_HISTORY_MISMATCH",
+    remediation: "USE_MATCHING_CHECKOUT",
+    pattern:
+      /d1 migration history contains migrations missing from this checkout|database uses the retired migration history/,
+  },
+  {
+    code: "D1_MIGRATIONS_PENDING",
+    remediation: "INCLUDE_DB_IN_PREVIEW_UPDATE",
+    pattern:
+      /d1 schema has pending savia migrations|no such table: (?:main\.)?_savia_migrations\b/,
+  },
+  {
     code: "PULUMI_UPDATE_IN_PROGRESS",
     remediation: "WAIT_FOR_UPDATE",
     pattern:
@@ -49,7 +61,7 @@ const ERROR_CATEGORIES = [
     code: "MISSING_MODULE",
     remediation: "INSTALL_DEPENDENCIES",
     pattern:
-      /cannot find (?:module|package)|err_module_not_found|module_not_found/,
+      /cannot find (?:module|package)|err_module_not_found|module_not_found|err_pnpm_verify_deps_before_run/,
   },
   {
     code: "DNS_RESOLUTION_FAILED",

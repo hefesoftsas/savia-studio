@@ -12,6 +12,9 @@ release artifact. Native Worker identities and persistence belong to their
 environment stack; `RuntimeRelease` owns code and attachments. Backup, pause,
 migration, ordered publication and recovery run inside that resource. CI keeps
 its trusted-main checks and emits promotion evidence only after verification.
+Preview preparation starts the compiled Workers and their emitted modules in
+local Workerd before it creates the release artifact. If a Worker fails to start,
+preparation stops and the workflow reports the startup error.
 See [environment ownership](pulumi-environment-ownership.md) for the migration
 and commands. Source integration does not itself confirm live adoption.
 

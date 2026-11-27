@@ -1,44 +1,23 @@
-import type { StudioObject } from "@savia/studio-shared/metadata";
-export type CollectionCapabilities = {
-  list: boolean;
-  read: boolean;
-  create: boolean;
-  update: boolean;
-  delete: boolean;
-  schema: boolean;
-  customFields: boolean;
-  search?: boolean;
-  filter?: boolean;
-  sort?: boolean;
-};
+import {
+  usesNativeRecordStorage,
+  type CollectionCapabilities,
+  type StudioObject,
+} from "@savia/studio-shared/metadata";
+export type { CollectionCapabilities } from "@savia/studio-shared/metadata";
 const local: CollectionCapabilities = {
   list: true,
   read: true,
   create: true,
   update: true,
   delete: true,
+  restore: true,
   schema: true,
   customFields: true,
 };
 export function collectionCapabilities(
   object: StudioObject,
 ): CollectionCapabilities {
-  const studio = object.config.studio as StudioObject["config"]["studio"] & {
-    capabilities?: CollectionCapabilities;
-    collection?: {
-      capabilities: CollectionCapabilities;
-      kind?:
-        | "domain"
-        | "jsonapi"
-        | "postgres"
-        | "mysql"
-        | "mssql"
-        | "mongodb"
-        | "crm";
-      domain?: string;
-      collection?: string;
-    };
-  };
+  const studio = object.config.studio;
   if (
     studio?.collection?.kind === "domain" &&
     studio.collection.domain === "agency-network" &&
@@ -57,15 +36,7 @@ export function collectionCapabilities(
     return { ...local, schema: false };
   return local;
 }
-/** Trash, import and bulk mutations are a local-storage contract, not implied by individual writes. */
+/** Trash, import and other tooling for collections without scoped capabilities. */
 export function supportsLocalRecordTools(object: StudioObject): boolean {
-  const studio = object.config.studio as StudioObject["config"]["studio"] & {
-    capabilities?: CollectionCapabilities;
-    collection?: unknown;
-  };
-  return (
-    !studio?.collection &&
-    !studio?.capabilities &&
-    !["managed-customer", "managed-agency"].includes(studio?.business ?? "")
-  );
+  return usesNativeRecordStorage(object) && !object.config.studio?.capabilities;
 }

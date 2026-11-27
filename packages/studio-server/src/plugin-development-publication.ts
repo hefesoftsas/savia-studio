@@ -156,13 +156,15 @@ export async function publishPluginDevelopment(
       scope.tenantId,
       scope.principalId,
       parsed,
-      publicationGuards(
-        db,
-        scope,
-        input.pluginId,
-        snapshot,
-        input.sourceVersion,
-      ),
+      {
+        guardedWrite: publicationGuards(
+          db,
+          scope,
+          input.pluginId,
+          snapshot,
+          input.sourceVersion,
+        ),
+      },
     );
   const current = await readPublicationSnapshot(
     db,

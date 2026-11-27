@@ -14,19 +14,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { AppServices } from "@/app-services";
 import { ApiClient, ApiClientError } from "@/api/api-client";
 import { REQUEST_TIMEOUT_MS } from "@/api/request-timeout";
-import type { RealtimeChangeEvent } from "@/realtime/use-realtime";
 import { TenantBrandingPage } from "./tenant-branding-page";
 const realtime = vi.hoisted(() => ({
-  onEvent: undefined as undefined | ((event: RealtimeChangeEvent) => void),
+  refresh: undefined as undefined | (() => void),
 }));
-vi.mock("@/realtime/use-realtime", () => ({
-  useRealtimeTopics: ({
-    onEvent,
-  }: {
-    onEvent: NonNullable<typeof realtime.onEvent>;
-  }) => {
-    realtime.onEvent = onEvent;
-    return { status: "live" };
+vi.mock("@/realtime/use-realtime-refresh", () => ({
+  useRealtimeRefresh: (options: { refresh: () => void }) => {
+    realtime.refresh = options.refresh;
+    return { changed: false };
   },
 }));
 const branding = {
@@ -125,7 +120,7 @@ it("saves the login animation repeat preference with tenant branding", async () 
     expect.objectContaining({ loginAnimationRepeat: false }),
   );
 });
-it("uses the save response to confirm a version conflict and preserves local edits", async () => {
+it("retains local edits after a version conflict and offers explicit reload", async () => {
   const get = vi
     .fn()
     .mockResolvedValueOnce({ data: [{ id: 1, name: "Agencia Uno" }] })
@@ -137,7 +132,6 @@ it("uses the save response to confirm a version conflict and preserves local edi
   fireEvent.change(await screen.findByLabelText("Nombre visible"), {
     target: { value: "Mi edición" },
   });
-  await notifyBrandingChange("updated");
   fireEvent.click(screen.getByRole("button", { name: "Guardar cambios" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("otra persona");
   expect(screen.getByLabelText("Nombre visible")).toHaveValue("Mi edición");
@@ -245,7 +239,6 @@ it("keeps uploaded image previews local until save and releases them on discard"
     vi.unstubAllGlobals();
   }
 });
-
 it.each([
   ["Identidad", "Subir logo", "logoUrl", "Logo de Agencia Uno"],
   [
@@ -255,7 +248,7 @@ it.each([
     "Portada de la organización",
   ],
 ] as const)(
-  "saves the uploaded image in %s after a legacy upload notification",
+  "saves the uploaded image in %s only after explicit confirmation",
   async (tab, label, field, alt) => {
     const get = vi
       .fn()
@@ -271,7 +264,7 @@ it.each([
       );
     const apiClient = new ApiClient({
       baseUrl: "https://savia.test",
-      tokenSource: { getAccessToken: async () => null },
+      tokenSource: { getAccessToken: async () => "test-token" },
       fetcher,
     });
     const services = service(get);
@@ -289,10 +282,11 @@ it.each([
       "src",
       "blob:pending-image",
     );
-    await notifyBrandingChange("created");
-    const save = screen.getByRole("button", { name: "Guardar cambios" });
-    expect(save).toBeEnabled();
-    fireEvent.click(save);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "Guardar cambios" }),
+    ).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Guardar cambios" }));
     await screen.findByText("Marca guardada.");
     expect(JSON.parse(fetcher.mock.calls[1][1]?.body as string)).toMatchObject({
       [field]: url,
@@ -302,7 +296,7 @@ it.each([
   },
 );
 
-it("lets the user retry when the upload confirmation body stalls", async () => {
+it("releases the branding form when an upload confirmation stalls", async () => {
   const services = service(
     vi
       .fn()
@@ -319,7 +313,7 @@ it("lets the user retry when the upload confirmation body stalls", async () => {
     .mockResolvedValueOnce(Response.json({}, { status: 403 }));
   const apiClient = new ApiClient({
     baseUrl: "https://savia.test",
-    tokenSource: { getAccessToken: async () => null },
+    tokenSource: { getAccessToken: async () => "test-token" },
     fetcher,
   });
   vi.spyOn(apiClient, "get").mockImplementation(services.apiClient.get);
@@ -340,13 +334,15 @@ it("lets the user retry when the upload confirmation body stalls", async () => {
       });
     };
     await selectLogo();
-    expect(logo).toBeDisabled();
+    expect(screen.getByText("Subiendo imagen…")).toBeVisible();
     await act(() => vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS));
-    expect(logo).toBeEnabled();
     expect(screen.getByRole("alert")).toHaveTextContent("Revisa tu conexión");
+    expect(screen.queryByText("Subiendo imagen…")).not.toBeInTheDocument();
+    expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
     expect(name).toHaveValue("Mi edición");
 
     await selectLogo();
+    expect(fetcher).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("alert")).toHaveTextContent("No tienes permisos");
   } finally {
     vi.useRealTimers();
@@ -563,18 +559,6 @@ async function selectTab(name: string) {
   await userEvent.setup().click(await screen.findByRole("tab", { name }));
 }
 
-async function notifyBrandingChange(type: RealtimeChangeEvent["type"]) {
-  vi.useFakeTimers();
-  try {
-    await act(async () => {
-      realtime.onEvent?.({ topic: "settings", collection: "branding", type });
-      await vi.runOnlyPendingTimersAsync();
-    });
-  } finally {
-    vi.useRealTimers();
-  }
-}
-
 it("offers tenant creation to platform administrators without commercial organizations", async () => {
   const get = vi.fn().mockResolvedValueOnce({
     data: [
@@ -646,7 +630,7 @@ it("keeps branding fields and selected tab mounted during pending and failed bac
   await selectTab("Pantalla de acceso");
   const title = screen.getByLabelText("Título de acceso");
   title.focus();
-  await notifyBrandingChange("updated");
+  act(() => realtime.refresh?.());
   await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
   expect(screen.getByLabelText("Título de acceso")).toBe(title);
   expect(title).toHaveFocus();
@@ -665,7 +649,7 @@ it("removes loaded branding fields when a background read is forbidden", async (
     );
   render(<TenantBrandingPage services={service(get)} />);
   await screen.findByLabelText("Nombre visible");
-  await notifyBrandingChange("updated");
+  act(() => realtime.refresh?.());
   await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
   await waitFor(() =>
     expect(screen.queryByLabelText("Nombre visible")).not.toBeInTheDocument(),
@@ -686,7 +670,7 @@ it("preserves edits made while a clean branding refresh is pending", async () =>
     );
   render(<TenantBrandingPage services={service(get)} />);
   const name = await screen.findByLabelText("Nombre visible");
-  await notifyBrandingChange("updated");
+  act(() => realtime.refresh?.());
   await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
   fireEvent.change(name, { target: { value: "Local draft" } });
   await act(async () =>
@@ -697,5 +681,4 @@ it("preserves edits made while a clean branding refresh is pending", async () =>
   );
   expect(screen.getByLabelText("Nombre visible")).toBe(name);
   expect(name).toHaveValue("Local draft");
-  expect(screen.getByRole("button", { name: "Guardar cambios" })).toBeEnabled();
 });

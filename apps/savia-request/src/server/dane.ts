@@ -34,6 +34,7 @@ export async function lookupDaneCity(
   environment?: Pick<Env, "DB">,
   policy: RequestCachePolicy | undefined = daneCityFlow.steps[0]?.cache,
   tenant = "",
+  requestStartedAt = Date.now(),
 ) {
   if (
     typeof city !== "string" ||
@@ -54,6 +55,7 @@ export async function lookupDaneCity(
     policy,
     {
       tenant,
+      requestStartedAt,
       revision: JSON.stringify({
         operation: daneCityFlow.id,
         contract: 1,

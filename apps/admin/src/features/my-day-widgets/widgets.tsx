@@ -2,11 +2,18 @@ import { MailWidgetBody } from "./mail-widget";
 import type { MailState } from "./use-my-day-mail";
 import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
 import { matchTenantApiBasePath } from "@/features/studio/studio-navigation";
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useState,
+} from "react";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import { ApiClientError, type ApiClient } from "@/api/api-client";
 import { RequestTimeoutError } from "@/api/request-timeout";
 import { formatRetryTime } from "@/api/retry-after";
+import { retryIsBlocked, useRetryBlocked } from "@/hooks/use-retry-blocked";
 import { isOfflineError } from "@/offline/offline-error";
 import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
 import { getLogoutPending } from "@/auth/logout-progress";
@@ -91,16 +98,24 @@ function formatActionDay(day: string, locale: string): string {
 function WidgetError({
   message,
   onRetry,
+  retryDisabled = false,
 }: {
   message: string;
   onRetry: () => void;
+  retryDisabled?: boolean;
 }) {
   const t = useMessages(widgetMessages);
   return (
     <Alert aria-label={message}>
       <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
         <span>{message}</span>
-        <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onRetry}
+          disabled={retryDisabled}
+        >
           <RefreshCw className="size-3.5" />
           {t("Retry")}
         </Button>
@@ -125,11 +140,15 @@ type WidgetSchemaResult =
   | { status: "pending" | "missing" | "failed" }
   | { status: "ready"; schema: WidgetCollectionSchema };
 
-type WidgetSchemaRequest = {
-  apiClient: ApiClient;
+type WidgetReadScope = {
+  apiClient: ApiClient | undefined;
   apiBasePath: string;
   collection: string;
   sessionGeneration: number;
+};
+
+type WidgetSchemaRequest = {
+  scope: WidgetReadScope;
   revision: number;
   result: WidgetSchemaResult;
   refreshFailed?: boolean;
@@ -170,18 +189,17 @@ function WidgetSchemaFallback({
 function useWidgetSchema(
   apiClient: ApiClient | undefined,
   widget: Extract<MyDayWidget, { apiBasePath: string; collection: string }>,
-): WidgetSchemaResult & { retry: () => void; refreshFailed: boolean } {
+): WidgetSchemaResult & {
+  scope: WidgetReadScope;
+  retry: () => void;
+  refreshFailed: boolean;
+} {
   const [request, setRequest] = useState<WidgetSchemaRequest | null>(null);
   const [revision, setRevision] = useState(0);
   const sessionGeneration = useSessionGeneration();
   const { apiBasePath, collection } = widget;
-  const isCurrentScope = useCallback(
-    (request: WidgetSchemaRequest | null): request is WidgetSchemaRequest =>
-      request !== null &&
-      request.apiClient === apiClient &&
-      request.apiBasePath === apiBasePath &&
-      request.collection === collection &&
-      request.sessionGeneration === sessionGeneration,
+  const scope = useMemo(
+    () => ({ apiClient, apiBasePath, collection, sessionGeneration }),
     [apiClient, apiBasePath, collection, sessionGeneration],
   );
   const retry = () => setRevision((value) => value + 1);
@@ -190,49 +208,38 @@ function useWidgetSchema(
     topics: ["studio"],
     tenantId: Number(tenantId),
     enabled: tenantId !== undefined,
+    refreshScope: scope,
     refresh: retry,
   });
   useEffect(() => {
+    const { apiClient, apiBasePath, collection } = scope;
     if (!apiClient || getLogoutPending()) return;
-    let active = true;
-    const scope = {
-      apiClient,
-      apiBasePath,
-      collection,
-      sessionGeneration,
-      revision,
-    };
+    const controller = new AbortController();
+    const { signal } = controller;
     const finish = (result: WidgetSchemaResult) => {
-      if (active) setRequest({ ...scope, result });
+      if (!signal.aborted) setRequest({ scope, revision, result });
     };
-    void describeWidgetCollection(apiClient, apiBasePath, collection).then(
+    void describeWidgetCollection(apiClient, apiBasePath, collection, {
+      signal,
+    }).then(
       (schema) =>
         finish(schema ? { status: "ready", schema } : { status: "missing" }),
       (error: unknown) => {
-        if (!active) return;
+        if (signal.aborted) return;
         setRequest((previous) => {
           if (
-            isCurrentScope(previous) &&
+            previous?.scope === scope &&
             previous.result.status === "ready" &&
             isTemporaryWidgetError(error)
           )
             return { ...previous, revision, refreshFailed: true };
-          return { ...scope, result: { status: "failed" } };
+          return { scope, revision, result: { status: "failed" } };
         });
       },
     );
-    return () => {
-      active = false;
-    };
-  }, [
-    apiClient,
-    apiBasePath,
-    collection,
-    sessionGeneration,
-    revision,
-    isCurrentScope,
-  ]);
-  const current = isCurrentScope(request) ? request : null;
+    return () => controller.abort();
+  }, [scope, revision]);
+  const current = request?.scope === scope ? request : null;
   const result =
     current &&
     (current.revision === revision || current.result.status === "ready")
@@ -240,6 +247,7 @@ function useWidgetSchema(
       : { status: "pending" as const };
   return {
     ...result,
+    scope,
     retry,
     refreshFailed:
       current?.revision === revision && current.refreshFailed === true,
@@ -250,10 +258,12 @@ function WidgetRefreshStatus({
   metadata,
   error,
   onRetry,
+  retryDisabled,
 }: {
   metadata: { refreshFailed: boolean; retry: () => void };
   error?: string;
   onRetry: () => void;
+  retryDisabled?: boolean;
 }) {
   const t = useMessages(widgetMessages);
   return (
@@ -262,58 +272,116 @@ function WidgetRefreshStatus({
         metadata.refreshFailed ? t("Could not read this collection.") : error
       }
       onRetry={metadata.refreshFailed ? metadata.retry : onRetry}
+      retryDisabled={!metadata.refreshFailed && retryDisabled}
     />
   );
 }
 
+type WidgetReadFailure = {
+  status?: number;
+  retryAt?: number;
+  partial: boolean;
+};
+
 function useWidgetResult<T extends object>(
+  scope: WidgetReadScope,
   schema: WidgetCollectionSchema | null,
   selectionKey: string,
 ) {
   const [request, setRequest] = useState<{
+    scope: WidgetReadScope;
     schema: WidgetCollectionSchema | null;
     selectionKey: string;
     data?: T;
-    failure?: { status?: number; retryAt?: number };
+    failure?: WidgetReadFailure;
   }>();
   const setResult = useCallback(
-    (result?: { data: T } | { error: unknown }) => {
+    (result?: { data: T } | { error: unknown; data?: T }) => {
       setRequest((previous) => {
         const current =
-          previous?.schema === schema && previous.selectionKey === selectionKey
+          previous?.scope === scope &&
+          previous.schema === schema &&
+          previous.selectionKey === selectionKey
             ? previous
             : undefined;
         if (!result)
           return current?.failure
             ? { ...current, failure: undefined }
             : current;
-        if ("data" in result)
-          return { schema, selectionKey, data: result.data };
+        if (!("error" in result))
+          return { scope, schema, selectionKey, data: result.data };
+        const { error, data } = result;
         return {
+          scope,
           schema,
           selectionKey,
-          failure:
-            result.error instanceof ApiClientError
-              ? { status: result.error.status, retryAt: result.error.retryAt }
-              : {},
-          data: isTemporaryWidgetError(result.error)
-            ? current?.data
-            : undefined,
+          failure: {
+            ...(error instanceof ApiClientError
+              ? { status: error.status, retryAt: error.retryAt }
+              : {}),
+            partial: data !== undefined,
+          },
+          data:
+            data ?? (isTemporaryWidgetError(error) ? current?.data : undefined),
         };
       });
     },
-    [schema, selectionKey],
+    [scope, schema, selectionKey],
   );
+  const current = request?.scope === scope ? request : undefined;
   const result =
-    request?.schema === schema && request.selectionKey === selectionKey
-      ? request
+    current?.schema === schema && current.selectionKey === selectionKey
+      ? current
       : undefined;
-  return [
-    result?.data,
-    Boolean(result?.failure),
-    setResult,
-    result?.failure,
-  ] as const;
+  // A new selection invalidates the data but still reads the same source.
+  const failure =
+    result?.failure ??
+    (current?.failure?.status === 429 && current.failure.retryAt !== undefined
+      ? current.failure
+      : undefined);
+  return [result?.data, Boolean(failure), setResult, failure] as const;
+}
+
+function useWidgetRefresh(
+  scope: WidgetReadScope,
+  {
+    failure,
+    hubspot,
+    uiLocale,
+  }: {
+    failure: WidgetReadFailure | undefined;
+    hubspot?: boolean;
+    uiLocale: string;
+  },
+) {
+  const t = useMessages(widgetMessages);
+  const [nonce, setNonce] = useState(0);
+  const retryAt = failure?.status === 429 ? failure.retryAt : undefined;
+  const retryDisabled = useRetryBlocked(retryAt);
+  const retry = () => {
+    if (!retryIsBlocked(retryAt)) setNonce((value) => value + 1);
+  };
+  const tenantId = matchTenantApiBasePath(scope.apiBasePath);
+  useRealtimeRefresh({
+    topics: ["records"],
+    tenantId: Number(tenantId),
+    enabled: tenantId !== undefined,
+    refreshScope: scope,
+    accepts: (event) => event.collection === scope.collection,
+    refresh: retry,
+  });
+  const retryTime = formatRetryTime(failure, uiLocale);
+  const rateLimitMessage = retryTime
+    ? t(
+        hubspot
+          ? "HubSpot reached its request limit. You can retry from %{p0}."
+          : "You can retry from %{p0}.",
+        { p0: retryTime },
+      )
+    : hubspot && failure?.status === 429
+      ? t("HubSpot reached its request limit. Try again later.")
+      : undefined;
+  return { nonce, retryAt, retryDisabled, retry, rateLimitMessage };
 }
 
 type SummaryWidgetResult = {
@@ -331,8 +399,6 @@ export function SummaryWidgetBody({
 }) {
   const t = useMessages(widgetMessages);
   const uiLocale = intlLocale(useAppLocale());
-  const [nonce, setNonce] = useState(0);
-  const tenantId = matchTenantApiBasePath(widget.apiBasePath);
   const metadata = useWidgetSchema(apiClient, widget);
   const schema = metadata.status === "ready" ? metadata.schema : null;
   const detected = schema ? autoDetectWidgetConfig(schema) : {};
@@ -344,32 +410,26 @@ export function SummaryWidgetBody({
   const limit = widget.config?.limit ?? 5;
   const [result, failed, setResult, failure] =
     useWidgetResult<SummaryWidgetResult>(
+      metadata.scope,
       schema,
       JSON.stringify([statusField, amountField]),
     );
-
-  useRealtimeRefresh({
-    topics: ["records"],
-    tenantId: Number(tenantId),
-    enabled: tenantId !== undefined,
-    accepts: (event) => event.collection === widget.collection,
-    refresh: () => {
-      if (
-        schema?.hubspot &&
-        failure?.retryAt !== undefined &&
-        Date.now() < failure.retryAt
-      )
-        return;
-      setNonce((value) => value + 1);
-    },
-  });
+  const { nonce, retryAt, retryDisabled, retry, rateLimitMessage } =
+    useWidgetRefresh(metadata.scope, {
+      failure,
+      hubspot: schema?.hubspot,
+      uiLocale,
+    });
+  const isRateLimited = useEffectEvent(() => retryIsBlocked(retryAt));
 
   useEffect(() => {
-    if (!apiClient || !schema) return;
-    let active = true;
+    if (!apiClient || !schema || isRateLimited()) return;
+    const controller = new AbortController();
+    const { signal } = controller;
     setResult();
-    const finish = (result: SummaryWidgetResult) => {
-      if (active) setResult({ data: result });
+    const finish = (data: SummaryWidgetResult, error?: unknown) => {
+      if (!signal.aborted)
+        setResult(error === undefined ? { data } : { data, error });
     };
     void (async () => {
       try {
@@ -383,16 +443,19 @@ export function SummaryWidgetBody({
             apiClient,
             effective,
             statusField,
+            { signal },
           ).catch((error: unknown) => {
             if (
-              !active ||
+              signal.aborted ||
               !statusField ||
               !(error instanceof ApiClientError) ||
               error.status !== 422
             )
               throw error;
             fallbackToTotal = true;
-            return loadWidgetSummary(apiClient, effective);
+            return loadWidgetSummary(apiClient, effective, undefined, {
+              signal,
+            });
           });
           if (
             summary.total === undefined ||
@@ -414,45 +477,61 @@ export function SummaryWidgetBody({
           listWidgetRecords(
             apiClient,
             { ...widget, config: { ...widget.config, limit: 1 } },
-            { sortSupported: schema.sortSupported },
+            { signal, sortSupported: schema.sortSupported },
           ),
           statusField
-            ? summarizeWidgetRecords(apiClient, effective, statusField)
+            ? loadWidgetSummary(apiClient, effective, statusField, {
+                signal,
+              }).then(
+                ({ groups }) => ({ groups, error: undefined }),
+                (error: unknown) => {
+                  if (error instanceof ApiClientError && error.status === 422)
+                    return null;
+                  if (!isTemporaryWidgetError(error)) throw error;
+                  return { groups: undefined, error };
+                },
+              )
             : Promise.resolve(null),
         ]);
-        finish({ total: page.total, groups: breakdown });
+        finish(
+          {
+            total: page.total,
+            groups: breakdown?.groups ?? null,
+            breakdownUnavailable:
+              Boolean(statusField) && breakdown?.groups === undefined,
+          },
+          breakdown?.error,
+        );
       } catch (error) {
-        if (active) setResult({ error });
+        if (!signal.aborted) setResult({ error });
       }
     })();
-    return () => {
-      active = false;
-    };
+    return () => controller.abort();
   }, [apiClient, widget, schema, statusField, amountField, nonce, setResult]);
 
   if (metadata.status !== "ready")
     return <WidgetSchemaFallback {...metadata} />;
-  const retry = () => setNonce((value) => value + 1);
-  const retryTime = schema?.hubspot
-    ? formatRetryTime(failure, uiLocale)
-    : undefined;
-  const error = retryTime
-    ? t("HubSpot reached its request limit. You can retry from %{p0}.", {
-        p0: retryTime,
-      })
-    : schema?.hubspot && failure?.status === 429
-      ? t("HubSpot reached its request limit. Try again later.")
-      : t("Could not load this summary.");
-  if (failed && !result) return <WidgetError message={error} onRetry={retry} />;
+  const error = rateLimitMessage ?? t("Could not load this summary.");
+  if (failed && !result)
+    return (
+      <WidgetError
+        message={error}
+        onRetry={retry}
+        retryDisabled={retryDisabled}
+      />
+    );
   if (!result) return <WidgetSkeleton />;
   const { total, groups, breakdownUnavailable } = result;
+  const breakdownError = t("The status breakdown is unavailable.");
+  const refreshError = failure?.partial ? breakdownError : error;
 
   return (
     <div className="space-y-3">
       <WidgetRefreshStatus
         metadata={metadata}
-        error={failed ? error : undefined}
+        error={failed ? refreshError : undefined}
         onRetry={retry}
+        retryDisabled={retryDisabled}
       />
       {total === undefined ? (
         <p className="text-sm text-muted-foreground">
@@ -466,10 +545,8 @@ export function SummaryWidgetBody({
           <span className="text-sm text-muted-foreground">{t("records")}</span>
         </div>
       )}
-      {breakdownUnavailable ? (
-        <p className="text-sm text-muted-foreground">
-          {t("The status breakdown is unavailable.")}
-        </p>
+      {breakdownUnavailable && !failure?.partial ? (
+        <p className="text-sm text-muted-foreground">{breakdownError}</p>
       ) : groups?.length ? (
         <ul className="divide-y rounded-lg border">
           {groups.slice(0, limit).map((group) => (
@@ -511,34 +588,35 @@ export function ItemsWidgetBody({
 }) {
   const t = useMessages(widgetMessages);
   const uiLocale = intlLocale(useAppLocale());
-  const [nonce, setNonce] = useState(0);
-  const tenantId = matchTenantApiBasePath(widget.apiBasePath);
-  useRealtimeRefresh({
-    topics: ["records"],
-    tenantId: Number(tenantId),
-    enabled: tenantId !== undefined,
-    accepts: (event) => event.collection === widget.collection,
-    refresh: () => setNonce((value) => value + 1),
-  });
   const metadata = useWidgetSchema(apiClient, widget);
   const schema = metadata.status === "ready" ? metadata.schema : null;
   const { limit, sort, order, statusField, dateField } = widget.config ?? {};
-  const [records, failed, setRecords] = useWidgetResult<
+  const [records, failed, setRecords, failure] = useWidgetResult<
     { id: string; title: string; status?: string; date?: string }[]
   >(
+    metadata.scope,
     schema,
     JSON.stringify([limit, sort, order, statusField, dateField, uiLocale]),
   );
+  const { nonce, retryAt, retryDisabled, retry, rateLimitMessage } =
+    useWidgetRefresh(metadata.scope, {
+      failure,
+      hubspot: schema?.hubspot,
+      uiLocale,
+    });
+  const isRateLimited = useEffectEvent(() => retryIsBlocked(retryAt));
 
   useEffect(() => {
-    if (!apiClient || !schema) return;
-    let active = true;
+    if (!apiClient || !schema || isRateLimited()) return;
+    const controller = new AbortController();
+    const { signal } = controller;
     setRecords();
     void listWidgetRecords(apiClient, widget, {
+      signal,
       sortSupported: schema.sortSupported,
     }).then(
       (page) => {
-        if (!active) return;
+        if (signal.aborted) return;
         setRecords({
           data: page.data.map((record) => ({
             id: String(record.id),
@@ -549,12 +627,10 @@ export function ItemsWidgetBody({
         });
       },
       (error: unknown) => {
-        if (active) setRecords({ error });
+        if (!signal.aborted) setRecords({ error });
       },
     );
-    return () => {
-      active = false;
-    };
+    return () => controller.abort();
   }, [
     apiClient,
     widget,
@@ -568,16 +644,22 @@ export function ItemsWidgetBody({
 
   if (metadata.status !== "ready")
     return <WidgetSchemaFallback {...metadata} />;
-  const retry = () => setNonce((value) => value + 1);
-  const error = t("Could not load these items.");
+  const error = rateLimitMessage ?? t("Could not load these items.");
   if (failed && !records)
-    return <WidgetError message={error} onRetry={retry} />;
+    return (
+      <WidgetError
+        message={error}
+        onRetry={retry}
+        retryDisabled={retryDisabled}
+      />
+    );
   if (!records) return <WidgetSkeleton />;
   const refreshStatus = (
     <WidgetRefreshStatus
       metadata={metadata}
       error={failed ? error : undefined}
       onRetry={retry}
+      retryDisabled={retryDisabled}
     />
   );
   if (records.length === 0)
@@ -620,15 +702,6 @@ export function ChartWidgetBody({
 }) {
   const t = useMessages(widgetMessages);
   const uiLocale = intlLocale(useAppLocale());
-  const [nonce, setNonce] = useState(0);
-  const tenantId = matchTenantApiBasePath(widget.apiBasePath);
-  useRealtimeRefresh({
-    topics: ["records"],
-    tenantId: Number(tenantId),
-    enabled: tenantId !== undefined,
-    accepts: (event) => event.collection === widget.collection,
-    refresh: () => setNonce((value) => value + 1),
-  });
   const metadata = useWidgetSchema(apiClient, widget);
   const schema = metadata.status === "ready" ? metadata.schema : null;
   const detected = schema ? autoDetectWidgetConfig(schema) : {};
@@ -636,31 +709,37 @@ export function ChartWidgetBody({
   const amountField = widget.config?.amountField ?? detected.amountField;
   const limit = widget.config?.limit ?? 5;
   const unsupported = schema?.summarySupported === false;
-  const [groups, failed, setGroups] = useWidgetResult<WidgetSummaryGroup[]>(
-    schema,
-    JSON.stringify([groupField, amountField]),
-  );
+  const [groups, failed, setGroups, failure] = useWidgetResult<
+    WidgetSummaryGroup[]
+  >(metadata.scope, schema, JSON.stringify([groupField, amountField]));
+  const { nonce, retryAt, retryDisabled, retry, rateLimitMessage } =
+    useWidgetRefresh(metadata.scope, {
+      failure,
+      hubspot: schema?.hubspot,
+      uiLocale,
+    });
+  const isRateLimited = useEffectEvent(() => retryIsBlocked(retryAt));
 
   useEffect(() => {
-    if (!apiClient || !schema || unsupported || !groupField) return;
-    let active = true;
+    if (!apiClient || !schema || unsupported || !groupField || isRateLimited())
+      return;
+    const controller = new AbortController();
+    const { signal } = controller;
     setGroups();
     void summarizeWidgetRecords(
       apiClient,
       { ...widget, config: { ...widget.config, amountField } },
       groupField,
-      undefined,
+      { signal },
     ).then(
       (breakdown) => {
-        if (active) setGroups({ data: breakdown });
+        if (!signal.aborted) setGroups({ data: breakdown });
       },
       (error: unknown) => {
-        if (active) setGroups({ error });
+        if (!signal.aborted) setGroups({ error });
       },
     );
-    return () => {
-      active = false;
-    };
+    return () => controller.abort();
   }, [
     apiClient,
     widget,
@@ -688,15 +767,22 @@ export function ChartWidgetBody({
         )}
       </p>
     );
-  const retry = () => setNonce((value) => value + 1);
-  const error = t("Could not load this chart.");
-  if (failed && !groups) return <WidgetError message={error} onRetry={retry} />;
+  const error = rateLimitMessage ?? t("Could not load this chart.");
+  if (failed && !groups)
+    return (
+      <WidgetError
+        message={error}
+        onRetry={retry}
+        retryDisabled={retryDisabled}
+      />
+    );
   if (!groups) return <WidgetSkeleton />;
   const refreshStatus = (
     <WidgetRefreshStatus
       metadata={metadata}
       error={failed ? error : undefined}
       onRetry={retry}
+      retryDisabled={retryDisabled}
     />
   );
   if (groups.length === 0)
@@ -756,37 +842,39 @@ export function ActionsWidgetBody({
   const locale = useAppLocale();
   const uiLocale = intlLocale(locale);
   const t = useMessages(widgetMessages);
-  const [nonce, setNonce] = useState(0);
-  const tenantId = matchTenantApiBasePath(widget.apiBasePath);
-  useRealtimeRefresh({
-    topics: ["records"],
-    tenantId: Number(tenantId),
-    enabled: tenantId !== undefined,
-    accepts: (event) => event.collection === widget.collection,
-    refresh: () => setNonce((value) => value + 1),
-  });
   const metadata = useWidgetSchema(apiClient, widget);
   const schema = metadata.status === "ready" ? metadata.schema : null;
   const detected = schema ? autoDetectWidgetConfig(schema) : {};
   const dateField = widget.config?.dateField ?? detected.dateField;
   const limit = widget.config?.limit ?? 5;
   const unsupported = schema?.sortSupported === false;
-  const [items, failed, setItems] = useWidgetResult<
+  const [items, failed, setItems, failure] = useWidgetResult<
     {
       id: string;
       title: string;
       day: string;
       bucket: "overdue" | "today" | "week";
     }[]
-  >(schema, dateField ?? "");
+  >(metadata.scope, schema, dateField ?? "");
+  const { nonce, retryAt, retryDisabled, retry, rateLimitMessage } =
+    useWidgetRefresh(metadata.scope, {
+      failure,
+      hubspot: schema?.hubspot,
+      uiLocale,
+    });
+  const isRateLimited = useEffectEvent(() => retryIsBlocked(retryAt));
 
   useEffect(() => {
-    if (!apiClient || !schema || unsupported || !dateField) return;
-    let active = true;
+    if (!apiClient || !schema || unsupported || !dateField || isRateLimited())
+      return;
+    const controller = new AbortController();
+    const { signal } = controller;
     setItems();
-    void listWidgetRecordsForReview(apiClient, widget, dateField).then(
+    void listWidgetRecordsForReview(apiClient, widget, dateField, {
+      signal,
+    }).then(
       (page) => {
-        if (!active) return;
+        if (signal.aborted) return;
         setItems({
           data: bucketActionItems(page.data, dateField).map((entry) => ({
             id: String(entry.record.id),
@@ -797,12 +885,10 @@ export function ActionsWidgetBody({
         });
       },
       (error: unknown) => {
-        if (active) setItems({ error });
+        if (!signal.aborted) setItems({ error });
       },
     );
-    return () => {
-      active = false;
-    };
+    return () => controller.abort();
   }, [apiClient, widget, schema, unsupported, dateField, nonce, setItems]);
 
   if (metadata.status !== "ready")
@@ -819,15 +905,22 @@ export function ActionsWidgetBody({
         {t("This source cannot sort records by due date.")}
       </p>
     );
-  const retry = () => setNonce((value) => value + 1);
-  const error = t("Could not load these actions.");
-  if (failed && !items) return <WidgetError message={error} onRetry={retry} />;
+  const error = rateLimitMessage ?? t("Could not load these actions.");
+  if (failed && !items)
+    return (
+      <WidgetError
+        message={error}
+        onRetry={retry}
+        retryDisabled={retryDisabled}
+      />
+    );
   if (!items) return <WidgetSkeleton />;
   const refreshStatus = (
     <WidgetRefreshStatus
       metadata={metadata}
       error={failed ? error : undefined}
       onRetry={retry}
+      retryDisabled={retryDisabled}
     />
   );
   if (items.length === 0)

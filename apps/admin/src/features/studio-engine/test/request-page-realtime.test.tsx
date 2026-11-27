@@ -16,6 +16,7 @@ const state = vi.hoisted(() => ({
   callbacks: null as any,
   status: "live",
   durable: false,
+  formValues: {} as Record<string, unknown>,
 }));
 const requestPageApi = vi.hoisted(() => vi.fn());
 const executeRequestPageAction = vi.hoisted(() => vi.fn());
@@ -40,7 +41,7 @@ vi.mock("../dynamic-form", () => ({
     onSave: (values: Record<string, unknown>) => void;
     submitLabel: string;
   }) => (
-    <button type="button" onClick={() => void onSave({})}>
+    <button type="button" onClick={() => void onSave(state.formValues)}>
       {submitLabel}
     </button>
   ),
@@ -53,6 +54,7 @@ afterEach(() => {
   state.callbacks = null;
   state.status = "live";
   state.durable = false;
+  state.formValues = {};
   vi.useRealTimers();
   requestPageApi.mockReset();
   executeRequestPageAction.mockReset();
@@ -168,6 +170,217 @@ it("loads the page's runs from a principal realtime hint", async () => {
   await waitFor(() =>
     expect(screen.getByText("Actualizado remoto")).toBeTruthy(),
   );
+});
+
+it("clears a results-read error after successfully reloading history", async () => {
+  requestPageApi
+    .mockRejectedValueOnce(new Error("Historial temporalmente no disponible"))
+    .mockResolvedValueOnce({
+      data: [run("quote_page", "Cotización recuperada")],
+    });
+  render(<RequestPage object={page("quote_page")} />);
+
+  await screen.findByText("Historial temporalmente no disponible");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Actualizar resultados" }),
+  );
+  await screen.findByText("Cotización recuperada");
+  expect(
+    screen.queryByText("Historial temporalmente no disponible"),
+  ).toBeNull();
+  expect(executeRequestPageAction).not.toHaveBeenCalled();
+});
+
+it("keeps a submission error through a successful history read and clears it on the next submission", async () => {
+  const saved = run("quote_page", "Cotización guardada");
+  requestPageApi
+    .mockResolvedValueOnce({ data: [] })
+    .mockResolvedValueOnce({ data: [] })
+    .mockResolvedValue({ data: [saved] });
+  executeRequestPageAction
+    .mockRejectedValueOnce(new Error("No se pudo ejecutar la cotización"))
+    .mockResolvedValueOnce(saved);
+  render(<RequestPage object={page("quote_page")} />);
+  await waitFor(() => expect(requestPageApi).toHaveBeenCalledTimes(1));
+
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  await waitFor(() => expect(requestPageApi).toHaveBeenCalledTimes(2));
+  await screen.findByText("No se pudo ejecutar la cotización");
+
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  await screen.findByText("Cotización guardada");
+  expect(screen.queryByText("No se pudo ejecutar la cotización")).toBeNull();
+  expect(executeRequestPageAction).toHaveBeenCalledTimes(2);
+});
+
+it("clears an uncertain submission once the matching completed run is in history", async () => {
+  const completed = run("quote_page", "Resultado confirmado");
+  let submittedId: string;
+  requestPageApi
+    .mockResolvedValueOnce({ data: [] })
+    .mockImplementation(async () => ({
+      data: [{ ...completed, id: submittedId }],
+    }));
+  executeRequestPageAction.mockImplementationOnce(
+    async (_name, _action, _data, _mode, id) => {
+      if (id === undefined) throw new Error("Expected an execution ID");
+      submittedId = id;
+      throw new Error("Unconfirmed submission");
+    },
+  );
+  render(<RequestPage object={page("quote_page")} />);
+  await waitFor(() => expect(requestPageApi).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+
+  await screen.findByText("Resultado confirmado");
+  expect(screen.queryByText("Unconfirmed submission")).toBeNull();
+  expect(executeRequestPageAction).toHaveBeenCalledOnce();
+});
+
+it("keeps the pending ID when retrying identical values in another key order", async () => {
+  state.formValues = { reference: "TEST", plate: "TESTCAR" };
+  requestPageApi.mockResolvedValue({ data: [] });
+  executeRequestPageAction
+    .mockRejectedValueOnce(new Error("No receipt"))
+    .mockResolvedValueOnce(run("quote_page", "Recovered"));
+  render(<RequestPage object={page("quote_page")} />);
+  await waitFor(() => expect(requestPageApi).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  await screen.findByText("No receipt");
+  await screen.findByRole("button", { name: "Ejecutar" });
+
+  state.formValues = { plate: "TESTCAR", reference: "TEST" };
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  await waitFor(() =>
+    expect(executeRequestPageAction).toHaveBeenCalledTimes(2),
+  );
+  expect(executeRequestPageAction.mock.calls[1][4]).toBe(
+    executeRequestPageAction.mock.calls[0][4],
+  );
+});
+
+it("keeps a confirmed quote when an older history read arrives before a failed refresh", async () => {
+  const oldHistory = deferred<{ data: PageRun[] }>();
+  requestPageApi
+    .mockResolvedValueOnce({ data: [] })
+    .mockReturnValueOnce(oldHistory.promise)
+    .mockRejectedValueOnce(new Error("History offline"));
+  executeRequestPageAction.mockImplementationOnce(
+    async (_name, _action, _data, _mode, id) => ({
+      ...run("quote_page", "Confirmed quote"),
+      id,
+    }),
+  );
+  render(<RequestPage object={page("quote_page")} />);
+  await waitFor(() =>
+    expect(screen.queryByText("Cargando resultados…")).toBeNull(),
+  );
+
+  fireEvent.click(
+    screen.getByRole("button", { name: "Actualizar resultados" }),
+  );
+  expect(requestPageApi).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  await screen.findByText("Confirmed quote");
+
+  await act(async () => oldHistory.resolve({ data: [] }));
+  await screen.findByText("History offline");
+  expect(screen.getByText("Confirmed quote")).toBeTruthy();
+  expect(requestPageApi).toHaveBeenCalledTimes(3);
+});
+
+it("keeps the completed history row when a delayed running receipt arrives", async () => {
+  const delayedReceipt = deferred<PageRun>();
+  const completed = {
+    ...run("quote_page", "Confirmed quote"),
+    createdAt: new Date().toISOString(),
+  };
+  requestPageApi
+    .mockResolvedValueOnce({ data: [] })
+    .mockResolvedValueOnce({ data: [completed] })
+    .mockRejectedValueOnce(new Error("History offline"));
+  executeRequestPageAction.mockImplementationOnce(
+    (_name, _action, _data, _mode, id) => {
+      completed.id = id;
+      return delayedReceipt.promise;
+    },
+  );
+  render(<RequestPage object={page("quote_page")} />);
+  await waitFor(() => expect(requestPageApi).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Actualizar resultados" }),
+  );
+  await screen.findByText("Completado");
+
+  await act(async () =>
+    delayedReceipt.resolve({ ...completed, status: "running" }),
+  );
+  await screen.findByText("History offline");
+  expect(screen.getByText("Completado")).toBeTruthy();
+  expect(screen.queryByText("En proceso")).toBeNull();
+});
+
+it.each([401, 403])(
+  "clears protected history on %s and keeps a late receipt hidden until an authorized read",
+  async (status) => {
+    const denied = Object.assign(new Error("Quote access denied"), { status });
+    const delayedReceipt = deferred<PageRun>();
+    const previous = run("quote_page", "Previously authorized quote");
+    requestPageApi
+      .mockResolvedValueOnce({ data: [previous] })
+      .mockRejectedValue(denied);
+    executeRequestPageAction.mockReturnValueOnce(delayedReceipt.promise);
+    render(<RequestPage object={page("quote_page")} />);
+    await screen.findByText(previous.label);
+    fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Actualizar resultados" }),
+    );
+    await screen.findByText(denied.message);
+    expect(screen.queryByText(previous.label)).toBeNull();
+
+    const late = {
+      ...run("quote_page", "Late quote receipt"),
+      id: executeRequestPageAction.mock.calls[0][4],
+    };
+    await act(async () => delayedReceipt.resolve(late));
+    expect(screen.queryByText(late.label)).toBeNull();
+    expect(screen.getByText(denied.message)).toBeTruthy();
+
+    requestPageApi.mockResolvedValueOnce({ data: [late] });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Actualizar resultados" }),
+    );
+    await screen.findByText(late.label);
+    expect(screen.queryByText(denied.message)).toBeNull();
+    expect(executeRequestPageAction).toHaveBeenCalledOnce();
+  },
+);
+
+it("ignores a successful history response started before an execution was denied", async () => {
+  const oldHistory = deferred<{ data: PageRun[] }>();
+  const denied = Object.assign(new Error("Quote access denied"), {
+    status: 403,
+  });
+  const previous = run("quote_page", "Previously authorized quote");
+  requestPageApi
+    .mockResolvedValueOnce({ data: [previous] })
+    .mockReturnValueOnce(oldHistory.promise)
+    .mockRejectedValue(denied);
+  executeRequestPageAction.mockRejectedValueOnce(denied);
+  render(<RequestPage object={page("quote_page")} />);
+  await screen.findByText(previous.label);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Actualizar resultados" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  await screen.findByText(denied.message);
+  expect(screen.queryByText(previous.label)).toBeNull();
+
+  await act(async () => oldHistory.resolve({ data: [previous] }));
+  expect(screen.queryByText(previous.label)).toBeNull();
+  expect(screen.getByText(denied.message)).toBeTruthy();
 });
 
 it("drops an old page read and runs a catch-up read after a scope switch", async () => {

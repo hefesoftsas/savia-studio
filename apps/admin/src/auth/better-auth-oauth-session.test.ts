@@ -241,6 +241,29 @@ describe("BetterAuthOAuthSession", () => {
     },
   );
 
+  it("starts a fresh authorization for a Bookings recovery link", async () => {
+    const redirect = vi.fn();
+    const origin = "https://clinic.savia-preview.hefesoft.com";
+    const session = new BetterAuthOAuthSession({
+      apiUrl: origin,
+      navigation: {
+        currentUrl: () =>
+          `${origin}/#/login?resume=bookings&tab=reservations&date=2026-11-25&next=external`,
+        redirect,
+      },
+    });
+
+    await session.login();
+
+    const authorize = new URL(redirect.mock.calls[0][0]);
+    expect(authorize.pathname).toBe("/api/auth/admin/authorize");
+    expect(authorize.searchParams.get("return_to")).toBe(origin);
+    expect(authorize.searchParams.get("resume")).toBe("bookings");
+    expect(authorize.searchParams.get("booking_query")).toBe(
+      "tab=reservations&date=2026-11-25",
+    );
+  });
+
   it.each(["availability", "reservations", "sharing"])(
     "preserves the %s tab and date on a tenant deep link",
     async (tab) => {

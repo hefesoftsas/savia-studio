@@ -405,6 +405,89 @@ it("updates the email tenant when transferring an existing account", async () =>
     expect.any(Request),
   );
 });
+
+it.each(["tenant creation", "membership assignment", "user update"])(
+  "keeps Auth and membership aligned when another %s targets the first administrator",
+  async (operation) => {
+    const source = await tenant();
+    const destination = await tenant();
+    const suffix = source.id;
+    await member(
+      `concurrent-transfer-staying-${suffix}@example.test`,
+      source.id,
+    );
+    const moving = await member(
+      `concurrent-transfer-moving-${suffix}@example.test`,
+      source.id,
+    );
+    const started = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    let authTenantId: number | null = source.id;
+    const updateUser = vi.fn(
+      async (_subject: string, input: { tenantId: number | null }) => {
+        authTenantId = input.tenantId;
+        if (updateUser.mock.calls.length === 1) {
+          started.resolve();
+          await resume.promise;
+        }
+        return {};
+      },
+    );
+    const app = createTestApp({
+      auth: platformAdministratorAuthenticator(),
+      userAdministrator: {
+        issuer: "savia:better-auth",
+        updateUser,
+      } as unknown as IdentityUserAdministrator,
+    });
+    const firstName = `Concurrent first transfer ${suffix}`;
+    const secondName = `Concurrent rejected transfer ${suffix}`;
+    const transfer = (name: string) =>
+      app.request(
+        "/v1/tenants",
+        post({
+          name,
+          existingMember: { principalId: moving.id, role: "tenant_admin" },
+        }),
+      );
+
+    const first = transfer(firstName);
+    let second: Response;
+    try {
+      await started.promise;
+      const user = `/v1/identity/users/${moving.id}`;
+      const membership = { tenantId: destination.id, role: "tenant_admin" };
+      if (operation === "tenant creation") second = await transfer(secondName);
+      else if (operation === "membership assignment")
+        second = await app.request(`${user}/memberships`, post(membership));
+      else
+        second = await app.request(user, {
+          ...post({ membership }),
+          method: "PATCH",
+        });
+    } finally {
+      resume.resolve();
+    }
+    expect((await first).status).toBe(201);
+    expect(second.status).toBe(409);
+    expect(await second.json()).toMatchObject({
+      error: { code: "IDENTITY_ACCESS_CHANGE_IN_PROGRESS" },
+    });
+    const saved = await membershipOf(moving.id);
+    expect(authTenantId).toBe(saved?.tenant_id);
+    expect((await tenantByName(firstName))?.id).toBe(saved?.tenant_id);
+    expect(await tenantByName(secondName)).toBeNull();
+    expect(updateUser).toHaveBeenCalledOnce();
+    expect(
+      await env.DB.prepare(
+        "SELECT 1 FROM identity_access_change_leases WHERE principal_id=?",
+      )
+        .bind(moving.id)
+        .first(),
+    ).toBeNull();
+  },
+);
+
 it("creates an inactive tenant with its new first administrator", async () => {
   const subject = "inactive-tenant-admin-" + crypto.randomUUID();
   const email = "inactive-tenant-admin@example.test";
@@ -483,6 +566,110 @@ it("creates an inactive tenant by transferring an existing administrator", async
     grantMembership(env.DB, staying.id, data.id, "viewer"),
   ).rejects.toMatchObject({ code: "COMMERCIAL_TENANT_REQUIRED" });
 });
+
+it.each(["new", "existing"] as const)(
+  "keeps an inactive tenant while provisioning its %s administrator",
+  async (mode) => {
+    const issuer = "savia:better-auth";
+    const subject = `provisioning-${mode}-${crypto.randomUUID()}`;
+    const email = `${subject}@example.test`;
+    const name = `Concurrent provisioning ${mode}`;
+    const managedUser = {
+      subject,
+      email,
+      displayName: name,
+      role: "user" as const,
+      isBanned: false,
+      twoFactorEnabled: false,
+    };
+    const existing =
+      mode === "existing"
+        ? await upsertPrincipal(env.DB, {
+            issuer,
+            subject,
+            email,
+            displayName: name,
+          })
+        : undefined;
+    let deletion: Response | undefined;
+    const removeTenant = async (tenantId: number | null | undefined) => {
+      if (typeof tenantId !== "number") return;
+      const url = `/v1/tenants/${tenantId}`;
+      deletion = await instance.request(
+        mode === "existing"
+          ? `${url}?cascade=true&confirmation=${encodeURIComponent(name)}`
+          : url,
+        { method: "DELETE" },
+      );
+    };
+    const purge = vi.fn(async () => Response.json({ purged: {} }));
+    const sendPasswordReset = vi.fn();
+    const instance = createTestApp({
+      auth: platformAdministratorAuthenticator(),
+      documents: env.DOCUMENTS,
+      saviaRequestService: { fetch: purge },
+      userAdministrator: {
+        issuer,
+        createUser: async ({ tenantId }) => {
+          await removeTenant(tenantId);
+          return managedUser;
+        },
+        updateUser: async (_subject, { tenantId }) => {
+          await removeTenant(tenantId);
+          return managedUser;
+        },
+        sendPasswordReset,
+        deleteUser: vi.fn().mockResolvedValue(undefined),
+      } as IdentityUserAdministrator,
+    });
+
+    const response = await instance.request(
+      "/v1/tenants",
+      post({
+        name,
+        isActive: false,
+        ...(existing
+          ? {
+              existingMember: {
+                principalId: existing.id,
+                role: "tenant_admin",
+              },
+            }
+          : {
+              initialUser: {
+                email,
+                firstName: "Provisioned",
+                lastName: "Admin",
+                role: "tenant_admin",
+                temporaryPassword: "Test-Fixture-Password-123!",
+              },
+            }),
+      }),
+    );
+
+    expect(deletion?.status).toBe(409);
+    expect(await deletion?.json()).toMatchObject({
+      error: { code: "TENANT_PURGE_IN_PROGRESS" },
+    });
+    expect(response.status, await response.clone().text()).toBe(201);
+    const { data } = (await response.json()) as { data: { id: number } };
+    const principal = await findPrincipalBySubject(env.DB, issuer, subject);
+    expect(await membershipOf(principal!.id)).toEqual({
+      tenant_id: data.id,
+      role: "tenant_admin",
+    });
+    expect(purge).not.toHaveBeenCalled();
+    expect(sendPasswordReset).not.toHaveBeenCalled();
+    expect(
+      await env.DB.prepare(
+        "SELECT 1 FROM tenant_deletion_leases WHERE tenant_id=?",
+      )
+        .bind(data.id)
+        .first(),
+    ).toBeNull();
+  },
+);
+
 it("restores the email scope when transfer eligibility changes during provisioning", async () => {
   const source = await tenant();
   const staying = await member("smtp-staying-member@example.test", source.id);

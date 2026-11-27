@@ -1,4 +1,5 @@
 import { ApiClient, ApiClientError } from "@/api/api-client";
+import { readResponseBodyWithInactivityTimeout } from "@/api/response-body-timeout";
 export const MAX_RECORDING_BYTES = 50_000_000;
 export type AudioFormat = "ogg" | "wav" | "mp3" | "m4a";
 export type DriveProvider =
@@ -164,13 +165,24 @@ export class CompanionRecordingsClient {
       { signal },
     );
     if (!response.ok) {
-      const body = await response.json().catch(() => null);
+      const body = await readResponseBodyWithInactivityTimeout(
+        response,
+        (input) => input.json(),
+        signal,
+      ).catch(() => {
+        signal?.throwIfAborted();
+        return null;
+      });
       throw new ApiClientError(
         response.status,
         body?.error?.code ?? "AUDIO_UNAVAILABLE",
         body?.error?.message ?? "Audio unavailable",
       );
     }
-    return response.blob();
+    return readResponseBodyWithInactivityTimeout(
+      response,
+      (input) => input.blob(),
+      signal,
+    );
   }
 }

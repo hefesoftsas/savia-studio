@@ -10,7 +10,11 @@ import type {
   AccessAction,
   AccessPolicy,
 } from "@savia/studio-shared/access-control";
-import type { StudioObject, StudioRecord } from "@savia/studio-shared/metadata";
+import {
+  usesNativeRecordStorage,
+  type StudioObject,
+  type StudioRecord,
+} from "@savia/studio-shared/metadata";
 import { getObject, getRecord, parseObject, parseRecord } from "./services";
 import {
   accessRecord,
@@ -51,12 +55,10 @@ export function visibleAccessObject(
     grants.filter((g) => g.action === "read").flatMap((g) => g.fields),
   );
   const can = (action: AccessAction) => grants.some((g) => g.action === action);
+  const native = usesNativeRecordStorage(object);
   return {
     ...object,
-    exportFields:
-      object.config.studio?.collection || object.config.studio?.business
-        ? []
-        : exportAccessFields(policy, object.name),
+    exportFields: native ? exportAccessFields(policy, object.name) : [],
     config: {
       ...object.config,
       performance: undefined,
@@ -76,7 +78,8 @@ export function visibleAccessObject(
           read: can("read"),
           create: can("create"),
           update: can("update"),
-          delete: can("delete"),
+          delete: native && can("delete"),
+          restore: native && can("read") && can("restore"),
           schema: false,
           customFields: false,
           search: true,
@@ -193,6 +196,18 @@ export function registerAccessMiddleware(app: Hono<Env>, policy: AccessPolicy) {
       )
     )
       return next();
+    // Attachment handlers check the draft owner or the saved row and field grants.
+    if (
+      (method === "POST" &&
+        (/^\/api\/file-drafts\/[^/]+(?:\/attach)?$/.test(path) ||
+          /^\/api\/file\/[^/]+\/revisions$/.test(path))) ||
+      (method === "DELETE" && /^\/api\/file\/[^/]+$/.test(path)) ||
+      (method === "GET" &&
+        /^\/api\/file\/[^/]+\/(?:download|office|revisions(?:\/[^/]+\/download)?)$/.test(
+          path,
+        ))
+    )
+      return next();
     const recordMatch =
       /^\/api\/records\/([^/]+)(?:\/([^/]+))?(?:\/(restore|bulk))?$/.exec(path);
     const viewMatch = /^\/api\/views\/([^/]+)$/.exec(path);
@@ -201,43 +216,6 @@ export function registerAccessMiddleware(app: Hono<Env>, policy: AccessPolicy) {
     const exportMatch = /^\/api\/export\/([^/]+)$/.exec(path);
     const objectMatch = /^\/api\/objects\/([^/]+)$/.exec(path);
     const filesMatch = /^\/api\/files\/([^/]+)\/([^/]+)$/.exec(path);
-    const fileMatch = /^\/api\/file\/([^/]+)(?:\/download)?$/.exec(path);
-    if (fileMatch) {
-      const file = await db
-        .prepare(
-          "SELECT object_name,record_id,field_name FROM studio_files WHERE tenant_id=? AND id=?",
-        )
-        .bind(tenant, decodeURIComponent(fileMatch[1]))
-        .first<{
-          object_name: string;
-          record_id: string;
-          field_name: string;
-        }>();
-      if (!file) accessDenied();
-      const record = await getRecord(
-        db,
-        tenant,
-        file.object_name,
-        file.record_id,
-      );
-      requireRecordAccess(
-        db,
-        file.object_name,
-        method === "GET" ? "read" : "update",
-        record,
-      );
-      if (
-        file.field_name &&
-        !decideRecord(
-          policy,
-          `collection:${file.object_name}`,
-          method === "GET" ? "read" : "update",
-          accessRecord(record),
-        ).fields.includes(file.field_name)
-      )
-        accessDenied();
-      return next();
-    }
     const match =
       recordMatch ??
       viewMatch ??

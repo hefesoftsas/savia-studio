@@ -4,15 +4,22 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useReducer, type ReactNode } from "react";
 import { ListContextProvider, useListContext, type RaRecord } from "ra-core";
 import { Button } from "@/components/ui/button";
-import { formatRetryTime } from "@/api/retry-after";
+import { formatRetryTime, retryDeadlineFromError } from "@/api/retry-after";
+import { retryIsBlocked, useRetryBlocked } from "@/hooks/use-retry-blocked";
+
+export type RecordListTotal =
+  | { status: "verified"; total: number | undefined }
+  | { status: "unavailable" | "rate-limited" | "revoked" };
 
 /** Retain one successful page within its authorization/collection scope. */
 export function RetainedListResults({
   scope,
   children,
+  onListTotal,
 }: {
   scope: string;
   children: ReactNode;
+  onListTotal?: (result: RecordListTotal) => void;
 }) {
   const t = useMessages(recordsMessages);
   const locale = useAppLocale();
@@ -26,61 +33,100 @@ export function RetainedListResults({
   const currentData = useRef(context.data);
   currentData.current = context.data;
   const [, refresh] = useReducer((value: number) => value + 1, 0);
-  useEffect(
-    () =>
-      queryClient.getQueryCache().subscribe((event) => {
-        if (
-          event.query.queryKey[0] !== context.resource ||
-          event.query.queryKey[1] !== "getList"
-        )
-          return;
-        if (
-          event.type === "updated" &&
-          event.action.type === "success" &&
-          !event.action.manual
-        ) {
-          const result = event.query.state.data as
-            { data?: RaRecord[] } | undefined;
-          if (result?.data && revoked.current.delete(result.data)) refresh();
-        }
-        const reset =
-          event.type === "updated" &&
-          event.action.type === "setState" &&
-          event.query.state.data === undefined;
-        if (event.type !== "removed" && !reset) return;
-        // A cache reset is an authorization boundary, not a transient failed fetch.
-        // RA can still expose its previous placeholder array after the cache clears.
-        if (currentData.current) revoked.current.add(currentData.current);
-        if (saved.current) revoked.current.add(saved.current.data);
-        saved.current = undefined;
+  useEffect(() => {
+    const cache = queryClient.getQueryCache();
+    const resource = context.resource;
+    // Keep the origin of each result after a reset clears the query's data.
+    const sourceByRows = new WeakMap<RaRecord[], string>();
+    for (const query of cache.findAll({ queryKey: [resource, "getList"] })) {
+      const result = query.state.data as { data?: RaRecord[] } | undefined;
+      if (result?.data) sourceByRows.set(result.data, query.queryHash);
+    }
+    return cache.subscribe((event) => {
+      const { query } = event;
+      if (query.queryKey[0] !== resource || query.queryKey[1] !== "getList")
+        return;
+      const result = query.state.data as { data?: RaRecord[] } | undefined;
+      if (result?.data) sourceByRows.set(result.data, query.queryHash);
+      if (
+        event.type === "updated" &&
+        event.action.type === "success" &&
+        !event.action.manual &&
+        result?.data &&
+        revoked.current.delete(result.data)
+      )
         refresh();
-      }),
-    [queryClient, context.resource],
-  );
+
+      const reset =
+        event.type === "updated" &&
+        event.action.type === "setState" &&
+        query.state.data === undefined;
+      if (event.type !== "removed" && !reset) return;
+      // RA can expose a placeholder after its source query has been cleared.
+      const affected = [currentData.current, saved.current?.data].filter(
+        (rows): rows is RaRecord[] =>
+          rows !== undefined && sourceByRows.get(rows) === query.queryHash,
+      );
+      if (!affected.length) return;
+      for (const rows of affected) revoked.current.add(rows);
+      if (saved.current && revoked.current.has(saved.current.data))
+        saved.current = undefined;
+      refresh();
+    });
+  }, [queryClient, context.resource]);
   const currentRevoked =
     context.data !== undefined && revoked.current.has(context.data);
-  const status = (context.error as { status?: number } | undefined)?.status;
-  const retryTime = formatRetryTime(context.error, intlLocale(locale));
+  const failure = context.error as
+    { status?: number; code?: string } | undefined;
+  const status = failure?.status;
+  const retryAt = retryDeadlineFromError(context.error);
+  const retryBlocked = useRetryBlocked(retryAt);
+  const retryTime = retryBlocked
+    ? formatRetryTime(context.error, intlLocale(locale))
+    : undefined;
   const denied = status === 401 || status === 403;
+  const disconnected = failure?.code === "HUBSPOT_CONNECTION_UNAVAILABLE";
+  const invalidated = denied || disconnected;
+  // Only invalidate on a new failure or data change. The query cache can
+  // report a successful retry before the list context clears its error.
   useEffect(() => {
-    if (denied) {
-      if (context.data) revoked.current.add(context.data);
-      if (saved.current) revoked.current.add(saved.current.data);
-    }
-    if (denied || saved.current?.scope !== scope) saved.current = undefined;
+    if (!invalidated) return;
+    if (context.data) revoked.current.add(context.data);
+    if (saved.current) revoked.current.add(saved.current.data);
+    saved.current = undefined;
+  }, [invalidated, scope, context.data, context.error]);
+  useEffect(() => {
+    // Clear the reported total when the records that verified it are inaccessible.
+    if (invalidated || currentRevoked) onListTotal?.({ status: "revoked" });
+    else if (context.error)
+      onListTotal?.({
+        status: status === 429 ? "rate-limited" : "unavailable",
+      });
+    if (saved.current?.scope !== scope) saved.current = undefined;
     if (
       !currentRevoked &&
-      !denied &&
+      !invalidated &&
       !context.error &&
       !context.isPending &&
       !context.isPlaceholderData &&
       context.data !== undefined
-    )
+    ) {
       saved.current = { scope, data: context.data, total: context.total };
+      const validTotal =
+        typeof context.total === "number" &&
+        Number.isSafeInteger(context.total) &&
+        context.total >= 0;
+      onListTotal?.({
+        status: "verified",
+        total: validTotal ? context.total : undefined,
+      });
+    }
   }, [
     scope,
     currentRevoked,
-    denied,
+    invalidated,
+    onListTotal,
+    status,
     context.data,
     context.total,
     context.error,
@@ -105,7 +151,7 @@ export function RetainedListResults({
       >
         {updating
           ? t("Actualizando resultados…")
-          : readOnly
+          : readOnly && !disconnected
             ? t("Mostrando los últimos resultados disponibles.")
             : ""}
       </div>
@@ -128,7 +174,11 @@ export function RetainedListResults({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => void context.refetch()}
+            disabled={context.isFetching || retryBlocked}
+            onClick={() => {
+              if (!context.isFetching && !retryIsBlocked(retryAt))
+                void context.refetch();
+            }}
           >
             {t("Reintentar")}
           </Button>
@@ -159,7 +209,7 @@ export function RetainedListResults({
         }
       >
         <div aria-busy={Boolean(updating)} inert={readOnly || undefined}>
-          {children}
+          {!disconnected && children}
         </div>
       </ListContextProvider>
     </>

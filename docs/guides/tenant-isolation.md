@@ -9,6 +9,34 @@ helper text. Explicit unauthorized Studio URLs still require recovery to the
 authorized workspace; hiding the selector does not grant access. Savia Request
 platform administrators retain the shared-catalog choice alongside tenant scopes.
 
+Studio and Plugin Studio close the mounted workspace when the signed-in account
+changes or logout starts. Studio and its sidebar verify the workspace catalog
+again before showing tenant content for the next session. The sidebar accepts
+collection updates and totals from Studio only for the authorized tenant and
+current session generation.
+
+After a role or membership update, Studio rechecks access and refreshes its
+workspace catalog and sidebar. A temporary catalog error preserves the last
+confirmed workspace and exposes **Retry** in Studio. An access denial or a
+catalog that omits the selected workspace clears the protected view.
+
+The Studio sidebar keeps its confirmed collection links and totals during
+temporary collection read failures. An access denial clears both and blocks
+queued navigation updates until a fresh authorized collection read succeeds.
+
+Studio links to a specific collection stay bound to that collection. Links to
+view or edit a record require both the collection and record identifiers. If a
+target is unavailable, Studio offers an explicit return action. If the collection
+catalog fails to load, **Retry** checks the original link again.
+
+Record forms belong to the current collection, record, and editor route.
+Changing that target starts a fresh form. A save submitted before navigation
+can finish in its original workspace without closing the current form or
+changing the current route. Its submitted attachments stay with that save and
+use the same workspace even if the user opens another one. Leaving a form
+discards unsubmitted uploads. If the session ends or the account changes,
+pending attachment requests stop and the backend can expire the remaining drafts.
+
 Savia Request sends canonical `tenant:<id>` scopes for every operation, including
 bulk secret export and import. Older UI selections using `agency:<id>` are read
 as the same tenant and rechecked against the user's memberships; they are never
@@ -93,26 +121,58 @@ deletes its associated data. The UI sends
 after that confirmation. If the API rejects the name confirmation, the dialog
 clears it and waits for the current tenant details before accepting a new
 confirmation. The ordinary tenant delete endpoint remains available to API
-clients.
+clients. It checks for related records, in-progress branding uploads, and
+available image storage before removing authentication settings. When those
+checks pass, the API deactivates the tenant before it contacts Auth.
+It checks for members and collections again after deactivation and as part of
+the final delete. If a membership or collection appeared before the second
+check, the API restores the prior activity state and returns a conflict
+before contacting Auth.
+Creating a tenant and setting up its first administrator, changing whether
+a tenant is active, and deleting it use the same database lease. A concurrent
+delete or activity change receives a conflict before changing tenant data or
+contacting Auth. If a worker stops without releasing the lease, another
+request can proceed five minutes after the last renewal.
 The API rechecks the confirmed name as part of deactivation. If the name
 changed before that point, the tenant stays in its current state and external
 cleanup does not begin.
-After deactivation, the API inventories data and files, including branding,
-and rechecks the confirmed name before beginning external cleanup. A change
-during inventory requires a new confirmation and leaves those files intact.
-The API also rechecks the name after cleaning up Savia Request and Auth
-settings, before removing files. When a change is detected at this stage,
-completed external steps stay applied and the administrator must confirm the
-current name to continue.
-The final database batch verifies confirmation again. If the tenant changed
-during file cleanup, the batch leaves its database records intact and asks
-for fresh confirmation. Files already removed from storage stay removed.
+After deactivation, the API inventories data and files, including branding.
+A change during inventory requires a new confirmation and leaves those files
+intact. Before contacting Savia Request or Auth or removing files, the API
+rechecks the name and records the confirmed deletion. The tenant stays
+inactive. Renaming it, changing its URL, reactivating it, and ordinary
+deletion are unavailable from this point onward. The final batch checks that
+it is deleting the same tenant. If a cleanup step fails, retry the permanent
+deletion with the same name.
+If the final database reply is interrupted, the API checks whether the tenant
+was removed before reporting the result.
 If an external cleanup step fails, the API reports the failure and leaves the
 tenant inactive so an administrator can retry the cleanup. Shared identity
 principals are preserved. Core database cleanup runs as a batch; external file
 and service cleanup can be partial when a remote service fails.
+Before deleting files or core records, the API verifies that Savia Request
+confirmed cleanup for the same tenant and returned counts for its overlays.
+If the worker reports a failure or sends an invalid receipt, the API returns
+`TENANT_REQUEST_CLEANUP_UNAVAILABLE`. The deletion dialog identifies the
+failed cleanup step, refreshes the tenant's inactive status, and allows a retry.
+Savia Request deletes the tenant's overlays in one transaction. A failed
+statement rolls back the batch and returns a retryable error. An invalid
+response also leaves the permanent deletion available for retry.
+The transaction removes the tenant's bundle version tracking and private
+request-cache entries. It also retires older cache entries whose owner cannot
+be determined from their key.
+The Savia Request API proxy forwards workspace requests only for active tenants.
+Manual Savia Request cleanup through the API proxy requires the platform
+administrator role, including when the caller selects a specific workspace.
+The private worker rejects a request if it was already in transit when that
+tenant's Savia Request data was purged. If the purge completes while the worker
+reads the inputs for a run, the run returns a conflict before storing a receipt
+or contacting the provider. If a provider call is already underway, Savia
+Request stops when it next saves the run's progress. Pending steps are skipped
+and the caller receives a conflict instead of a result.
 File inventory includes Companion recordings. The purge preserves any file
 that another tenant or a shared database record still references.
+The API batches database reads for the file inventory and shared references.
 If file inventory or deletion fails, the API returns
 `TENANT_FILE_CLEANUP_UNAVAILABLE`. The dialog identifies the failed file
 cleanup and refreshes the tenant so the administrator can retry.
@@ -143,14 +203,27 @@ When editing a user who already belongs to a tenant, select the destination
 explicitly if the current tenant is absent from the available choices.
 When removing platform administration, select an active commercial tenant and
 the user's new role before saving. This also applies when there is only one
-active commercial tenant. When creating a user or removing platform access,
+active commercial tenant. Savia checks at the database write that revoking
+platform access, suspending the account, or deleting it leaves another active
+platform administrator. Revocation and assignment to the commercial tenant
+commit together. When creating a user or removing platform access,
 search by tenant name or URL identifier to find choices beyond the first page.
 The same search is available when transferring an existing user. Transfer
 destinations are active commercial tenants. If the transfer fails, the
 selected tenant and role stay in the form with an error message.
 The transfer endpoint and the user update endpoint validate the destination
-before updating the account in Auth. They check it again when writing the
-membership.
+before updating the account in Auth. The database checks the destination
+again in the membership write itself. If the destination is deactivated or
+deleted before the write, the user keeps their original membership.
+Transferring or suspending a member or promoting them to platform administrator
+also checks the source tenant at the time of the write. If concurrent changes
+would leave it without active users, one is rejected and its user keeps their
+prior membership and activity status.
+Deleting a user first disables their Savia identity with the same source
+tenant check. The API then removes the Auth account and local memberships.
+If the removal cannot be confirmed, the user stays disabled and reactivation
+is blocked. The user stays visible in the Inactive list. Open their details
+or choose Retry deletion from the list to finish removing the account.
 If a combined profile and membership update is rejected while saving
 access, Savia restores the previous profile and tenant settings in Auth.
 It saves the principal's display name only after the access change succeeds.

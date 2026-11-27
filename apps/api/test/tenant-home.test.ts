@@ -2,6 +2,7 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 import { registerTenantHomeRoutes } from "../src/tenant-home/routes";
+import { tenantHomeResponse } from "../../auth/src/tenant-home";
 
 const migrations = Object.entries(
   import.meta.glob<string>("../../../packages/db/migrations/*.sql", {
@@ -27,9 +28,9 @@ beforeAll(async () => {
       await env.DB.exec(statement);
 });
 
-function app() {
+function app(canonicalHost?: string) {
   const api = new OpenAPIHono();
-  registerTenantHomeRoutes(api, env.DB, "test-bridge-key");
+  registerTenantHomeRoutes(api, env.DB, "test-bridge-key", canonicalHost);
   return api;
 }
 
@@ -90,6 +91,58 @@ describe("internal tenant home", () => {
       slug: "current-home",
       currentSlug: "unknown",
       currentTenantId: null,
+    });
+  });
+
+  it.each([
+    ["http://localhost:5173", "savia.hefesoft.com"],
+    [
+      "https://savia-preview-bookings.fixture-account.workers.dev",
+      "savia-preview-bookings.fixture-account.workers.dev",
+    ],
+    [
+      "https://savia-preview-bookings.fixture-account.workers.dev.",
+      "savia-preview-bookings.fixture-account.workers.dev",
+    ],
+    ["https://unmapped.example.test", "workspace.example.test"],
+  ])(
+    "keeps a member on a deployment without tenant subdomains at %s",
+    async (origin, canonicalHost) => {
+      await createTenant(992003, "member-home");
+      const api = app(canonicalHost);
+      const response = await tenantHomeResponse(
+        new Request(`${origin}/api/auth/tenant-home?email=member@example.test`),
+        {
+          SAVIA_IDENTITY: { fetch: (request: Request) => api.request(request) },
+          SAVIA_INTERNAL_BRIDGE_KEY: "test-bridge-key",
+        } as never,
+        {
+          findOne: async () => ({ emailTenantId: 992003, role: "user" }),
+        } as never,
+      );
+      expect(response?.status).toBe(200);
+      expect(response?.headers.get("cache-control")).toBe("no-store");
+      expect(await response?.json()).toEqual({ found: false });
+    },
+  );
+
+  it("allows discovery on a configured custom domain and its workspace hosts", async () => {
+    await createTenant(992004, "custom-home");
+    const api = app("workspace.example.test");
+    const headers = { "x-savia-bridge-key": "test-bridge-key" };
+    const canonical = await api.request(
+      "/_internal/tenants/992004/home?host=workspace.example.test",
+      { headers },
+    );
+    expect(canonical.status).toBe(200);
+    const dedicated = await api.request(
+      "/_internal/tenants/992004/home?host=custom-home.workspace.example.test",
+      { headers },
+    );
+    expect(dedicated.status).toBe(200);
+    expect(await dedicated.json()).toMatchObject({
+      currentSlug: "custom-home",
+      currentTenantId: 992004,
     });
   });
 

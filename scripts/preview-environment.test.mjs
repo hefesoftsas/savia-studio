@@ -205,6 +205,33 @@ test("routes preview short booking URLs through the API before SPA fallback", ()
   assert.ok(config.assets.run_worker_first.includes("/s/*"));
 });
 
+test("routes public page shares and service worker scripts through the branch gateway", () => {
+  const config = workerConfig(
+    "gateway",
+    previewNames("public-pages"),
+    {},
+    "https://preview.example.test",
+  );
+  for (const route of [
+    "/public/pages",
+    "/public/pages/*",
+    "/sw.js",
+    "/dev-sw.js",
+  ])
+    assert.ok(config.assets.run_worker_first.includes(route), route);
+});
+
+test("routes embedded editor URLs through the branch gateway before SPA fallback", () => {
+  const config = workerConfig(
+    "gateway",
+    previewNames("embedded-editor"),
+    {},
+    "https://preview.example.test",
+  );
+  for (const route of ["/flows-ui", "/flows-ui/*"])
+    assert.ok(config.assets.run_worker_first.includes(route), route);
+});
+
 test("routes preview WhatsApp webhooks through the worker before SPA fallback", () => {
   const config = workerConfig(
     "gateway",

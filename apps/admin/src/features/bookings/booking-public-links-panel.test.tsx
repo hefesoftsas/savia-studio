@@ -29,6 +29,7 @@ function renderPanel(
           currentProfessionalId={currentProfessionalId}
           canManageTeamLinks={canManageTeamLinks}
           apiClient={apiClient as never}
+          recoverExpiredSession={() => false}
           services={[{ id: "consult", name: "Consultation" }]}
         />
       </AppLocaleProvider>

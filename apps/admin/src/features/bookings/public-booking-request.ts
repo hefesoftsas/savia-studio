@@ -1,4 +1,4 @@
-import { withRequestTimeout } from "@/api/request-timeout";
+import { RequestTimeoutError, withRequestTimeout } from "@/api/request-timeout";
 import { retryDeadline } from "@/api/retry-after";
 
 export type PublicBookingApiError = Error & {
@@ -20,7 +20,8 @@ export async function publicBookingRequest<T>(
 ): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
-  return withRequestTimeout(
+  let rejectedResponse: { status: number; retryAt?: number } | undefined;
+  const request = withRequestTimeout(
     async (signal) => {
       const response = await fetch(path, {
         ...init,
@@ -28,21 +29,23 @@ export async function publicBookingRequest<T>(
         credentials: "omit",
         signal,
       });
+      if (!response.ok)
+        rejectedResponse = {
+          status: response.status,
+          retryAt: retryDeadline(response),
+        };
       const body = (await response.json().catch(() => undefined)) as
         | { data?: T; error?: string | { code?: string; message?: string } }
         | undefined;
-      if (!response.ok) {
+      if (rejectedResponse) {
         const error = body?.error;
         throw Object.assign(
           new Error(
             (typeof error === "string" ? error : error?.message) ||
               "Request failed",
           ),
-          {
-            status: response.status,
-            retryAt: retryDeadline(response),
-            code: typeof error === "object" ? error?.code : undefined,
-          },
+          rejectedResponse,
+          { code: typeof error === "object" ? error?.code : undefined },
         );
       }
       if (body?.data == null)
@@ -52,4 +55,14 @@ export async function publicBookingRequest<T>(
     undefined,
     init?.signal,
   );
+  try {
+    return await request;
+  } catch (error) {
+    if (error instanceof RequestTimeoutError && rejectedResponse)
+      throw Object.assign(
+        new Error("Request failed", { cause: error }),
+        rejectedResponse,
+      );
+    throw error;
+  }
 }

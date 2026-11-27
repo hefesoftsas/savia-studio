@@ -133,6 +133,24 @@ function publicRun(row: Row) {
     createdAt: row.created_at,
   };
 }
+function sameFormValues(saved: string, values: z.infer<typeof formValues>) {
+  let previous: unknown;
+  try {
+    previous = JSON.parse(saved);
+  } catch {
+    return false;
+  }
+  if (!previous || typeof previous !== "object" || Array.isArray(previous))
+    return false;
+  const fields = previous as Record<string, unknown>;
+  const entries = Object.entries(values);
+  return (
+    Object.keys(fields).length === entries.length &&
+    entries.every(
+      ([key, value]) => Object.hasOwn(fields, key) && fields[key] === value,
+    )
+  );
+}
 async function privateJson(
   service: SaviaRequestService,
   path: string,
@@ -196,25 +214,26 @@ export function registerRequestPageRoutes(
   app.openapi(executeRoute, async (c) => {
     const body = c.req.valid("json"),
       owner = actorFromContext(c).principal.id;
+    const tenant = `tenant:${body.tenantId}`;
     const error = (message: string, status: 400 | 404 | 409 | 503 = 400) =>
       c.json({ error: { code: "REQUEST_PAGE_ERROR", message } }, status);
+    const replay = (row: Row) => {
+      if (
+        row.tenant_id !== tenant ||
+        row.page_name !== body.pageName ||
+        row.action_id !== body.actionId ||
+        row.mode !== body.mode ||
+        !sameFormValues(row.form_values, body.values)
+      )
+        return error("Ese identificador corresponde a otra ejecución.", 409);
+      return c.json(publicRun(row), 200);
+    };
     const existing = await db
       .prepare("SELECT * FROM request_page_runs WHERE id=? AND principal_id=?")
       .bind(body.id, owner)
       .first<Row>();
-    if (existing) {
-      if (
-        existing.tenant_id !== `tenant:${body.tenantId}` ||
-        existing.page_name !== body.pageName ||
-        existing.action_id !== body.actionId ||
-        existing.mode !== body.mode ||
-        existing.form_values !== JSON.stringify(body.values)
-      )
-        return error("Ese identificador corresponde a otra ejecución.", 409);
-      return c.json(publicRun(existing), 200);
-    }
+    if (existing) return replay(existing);
     if (!service) return error("Savia request no está disponible.", 503);
-    const tenant = `tenant:${body.tenantId}`;
     const stored = await db
       .prepare(
         "SELECT name,label,description,config FROM studio_objects WHERE tenant_id=? AND name=?",
@@ -331,15 +350,7 @@ export function registerRequestPageRoutes(
         .first<Row>();
       if (!concurrent)
         return error("Identificador de ejecución no disponible.", 409);
-      if (
-        concurrent.tenant_id !== tenant ||
-        concurrent.page_name !== body.pageName ||
-        concurrent.action_id !== body.actionId ||
-        concurrent.mode !== body.mode ||
-        concurrent.form_values !== JSON.stringify(body.values)
-      )
-        return error("Ese identificador corresponde a otra ejecución.", 409);
-      return c.json(publicRun(concurrent), 200);
+      return replay(concurrent);
     }
     try {
       const flow = (await privateJson(

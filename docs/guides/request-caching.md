@@ -31,9 +31,18 @@ failed response validation are excluded. The generic helper accepts an optional
 response validator so existing domain contracts are checked before persistence.
 
 Keys hash the request method, URL, headers, scope and configuration revision.
+Keys also carry a public or tenant prefix so private responses can be removed
+by the tenant purge. The purge removes tenant and connection cache entries as
+part of the overlay transaction. It also removes older cache entries whose hash
+does not identify an owner. Public entries in the current format remain shared.
+Requests admitted by Savia Request before the purge cannot acquire a new cache
+lease for the old tenant generation.
 Changing a step, policy, credential header or URL selects a different entry.
 Requests with repeated query parameters preserve their value order. Cache hits
 do not skip gateway authorization, flow access checks, or per-run hooks.
+URL paths and query parameters can use variables produced by earlier steps or
+the current pre-request hook. The engine encodes those values and checks that
+the request still targets the origin resolved from the initial configuration.
 
 `savia_request_cache` in the backend DB stores expiring responses and short loading
 leases. Requests in the same server instance share in-flight reads; other instances
@@ -53,6 +62,9 @@ DANE is the first configured operation: its public DIVIPOLA catalog has a defaul
 the catalog retrieval time. Invalid catalog payloads are not cached. A flow's
 policy can change its TTL or disable the cache; there is no DANE-specific cache
 implementation or cache kept in a module variable.
+The API, Studio, and public form reference endpoints send only the city and an
+optional department to the shared lookup. The reference endpoints ignore a
+tenant query parameter.
 
 Cloudflare deployments use core migration `0052_request_cache.sql` because the
 private Request Worker shares the domain D1 database. Standalone Request and

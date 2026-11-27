@@ -1,4 +1,10 @@
+import { formatRetryTime } from "@/api/retry-after";
 import { Button } from "@/components/ui/button";
+import {
+  retryIsBlocked,
+  useRetryBlocked,
+  useRetryDeadline,
+} from "@/hooks/use-retry-blocked";
 import { useMessages, useAppLocale, intlLocale } from "@/i18n/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { bookingMessages } from "./booking-messages";
@@ -52,6 +58,16 @@ function timeForZone(iso: string, zone: string, locale: string) {
   }).format(new Date(iso));
 }
 
+function rateLimitError(reason: unknown): ApiError | undefined {
+  const error = reason as ApiError | undefined;
+  return error?.status === 429 ? error : undefined;
+}
+
+function isAppointmentUnavailable(reason: unknown): boolean {
+  const status = (reason as ApiError | undefined)?.status;
+  return status === 404 || status === 410;
+}
+
 export function PublicBookingManagePage({ token }: { token: string }) {
   return <PublicBookingManagementLink key={token} token={token} />;
 }
@@ -68,6 +84,15 @@ function PublicBookingManagementLink({ token }: { token: string }) {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [canRetryLoad, setCanRetryLoad] = useState(false);
   const [error, setError] = useState("");
+  const [readLimit, setReadLimit] = useState<ApiError>();
+  const {
+    retryAt: readRetryAt,
+    blocked: readBlocked,
+    remember: rememberReadDeadline,
+    isBlockedNow: readIsBlocked,
+  } = useRetryDeadline();
+  const [writeLimit, setWriteLimit] = useState<ApiError>();
+  const writeBlocked = useRetryBlocked(writeLimit?.retryAt);
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState("");
@@ -98,14 +123,18 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         }
       })
       .catch((error: unknown) => {
-        if (!controller.signal.aborted)
+        if (!controller.signal.aborted) {
+          const limit = rateLimitError(error);
+          rememberReadDeadline(limit?.retryAt);
+          setReadLimit(limit);
           setCanRetryLoad(canRetryPublicBookingLoad(error));
+        }
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [managePath, loadAttempt]);
+  }, [managePath, loadAttempt, rememberReadDeadline]);
 
   useEffect(() => {
     if (rescheduling) stepHeading.current?.focus();
@@ -149,8 +178,8 @@ function PublicBookingManagementLink({ token }: { token: string }) {
 
   function updateBootstrap(next: ManageBootstrap) {
     setBootstrap((current) => {
-      if (!current) return next;
       if (
+        !current ||
         next.reservation.version < current.reservation.version ||
         (current.reservation.status === "cancelled" &&
           next.reservation.status !== "cancelled")
@@ -188,11 +217,41 @@ function PublicBookingManagementLink({ token }: { token: string }) {
     setNeedsVerification(true);
   }
 
+  function showUnavailableAppointment() {
+    invalidateRefresh();
+    setBootstrap(undefined);
+    setCanRetryLoad(false);
+    setRescheduleConfirmation(undefined);
+    closeRescheduleReview();
+  }
+
+  function throttledMessage(
+    limit: Pick<ApiError, "status" | "retryAt"> | undefined,
+    blocked: boolean,
+  ) {
+    if (!limit) return;
+    const retryTime = blocked
+      ? formatRetryTime(limit, intlLocale(locale))
+      : undefined;
+    if (retryTime)
+      return t("Too many booking requests. Try again after %{time}.", {
+        time: retryTime,
+      });
+    if (limit.retryAt === undefined)
+      return t("Too many booking requests. Try again shortly.");
+  }
+  const readLimitMessage = throttledMessage(
+    readBlocked ? { status: 429, retryAt: readRetryAt } : readLimit,
+    readBlocked,
+  );
+  const writeLimitMessage = throttledMessage(writeLimit, writeBlocked);
+
   async function refreshAppointment() {
-    if (!bootstrap) return;
+    if (!bootstrap || readIsBlocked()) return;
     const previous = bootstrap.reservation;
     const request = ++refreshSequence.current;
     setRefreshing(true);
+    setReadLimit(undefined);
     setRefreshError("");
     try {
       const data = await publicRequest<ManageBootstrap>(managePath);
@@ -214,8 +273,13 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         data.reservation.status !== "confirmed"
       )
         closeRescheduleReview(moved ? appointmentMoved : "");
-    } catch {
-      if (request === refreshSequence.current)
+    } catch (reason) {
+      const limit = rateLimitError(reason);
+      rememberReadDeadline(limit?.retryAt);
+      if (request !== refreshSequence.current) return;
+      if (isAppointmentUnavailable(reason)) showUnavailableAppointment();
+      else if (limit) setReadLimit(limit);
+      else
         setRefreshError(
           t("The appointment could not be refreshed. Try again."),
         );
@@ -250,11 +314,52 @@ function PublicBookingManagementLink({ token }: { token: string }) {
     [bootstrap],
   );
 
+  function deferThrottledWrite(reason: unknown) {
+    const failure = rateLimitError(reason);
+    if (!failure) return false;
+    setWriteLimit(failure);
+    return true;
+  }
+
+  async function verifyAppointmentAfterChange(previous: Reservation) {
+    if (readIsBlocked()) {
+      requireVerification();
+      return;
+    }
+    setReadLimit(undefined);
+    try {
+      const current = await publicRequest<ManageBootstrap>(managePath);
+      if (
+        current.reservation?.id === previous.id &&
+        current.reservation.version >= previous.version
+      ) {
+        updateBootstrap(current);
+        return current;
+      }
+    } catch (reason) {
+      if (isAppointmentUnavailable(reason)) {
+        showUnavailableAppointment();
+        return;
+      }
+      const limit = rateLimitError(reason);
+      rememberReadDeadline(limit?.retryAt);
+      setReadLimit(limit);
+    }
+    requireVerification();
+  }
+
   async function cancel() {
-    if (!bootstrap || busy || needsVerification || !checkChangeDeadline())
+    if (
+      !bootstrap ||
+      busy ||
+      needsVerification ||
+      retryIsBlocked(writeLimit?.retryAt) ||
+      !checkChangeDeadline()
+    )
       return;
     invalidateRefresh();
     setBusy(true);
+    setWriteLimit(undefined);
     setError("");
     try {
       const nextReservation = await publicRequest<Reservation>(
@@ -268,21 +373,13 @@ function PublicBookingManagementLink({ token }: { token: string }) {
       updateReservation(nextReservation);
       setRescheduleConfirmation(undefined);
       closeRescheduleReview();
-    } catch {
+    } catch (reason) {
+      if (deferThrottledWrite(reason)) return;
       const failureMessage = t(
         "This booking could not be cancelled. Refresh the page and retry.",
       );
-      const current = await publicRequest<ManageBootstrap>(managePath).catch(
-        () => undefined,
-      );
-      if (
-        current?.reservation?.id !== bootstrap.reservation.id ||
-        current.reservation.version < bootstrap.reservation.version
-      ) {
-        requireVerification();
-        return;
-      }
-      updateBootstrap(current);
+      const current = await verifyAppointmentAfterChange(bootstrap.reservation);
+      if (!current) return;
       if (current.reservation.status === "cancelled") {
         setRescheduleConfirmation(undefined);
         closeRescheduleReview();
@@ -313,12 +410,14 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         Date.parse(bootstrap.reservation.startsAt) ||
       busy ||
       needsVerification ||
+      retryIsBlocked(writeLimit?.retryAt) ||
       !checkChangeDeadline()
     )
       return;
     const submittedStartsAt = selection.slot.startsAt;
     invalidateRefresh();
     setBusy(true);
+    setWriteLimit(undefined);
     setError("");
     try {
       const nextReservation = await publicRequest<Reservation>(
@@ -340,6 +439,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         displayTimeZone: selection.displayTimeZone,
       });
     } catch (requestError) {
+      if (deferThrottledWrite(requestError)) return;
       const apiError = requestError as ApiError | undefined;
       const status = apiError?.status;
       const conflict = status === 404 || status === 409;
@@ -351,17 +451,8 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         return;
       }
 
-      const current = await publicRequest<ManageBootstrap>(managePath).catch(
-        () => undefined,
-      );
-      if (
-        current?.reservation?.id !== bootstrap.reservation.id ||
-        current.reservation.version < bootstrap.reservation.version
-      ) {
-        requireVerification();
-        return;
-      }
-      updateBootstrap(current);
+      const current = await verifyAppointmentAfterChange(bootstrap.reservation);
+      if (!current) return;
 
       const currentStart = Date.parse(current.reservation.startsAt);
       const confirmed = current.reservation.status === "confirmed";
@@ -426,7 +517,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
       <main className="mx-auto grid max-w-2xl gap-3 px-4 py-10">
         <p role="alert" className="text-sm text-destructive">
           {canRetryLoad
-            ? t("Booking settings could not be loaded.")
+            ? (readLimitMessage ?? t("Booking settings could not be loaded."))
             : t(
                 "This booking link could not be loaded. Ask the booking owner for help.",
               )}
@@ -436,7 +527,10 @@ function PublicBookingManagementLink({ token }: { token: string }) {
             type="button"
             variant="outline"
             className="w-fit"
+            disabled={readBlocked}
             onClick={() => {
+              if (readIsBlocked()) return;
+              setReadLimit(undefined);
               setLoading(true);
               setLoadAttempt((attempt) => attempt + 1);
             }}
@@ -451,6 +545,20 @@ function PublicBookingManagementLink({ token }: { token: string }) {
     changeDeadline !== undefined &&
     changeDeadline !== closedDeadline &&
     Date.now() <= changeDeadline;
+  const showRefresh =
+    needsVerification ||
+    (reservation.status === "confirmed" &&
+      (refreshing ||
+        refreshError ||
+        readLimit !== undefined ||
+        reservation.conference?.status === "pending"));
+  const refreshMessage =
+    (showRefresh && readLimitMessage) ||
+    refreshError ||
+    (needsVerification &&
+      t(
+        "We could not verify the change. Refresh the appointment before making another change.",
+      ));
   const bookingCatalog = {
     id: reservation.id,
     timeZone: bootstrap.timeZone,
@@ -489,24 +597,19 @@ function PublicBookingManagementLink({ token }: { token: string }) {
         conference={reservation.conference}
         status={reservation.status}
       />
-      {(needsVerification ||
-        (reservation.status === "confirmed" &&
-          reservation.conference?.status === "pending")) && (
+      {showRefresh && (
         <Button
           type="button"
           variant="outline"
-          disabled={refreshing || busy}
+          disabled={refreshing || busy || readBlocked}
           onClick={() => void refreshAppointment()}
         >
           {refreshing ? t("Refreshing appointment…") : t("Refresh appointment")}
         </Button>
       )}
-      {(refreshError || needsVerification) && (
+      {refreshMessage && (
         <p role="alert" className="text-sm text-destructive">
-          {refreshError ||
-            t(
-              "We could not verify the change. Refresh the appointment before making another change.",
-            )}
+          {refreshMessage}
         </p>
       )}
       {rescheduleConfirmation &&
@@ -555,7 +658,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
           <Button
             type="button"
             variant="destructive"
-            disabled={busy || needsVerification || !canChange}
+            disabled={busy || needsVerification || !canChange || writeBlocked}
             onClick={() => void cancel()}
           >
             {t("Cancel reservation")}
@@ -607,6 +710,8 @@ function PublicBookingManagementLink({ token }: { token: string }) {
                 onChange={setSelection}
                 onReadyChange={setSlotsReady}
                 onAvailabilityUnavailable={() => void refreshAppointment()}
+                readRetryAt={readRetryAt}
+                onRateLimited={rememberReadDeadline}
                 refreshKey={availabilityRefreshKey}
                 hideHeading
                 excludedStartAt={reservation.startsAt}
@@ -673,7 +778,7 @@ function PublicBookingManagementLink({ token }: { token: string }) {
                 </Button>
                 <Button
                   type="button"
-                  disabled={busy || !selection}
+                  disabled={busy || !selection || writeBlocked}
                   onClick={() => void reschedule()}
                 >
                   {busy ? t("Saving…") : t("Confirm reschedule")}
@@ -683,9 +788,9 @@ function PublicBookingManagementLink({ token }: { token: string }) {
           )}
         </section>
       )}
-      {error && (
+      {(writeLimitMessage || error) && (
         <p role="alert" className="text-sm text-destructive">
-          {error}
+          {writeLimitMessage || error}
         </p>
       )}
       {bootstrap.publicUrl && (

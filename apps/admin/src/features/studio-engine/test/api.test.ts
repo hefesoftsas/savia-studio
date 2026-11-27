@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { REQUEST_TIMEOUT_MS, RequestTimeoutError } from "@/api/request-timeout";
+import { beginLogout } from "@/auth/logout-progress";
+import { rotateSessionScope } from "@/auth/session-scope";
 import { apiFetch, dataProvider, downloadCrm } from "../api";
 import { setStudioRuntime } from "../runtime";
 
@@ -146,6 +149,84 @@ describe("apiFetch", () => {
     expect(await response.text()).toBe(html);
   });
 
+  it.each(["time out", "abort", "abort before reading"] as const)(
+    "cancels a pending attachment stream on %s",
+    async (termination) => {
+      vi.useFakeTimers();
+      const caller = new AbortController();
+      const abortReason = new DOMException("Download cancelled", "AbortError");
+      const cancel = vi.fn();
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      const rejected = vi.fn();
+      try {
+        const response = new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller;
+              controller.enqueue(Uint8Array.of(1));
+            },
+            cancel,
+          }),
+        );
+        void apiFetch<Blob>(
+          "/api/files/report",
+          { responseType: "blob", signal: caller.signal },
+          async () => {
+            if (termination === "abort before reading")
+              caller.abort(abortReason);
+            return response;
+          },
+        ).catch(rejected);
+        await vi.advanceTimersByTimeAsync(0);
+        if (termination === "abort") caller.abort(abortReason);
+        await vi.advanceTimersByTimeAsync(
+          termination === "time out" ? REQUEST_TIMEOUT_MS : 0,
+        );
+        const reason =
+          termination === "time out"
+            ? expect.any(RequestTimeoutError)
+            : abortReason;
+        expect(rejected).toHaveBeenCalledWith(reason);
+        expect(cancel).toHaveBeenCalledExactlyOnceWith(reason);
+      } finally {
+        if (!cancel.mock.calls.length) stream?.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps an attachment downloading while bytes arrive within each deadline", async () => {
+    vi.useFakeTimers();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    try {
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            stream = controller;
+            controller.enqueue(Uint8Array.of(1));
+          },
+        }),
+        { headers: { "Content-Type": "application/pdf" } },
+      );
+      const result = apiFetch<Blob>(
+        "/api/files/report",
+        { responseType: "blob" },
+        async () => response,
+      );
+      void result.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1_000);
+      stream.enqueue(Uint8Array.of(2));
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1_000);
+      stream.enqueue(Uint8Array.of(3));
+      stream.close();
+      const blob = await result;
+      expect(blob.type).toBe("application/pdf");
+      expect([...new Uint8Array(await blob.arrayBuffer())]).toEqual([1, 2, 3]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses the problem detail for direct Studio API errors", async () => {
     const problem = { title: "Conflict", detail: "Reload the current record." };
     await expect(
@@ -174,6 +255,90 @@ it.each([
 });
 
 describe("downloadCrm", () => {
+  it("discards late download headers when the account changes", async () => {
+    let finishDownload!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      finishDownload = resolve;
+    });
+    const transport = vi.fn((_path: string, _init?: RequestInit) => pending);
+    setStudioRuntime({ embedded: true, transport });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    const download = downloadCrm(
+      "/api/export/contacts",
+      "contacts.csv",
+      "text/csv",
+    );
+
+    rotateSessionScope("principal-change");
+    finishDownload(
+      new Response("name\r\nAna\r\n", {
+        headers: { "Content-Type": "text/csv" },
+      }),
+    );
+
+    expect(await download).toBe(false);
+    expect(transport.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])(
+    "cancels a pending CSV body on logout with useBodyDeadline=%s",
+    async (useBodyDeadline) => {
+      const cancel = vi.fn();
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            stream = controller;
+            controller.enqueue(new TextEncoder().encode("name\r\n"));
+          },
+          cancel,
+        }),
+        { headers: { "Content-Type": "text/csv" } },
+      );
+      setStudioRuntime({ embedded: true, transport: async () => response });
+      const click = vi
+        .spyOn(HTMLAnchorElement.prototype, "click")
+        .mockImplementation(() => {});
+      const download = downloadCrm(
+        "/api/export/contacts",
+        "contacts.csv",
+        "text/csv",
+        {
+          useBodyDeadline,
+        },
+      );
+      try {
+        await vi.waitFor(() => expect(response.body?.locked).toBe(true));
+        rotateSessionScope("logout");
+        await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce(), {
+          timeout: 250,
+        });
+        expect(await download).toBe(false);
+        expect(click).not.toHaveBeenCalled();
+      } finally {
+        if (!cancel.mock.calls.length) stream.close();
+        await download.catch(() => undefined);
+      }
+    },
+  );
+
+  it("does not start a download while logout is pending", async () => {
+    const transport = vi.fn(async () => new Response("file"));
+    setStudioRuntime({ embedded: true, transport });
+    const finishLogout = beginLogout();
+    try {
+      await expect(
+        downloadCrm("/api/file/file-id/download", "file"),
+      ).resolves.toBe(false);
+      expect(transport).not.toHaveBeenCalled();
+    } finally {
+      finishLogout();
+    }
+  });
+
   it.each([200, 429])(
     "stops a CSV download that stalls after sending HTTP %s",
     async (status) => {
@@ -240,11 +405,14 @@ describe("downloadCrm", () => {
         expect(this.download).toBe("contacts.csv");
       });
 
-    await downloadCrm("/api/export/contacts", "contacts.csv", "text/csv");
+    await expect(
+      downloadCrm("/api/export/contacts", "contacts.csv", "text/csv"),
+    ).resolves.toBe(true);
 
     expect(click).toHaveBeenCalledOnce();
     expect(transport).toHaveBeenCalledWith("/api/export/contacts", {
       headers: { Accept: "text/csv" },
+      signal: expect.any(AbortSignal),
     });
   });
 

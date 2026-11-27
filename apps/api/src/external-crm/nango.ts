@@ -495,9 +495,13 @@ export function createNangoClient(
         );
       const nango = requireConfiguredNango(configuration);
       try {
+        request.signal?.throwIfAborted();
+        const timeout = AbortSignal.timeout(10_000);
         return await fetcher(nangoUrl(nango.baseUrl, `/proxy${request.path}`), {
           method: request.method,
-          signal: AbortSignal.timeout(10_000),
+          signal: request.signal
+            ? AbortSignal.any([request.signal, timeout])
+            : timeout,
           // Workers supports manual/follow. Return redirects as non-OK responses
           // instead of forwarding the integration credentials to another URL.
           redirect: "manual",
@@ -508,6 +512,7 @@ export function createNangoClient(
               : JSON.stringify(request.body),
         });
       } catch {
+        request.signal?.throwIfAborted();
         throw new CrmUpstreamError();
       }
     },

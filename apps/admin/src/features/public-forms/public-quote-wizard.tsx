@@ -1,4 +1,5 @@
 import { withRequestTimeout } from "@/api/request-timeout";
+import { retryDeadline } from "@/api/retry-after";
 import { useMessages } from "@/i18n/core";
 import { publicFormsMessages } from "@/i18n/locales/public-forms";
 import {
@@ -28,6 +29,9 @@ export type PublicQuoteFormProps = {
   definition: PublicFormDefinition;
   endpoint: string;
 };
+
+const STATUS_RATE_LIMIT_RETRY_MS = 15_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 function isSafeQuoteLogo(value: string | undefined): value is string {
   return (
@@ -518,6 +522,7 @@ export function PublicQuoteForm({
     retryVerification,
     error,
     pending,
+    retryBlocked,
     uncertain,
     duplicate,
     failed,
@@ -545,6 +550,9 @@ export function PublicQuoteForm({
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [elapsed, setElapsed] = useState(0);
   const [progress, setProgress] = useState<PublicComparisonItem[] | null>(null);
+  const statusCooldown = useRef<{ submissionId: string; until: number } | null>(
+    null,
+  );
   const lastStep = step === steps.length - 1;
 
   useEffect(() => {
@@ -571,6 +579,19 @@ export function PublicQuoteForm({
     let retryTimer: number | undefined;
     let remainingRetries = 5;
     const request = new AbortController();
+    const cooldownRemaining = () => {
+      const cooldown = statusCooldown.current;
+      return cooldown?.submissionId === submissionId
+        ? Math.max(0, cooldown.until - Date.now())
+        : 0;
+    };
+    const schedule = (delay: number) => {
+      window.clearTimeout(retryTimer);
+      retryTimer = window.setTimeout(
+        refreshVisible,
+        Math.min(Math.max(delay, cooldownRemaining()), MAX_TIMER_DELAY_MS),
+      );
+    };
     const load = async () => {
       if (inFlight || stopped) return;
       window.clearTimeout(retryTimer);
@@ -584,7 +605,11 @@ export function PublicQuoteForm({
               { credentials: "omit", cache: "no-store", signal },
             );
             if (!response.ok)
-              return { ok: false as const, status: response.status };
+              return {
+                ok: false as const,
+                status: response.status,
+                retryAt: retryDeadline(response),
+              };
             const data = (await response.json()) as {
               items?: unknown;
               state?: string;
@@ -597,8 +622,15 @@ export function PublicQuoteForm({
         );
         if (stopped) return;
         if (!status.ok) {
+          if (status.status === 429) {
+            statusCooldown.current = {
+              submissionId,
+              until: status.retryAt ?? Date.now() + STATUS_RATE_LIMIT_RETRY_MS,
+            };
+          }
           shouldRetry =
             status.status === 408 ||
+            status.status === 429 ||
             status.status >= 500 ||
             (controller.pending && status.status === 404);
           return;
@@ -620,21 +652,21 @@ export function PublicQuoteForm({
         inFlight = false;
         if (!stopped && shouldRetry) {
           if (controller.pending) {
-            retryTimer = window.setTimeout(refreshVisible, 5000);
+            schedule(5000);
           } else if (controller.uncertain && remainingRetries > 0) {
             remainingRetries -= 1;
-            retryTimer = window.setTimeout(refreshVisible, 2000);
+            schedule(2000);
           }
         }
       }
     };
     const refreshVisible = () => {
-      if (document.visibilityState !== "hidden" && navigator.onLine)
-        void load();
+      if (document.visibilityState === "hidden" || !navigator.onLine) return;
+      if (cooldownRemaining() > 0) schedule(0);
+      else void load();
     };
-    if (controller.pending)
-      retryTimer = window.setTimeout(refreshVisible, 5000);
-    else void load();
+    if (controller.pending) schedule(5000);
+    else refreshVisible();
     window.addEventListener("focus", refreshVisible);
     window.addEventListener("online", refreshVisible);
     document.addEventListener("visibilitychange", refreshVisible);
@@ -1326,7 +1358,10 @@ export function PublicQuoteForm({
               </Button>
             )}
             {lastStep && (
-              <Button type="submit" disabled={!captcha || pending}>
+              <Button
+                type="submit"
+                disabled={!captcha || pending || retryBlocked}
+              >
                 {pending
                   ? t("Enviando…")
                   : uncertain

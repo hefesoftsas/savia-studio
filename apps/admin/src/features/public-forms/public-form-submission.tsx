@@ -1,5 +1,6 @@
 import { withRequestTimeout } from "@/api/request-timeout";
 import { formatRetryTime, retryDeadline } from "@/api/retry-after";
+import { retryIsBlocked, useRetryBlocked } from "@/hooks/use-retry-blocked";
 import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
 import { publicFormsMessages } from "@/i18n/locales/public-forms";
 import { useEffect, useRef, useState } from "react";
@@ -31,6 +32,7 @@ export type PublicSubmissionController = {
   retryVerification(): void;
   error: string;
   pending: boolean;
+  retryBlocked: boolean;
   uncertain: boolean;
   duplicate: boolean;
   failed: boolean;
@@ -118,6 +120,7 @@ export function usePublicFormSubmission({
   const retryProof = useRef(false);
   const form = useRef<HTMLFormElement | null>(null);
   const busy = useRef(false);
+  const retryAtRef = useRef<number | undefined>(undefined);
   const activePost = useRef<AbortController | null>(null);
   const alive = useRef(true);
   const submission = useRef<{
@@ -128,6 +131,11 @@ export function usePublicFormSubmission({
   const [captchaError, setCaptchaError] = useState("");
   const [captchaAttempt, setCaptchaAttempt] = useState(0);
   const [error, setError] = useState("");
+  const [retryAt, setRetryAt] = useState<number>();
+  const retryBlocked = useRetryBlocked(retryAt);
+  const retryTime = retryBlocked
+    ? formatRetryTime({ status: 429, retryAt }, intlLocale(locale))
+    : undefined;
   const [pending, setPending] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [duplicate, setDuplicate] = useState(false);
@@ -256,6 +264,11 @@ export function usePublicFormSubmission({
     setCaptchaAttempt((attempt) => attempt + 1);
   }
 
+  function setSubmissionRetryAt(deadline: number | undefined) {
+    retryAtRef.current = deadline;
+    setRetryAt(deadline);
+  }
+
   function settleFromStatus(id: string) {
     if (!alive.current || submission.current?.id !== id) return false;
     const post = activePost.current;
@@ -264,6 +277,7 @@ export function usePublicFormSubmission({
     setUncertain(false);
     setDuplicate(false);
     setError("");
+    setSubmissionRetryAt(undefined);
     busy.current = false;
     post?.abort();
     return true;
@@ -279,7 +293,15 @@ export function usePublicFormSubmission({
   }
 
   async function submit(values: PublicSubmissionValues) {
-    if (busy.current || !captcha || receipt || duplicate || failed) return;
+    if (
+      busy.current ||
+      retryIsBlocked(retryAtRef.current) ||
+      !captcha ||
+      receipt ||
+      duplicate ||
+      failed
+    )
+      return;
     if (!submission.current) {
       submission.current = { id: crypto.randomUUID(), values };
     }
@@ -289,6 +311,7 @@ export function usePublicFormSubmission({
     busy.current = true;
     setPending(true);
     setError("");
+    setSubmissionRetryAt(undefined);
     const abort = new AbortController();
     activePost.current = abort;
     const isCurrentPost = () =>
@@ -351,6 +374,10 @@ export function usePublicFormSubmission({
           setUncertain(true);
           keepProof = true;
         } else if (!uncertain) submission.current = null;
+        if (result.status === 429) {
+          setSubmissionRetryAt(result.retryAt);
+          keepProof = retryProof.current;
+        }
         const replacedForm =
           result.status === 409 &&
           (result.message === "The form changed. Request a new link." ||
@@ -358,16 +385,10 @@ export function usePublicFormSubmission({
               "La configuración cambió. Publica nuevamente el formulario." ||
             result.message ===
               "Configura y habilita el cotizador antes de publicar.");
-        const retryTime = formatRetryTime(result, intlLocale(locale));
         setError(
-          retryTime
-            ? t(
-                "Se alcanzó el límite de envíos. Inténtalo después de %{time}.",
-                {
-                  time: retryTime,
-                },
-              )
-            : publicError(replacedForm ? 404 : result.status),
+          result.retryAt === undefined
+            ? publicError(replacedForm ? 404 : result.status)
+            : "",
         );
         return;
       }
@@ -410,6 +431,7 @@ export function usePublicFormSubmission({
     setFailed(false);
     setUncertain(false);
     setError("");
+    setSubmissionRetryAt(undefined);
     setCaptcha("");
     form.current?.reset();
   }
@@ -420,8 +442,13 @@ export function usePublicFormSubmission({
     captcha,
     captchaError,
     retryVerification,
-    error,
+    error: retryTime
+      ? t("Se alcanzó el límite de envíos. Inténtalo después de %{time}.", {
+          time: retryTime,
+        })
+      : error,
     pending,
+    retryBlocked,
     uncertain,
     duplicate,
     failed,

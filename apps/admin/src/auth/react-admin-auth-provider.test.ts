@@ -1,7 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClientError } from "@/api/api-client";
-import { getLogoutPending } from "./logout-progress";
+import {
+  getLogoutPending,
+  getSessionReadsPaused,
+  resumeSessionReads,
+} from "./logout-progress";
 import { createReactAdminAuthProvider } from "./react-admin-auth-provider";
+
+afterEach(resumeSessionReads);
 
 describe("React Admin authentication provider", () => {
   it("waits for server sign-out before invalidating mounted auth queries", async () => {
@@ -26,14 +32,30 @@ describe("React Admin authentication provider", () => {
     const provider = createReactAdminAuthProvider(session, { onLogout });
     const logout = provider.logout({ logoutFromProvider: true });
     expect(getLogoutPending()).toBe(true);
+    expect(getSessionReadsPaused()).toBe(true);
+    let finishLateCheck!: () => void;
+    session.checkSession.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishLateCheck = resolve)),
+    );
+    const lateCheck = provider.checkAuth({});
     const cleanupBeforeSignOut = onLogout.mock.calls.length;
     finishSignOut("https://savia.example/api/auth/admin/authorize");
     await expect(logout).resolves.toBe(
       "https://savia.example/api/auth/admin/authorize",
     );
     expect(getLogoutPending()).toBe(false);
+    expect(getSessionReadsPaused()).toBe(true);
     expect(cleanupBeforeSignOut).toBe(0);
     expect(onLogout).toHaveBeenCalledOnce();
+
+    finishLateCheck();
+    await lateCheck;
+    expect(getSessionReadsPaused()).toBe(true);
+    session.checkSession.mockRejectedValueOnce(new Error("No session"));
+    await expect(provider.checkAuth({})).rejects.toThrow("No session");
+    expect(getSessionReadsPaused()).toBe(true);
+    await provider.checkAuth({});
+    expect(getSessionReadsPaused()).toBe(false);
   });
   it("releases sign-out feedback after a server failure and cleanup", async () => {
     let finishCleanup!: () => void;
@@ -61,6 +83,7 @@ describe("React Admin authentication provider", () => {
     finishCleanup();
     await rejected;
     expect(getLogoutPending()).toBe(false);
+    expect(getSessionReadsPaused()).toBe(false);
   });
   it("keeps automatic access failures local and reserves the provider logout for an explicit sign out", async () => {
     const session = {

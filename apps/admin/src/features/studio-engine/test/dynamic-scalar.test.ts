@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { runInNewContext } from "node:vm";
+import { JSDOM } from "jsdom";
 import { expect, it, vi } from "vitest";
 import { scalarTransportScript } from "../../../../../api/src/studio/dynamic-scalar";
 
@@ -28,10 +29,20 @@ it("returns an absolute response URL for Scalar and honors Request overrides", a
       listener = fn;
     },
   };
-  runInNewContext(
-    scalarTransportScript(101).replace(/^<script>|<\/script>$/g, ""),
-    { window, Map, URL, Request, Response, crypto, setTimeout, clearTimeout },
+  const scripts = JSDOM.fragment(scalarTransportScript(101)).querySelectorAll(
+    "script",
   );
+  expect(scripts).toHaveLength(1);
+  runInNewContext(scripts[0].text, {
+    window,
+    Map,
+    URL,
+    Request,
+    Response,
+    crypto,
+    setTimeout,
+    clearTimeout,
+  });
   const response = await window.fetch(
     new Request(
       "https://api.example.test/v1/studio/101/api/published/clientes",
@@ -42,7 +53,7 @@ it("returns an absolute response URL for Scalar and honors Request overrides", a
   expect(response.url).toBe(
     "https://api.example.test/v1/studio/101/api/published/clientes",
   );
-  expect(new URL(response.url).pathname).toContain("/published/clientes");
+  expect(sent[0].url).toBe("/v1/studio/101/api/published/clientes");
   expect(sent[0].method).toBe("PATCH");
   expect(sent[0].body).toBe('{"name":"new"}');
   expect(await response.json()).toEqual({ data: [] });

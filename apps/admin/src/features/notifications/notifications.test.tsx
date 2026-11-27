@@ -20,6 +20,7 @@ import {
 import { getSessionGeneration, rotateSessionScope } from "@/auth/session-scope";
 import { notificationReadKey } from "./queries";
 import { REQUEST_TIMEOUT_MS } from "@/api/request-timeout";
+import { beginLogout } from "@/auth/logout-progress";
 
 afterEach(() => {
   cleanup();
@@ -294,6 +295,30 @@ it("shows the unread badge and opens the inbox dialog", async () => {
     screen.getByRole("button", { name: "savia.notificationInbox.title (3)" }),
   );
   expect(await screen.findByRole("dialog")).toBeVisible();
+});
+
+it("does not refetch the unread badge when logout rotates the mounted session", async () => {
+  const unreadCount = vi.fn(async () => 2);
+  const cache = new QueryClient();
+  render(
+    <QueryClientProvider client={cache}>
+      <MemoryRouter>
+        <NotificationBell client={{ ...notificationClient, unreadCount }} />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  await screen.findByLabelText("savia.notificationInbox.title (2)");
+  let finishLogout!: () => void;
+  try {
+    await act(async () => {
+      finishLogout = beginLogout();
+      rotateSessionScope("logout");
+    });
+    expect(unreadCount).toHaveBeenCalledOnce();
+  } finally {
+    cleanup();
+    finishLogout?.();
+  }
 });
 
 it("checks a stale notification count when the bell opens and reuses a fresh count", async () => {

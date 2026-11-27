@@ -1,4 +1,5 @@
 import { registerPluginDevelopment } from "./plugin-development";
+import { daneLookupRequest } from "./dane-lookup";
 import {
   getMaintainedSummary,
   maintainedGroupCountStatement,
@@ -73,7 +74,11 @@ import {
 import { reconcileStoredMenuLayout } from "./menu-layout";
 import { buildWhere, filterSchema } from "./query";
 import { seedObjects, seedRecords } from "@savia/studio-shared/seed";
-import { type StudioObject, getPipeline } from "@savia/studio-shared/metadata";
+import {
+  type StudioObject,
+  getPipeline,
+  MAX_BULK_RECORDS,
+} from "@savia/studio-shared/metadata";
 import { registerIntegrations } from "./integrations";
 import { registerGeocoding } from "./geocoding";
 import { registerGeocodingSettings } from "./geocoding-settings";
@@ -266,12 +271,8 @@ export function createStudioApp(
         },
         503,
       );
-    const source = new URL(c.req.url);
     const response = await options.saviaRequestService.fetch(
-      new Request(
-        "https://savia-request.internal/api/lookups/dane" + source.search,
-        { method: "GET", headers: { "content-type": "application/json" } },
-      ),
+      daneLookupRequest(city, department),
     );
     return new Response(response.body, {
       status: response.status,
@@ -935,7 +936,7 @@ export function createStudioApp(
             z.object({ id: z.string(), version: z.number().int().positive() }),
           )
           .min(1)
-          .max(200),
+          .max(MAX_BULK_RECORDS),
         data: z.record(z.string(), z.unknown()).optional(),
       })
       .parse(await c.req.json());

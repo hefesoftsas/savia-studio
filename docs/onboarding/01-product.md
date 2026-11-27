@@ -30,6 +30,11 @@ and workflows. Industry-specific capabilities are installed as optional solution
    to versioned steps; see [workflows.md](../workflows.md). No industry solution
    is required.
 
+The cookie notice reserves space below the scrollable Admin workspace. Once
+the user chooses their cookie preferences, the app installation notice can
+use the same footer. On public pages, the cookie notice appears above the
+content so visitors can reach form controls before choosing their preferences.
+
 ## What it does NOT do
 
 Provider templates and credentials are handled by Workers.

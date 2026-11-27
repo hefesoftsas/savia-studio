@@ -18,6 +18,7 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { PublicFormPage } from "./public-form-page";
 
+const apiOrigin = "https://api.example.test";
 const definition = {
   id: "form-id",
   title: "Solicita información",
@@ -43,6 +44,7 @@ const remove = vi.fn();
 let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   widget = undefined;
+  vi.stubEnv("VITE_SAVIA_API_URL", apiOrigin);
   fetchMock = vi
     .fn()
     .mockResolvedValue(new Response(JSON.stringify(definition)));
@@ -59,6 +61,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -100,7 +103,7 @@ it("uses only the anonymous definition and requires captcha before posting allow
   expect(await screen.findByText("received-123")).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledTimes(2);
   for (const [url, init] of fetchMock.mock.calls) {
-    expect(String(url)).toContain("/api/public/forms/public-token");
+    expect(url).toBe(`${apiOrigin}/api/public/forms/public-token`);
     expect(init.credentials).toBe("omit");
   }
   const payload = JSON.parse(fetchMock.mock.calls[1][1].body);
@@ -177,25 +180,47 @@ it.each(["network failure", "request timeout"])(
     );
   },
 );
-it("shows when the daily submission limit resets and keeps the form values", async () => {
+it("keeps the form values and prevents submission until the daily limit resets", async () => {
   render(<PublicFormPage token="public-token" />);
   await fill();
   await solve();
-  const resetAt = new Date(Date.now() + 86_400_000).toUTCString();
+  vi.useFakeTimers();
+  const resetAt = new Date(Date.now() + 30_000).toUTCString();
+  const wait = Date.parse(resetAt) - Date.now();
   fetchMock.mockResolvedValueOnce(
     Response.json(
       { error: { code: "PUBLIC_SUBMISSION_DAILY_LIMIT" } },
       { status: 429, headers: { "Retry-After": resetAt } },
     ),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Enviar solicitud" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent(
+  const submit = screen.getByRole("button", { name: "Enviar solicitud" });
+  await act(async () => fireEvent.click(submit));
+  expect(screen.getByRole("alert")).toHaveTextContent(
     new Intl.DateTimeFormat("es-CO", {
       dateStyle: "short",
       timeStyle: "medium",
     }).format(new Date(resetAt)),
   );
   expect(screen.getByLabelText(/Nombre/)).toHaveValue("Ana");
+  act(() => (widget!.callback as (token: string) => void)("renewed-proof"));
+  expect(submit).toBeDisabled();
+  await act(async () => vi.advanceTimersByTimeAsync(wait - 1));
+  await act(async () => fireEvent.submit(submit.closest("form")!));
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(submit).toBeDisabled();
+
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(submit).toBeEnabled();
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  fetchMock.mockResolvedValueOnce(
+    Response.json({ ok: true, reference: "after-the-limit" }),
+  );
+  await act(async () => fireEvent.click(submit));
+  expect(screen.getByText("after-the-limit")).toBeInTheDocument();
+  expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toMatchObject({
+    values: { name: "Ana", age: 32, consent: true },
+    token: "renewed-proof",
+  });
 });
 
 it("does not present a changed form as an already registered submission", async () => {
@@ -391,7 +416,8 @@ it("accepts an explicit false answer for a required boolean", async () => {
   );
 });
 
-it("uses the bundled self-hosted challenge and keeps the solved proof for an uncertain retry", async () => {
+it("keeps the original self-hosted proof when an uncertain retry is rate limited", async () => {
+  const endpoint = `${apiOrigin}/api/public/forms/self-hosted-token`;
   if (!customElements.get("altcha-widget")) {
     customElements.define(
       "altcha-widget",
@@ -419,9 +445,7 @@ it("uses the bundled self-hosted challenge and keeps the solved proof for an unc
     expect(value).not.toBeNull();
     return value!;
   });
-  expect(element.getAttribute("challenge")).toContain(
-    "/api/public/forms/self-hosted-token/challenge",
-  );
+  expect(element.getAttribute("challenge")).toBe(`${endpoint}/challenge`);
   expect(window.turnstile?.render).not.toHaveBeenCalled();
   act(() =>
     element.dispatchEvent(
@@ -440,17 +464,33 @@ it("uses the bundled self-hosted challenge and keeps the solved proof for an unc
     name: /Reintentar el mismo envío/,
   });
   expect(retry).toBeEnabled();
+  fetchMock.mockResolvedValueOnce(new Response(null, { status: 429 }));
+  fireEvent.click(retry);
+  await waitFor(() =>
+    expect(screen.getByRole("alert")).toHaveTextContent("límite de envíos"),
+  );
+  expect(retry).toBeEnabled();
+  act(() =>
+    element.dispatchEvent(
+      new CustomEvent("statechange", { detail: { state: "expired" } }),
+    ),
+  );
+  expect(retry).toBeEnabled();
   fetchMock.mockResolvedValueOnce(
     Response.json({ ok: true, reference: "self-hosted-receipt" }),
   );
   fireEvent.click(retry);
   expect(await screen.findByText("self-hosted-receipt")).toBeInTheDocument();
   expect(fetchMock.mock.calls[2][1].body).toBe(fetchMock.mock.calls[1][1].body);
+  expect(fetchMock.mock.calls[3][1].body).toBe(fetchMock.mock.calls[1][1].body);
   expect(
-    fetchMock.mock.calls.every(
-      ([url]) => !String(url).includes("cloudflare.com"),
-    ),
-  ).toBe(true);
+    fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"]),
+  ).toEqual([
+    [endpoint, "GET"],
+    [endpoint, "POST"],
+    [endpoint, "POST"],
+    [endpoint, "POST"],
+  ]);
 });
 
 function render(ui: ReactElement) {
@@ -500,6 +540,7 @@ it("selects the public quote wizard for quote definitions with a presentation de
   expect(screen.queryByLabelText(/Nombre/)).not.toBeInTheDocument();
 });
 it("submits without a captcha widget when verification is disabled locally", async () => {
+  const endpoint = `${apiOrigin}/api/public/forms/local-token`;
   fetchMock.mockResolvedValueOnce(
     new Response(
       JSON.stringify({
@@ -527,10 +568,11 @@ it("submits without a captcha widget when verification is disabled locally", asy
   const payload = JSON.parse(fetchMock.mock.calls[1][1].body);
   expect(payload.token).toBe("local-bypass");
   expect(
-    fetchMock.mock.calls.every(
-      ([url]) => !String(url).includes("cloudflare.com"),
-    ),
-  ).toBe(true);
+    fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"]),
+  ).toEqual([
+    [endpoint, "GET"],
+    [endpoint, "POST"],
+  ]);
 });
 it("explains provider failures with the quote-specific message", async () => {
   render(<PublicFormPage token="public-token" />);

@@ -1,5 +1,6 @@
 import { formatRetryTime } from "@/api/retry-after";
 import { Button } from "@/components/ui/button";
+import { retryIsBlocked, useRetryBlocked } from "@/hooks/use-retry-blocked";
 import { useAppLocale, useMessages, intlLocale } from "@/i18n/core";
 import { DayPicker } from "react-day-picker";
 import { enUS, es, ptBR } from "react-day-picker/locale";
@@ -35,6 +36,8 @@ type Props = {
   onChange(selection: BookingSelection | undefined): void;
   onReadyChange?(ready: boolean): void;
   onAvailabilityUnavailable?(): void;
+  readRetryAt?: number;
+  onRateLimited?(retryAt: number): void;
   refreshKey?: number;
   hideHeading?: boolean;
   excludedStartAt?: string;
@@ -122,6 +125,8 @@ export function PublicBookingAvailability({
   onChange,
   onReadyChange,
   onAvailabilityUnavailable,
+  readRetryAt,
+  onRateLimited,
   refreshKey = 0,
   hideHeading = false,
   excludedStartAt,
@@ -154,11 +159,23 @@ export function PublicBookingAvailability({
   );
   const [days, setDays] = useState<AvailabilityDay[]>([]);
   const [loading, setLoading] = useState(false);
-  const [requestError, setRequestError] =
-    useState<PublicBookingApiError | null>(null);
-  const retryTime = formatRetryTime(requestError, intlLocale(locale));
+  const [requestError, setRequestError] = useState<Pick<
+    PublicBookingApiError,
+    "status" | "retryAt"
+  > | null>(null);
+  const retryAt =
+    Math.max(requestError?.retryAt ?? 0, readRetryAt ?? 0) || undefined;
+  const retryBlocked = useRetryBlocked(retryAt);
+  const retryTime = formatRetryTime(
+    { status: 429, retryAt: retryBlocked ? retryAt : requestError?.retryAt },
+    intlLocale(locale),
+  );
   const [attempt, setAttempt] = useState(0);
   const requestId = useRef(0);
+  const latestRetryAt = useEffectEvent(() => retryAt);
+  const reportRateLimit = useEffectEvent((deadline: number) =>
+    onRateLimited?.(deadline),
+  );
   const reportUnavailable = useEffectEvent(() => onAvailabilityUnavailable?.());
   const excludedStart = excludedStartAt ? Date.parse(excludedStartAt) : null;
 
@@ -174,6 +191,13 @@ export function PublicBookingAvailability({
     if (!serviceId || !professionalId || rangeFrom > rangeTo) {
       setDays([]);
       setLoading(false);
+      return;
+    }
+    const deadline = latestRetryAt();
+    if (retryIsBlocked(deadline)) {
+      setDays([]);
+      setLoading(false);
+      setRequestError({ status: 429, retryAt: deadline });
       return;
     }
     const controller = new AbortController();
@@ -234,8 +258,10 @@ export function PublicBookingAvailability({
       })
       .catch((error: PublicBookingApiError | undefined) => {
         if (!controller.signal.aborted && requestId.current === id) {
-          setRequestError(error ?? new Error("Availability request failed"));
+          setRequestError({ status: error?.status, retryAt: error?.retryAt });
           setDays([]);
+          if (error?.status === 429 && error.retryAt !== undefined)
+            reportRateLimit(error.retryAt);
           if (error?.status === 404 || error?.status === 409)
             reportUnavailable();
         }
@@ -430,7 +456,7 @@ export function PublicBookingAvailability({
           {!loading && requestError && (
             <div className="grid gap-3 text-sm">
               <p role="alert" className="text-destructive">
-                {requestError.status === 429
+                {requestError.status === 429 || retryBlocked
                   ? retryTime
                     ? t("Too many booking requests. Try again after %{time}.", {
                         time: retryTime,
@@ -444,7 +470,11 @@ export function PublicBookingAvailability({
                 type="button"
                 variant="outline"
                 className="h-11 w-fit"
-                onClick={() => setAttempt((current) => current + 1)}
+                disabled={retryBlocked}
+                onClick={() => {
+                  if (!retryIsBlocked(retryAt))
+                    setAttempt((current) => current + 1);
+                }}
               >
                 {t("Retry")}
               </Button>

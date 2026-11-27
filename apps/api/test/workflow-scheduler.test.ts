@@ -197,6 +197,96 @@ it("prunes domain audit history on the preview scheduled tick", async () => {
 });
 
 it.each(["true", "false"])(
+  "retries attachment storage deletion in schedule mode %s",
+  async (mode) => {
+    const key = `scheduler-tests/attachment-${mode}`;
+    const waiting = `${key}-waiting`;
+    await env.DOCUMENTS.put(key, "deleted attachment");
+    await env.DOCUMENTS.put(waiting, "retry later");
+    await env.DB.prepare(
+      `INSERT INTO studio_file_deletions (storage_key,tenant_id,file_id,next_attempt_at)
+       VALUES (?,'tenant:99004','scheduled-file',0),(?,'tenant:99004','scheduled-file',?)`,
+    )
+      .bind(key, waiting, Date.now() + 60_000)
+      .run();
+
+    await worker.scheduled({} as ScheduledController, {
+      ...localSchedulerEnv,
+      SAVIA_WORKFLOW_ONLY_SCHEDULE: mode,
+    });
+
+    expect(await env.DOCUMENTS.head(key)).toBeNull();
+    expect(await env.DOCUMENTS.head(waiting)).not.toBeNull();
+    expect(
+      await env.DB.prepare(
+        "SELECT storage_key FROM studio_file_deletions WHERE storage_key=?",
+      )
+        .bind(key)
+        .first(),
+    ).toBeNull();
+    await env.DOCUMENTS.delete(waiting);
+    await env.DB.prepare(
+      "DELETE FROM studio_file_deletions WHERE storage_key=?",
+    )
+      .bind(waiting)
+      .run();
+  },
+);
+
+it.each(["true", "false"])(
+  "purges expired attachment drafts in schedule mode %s",
+  async (mode) => {
+    const drafts = [
+      {
+        id: `scheduled-expired-a-${mode}`,
+        tenant: "tenant:99004",
+        expires: "2000-01-01T00:00:00.000Z",
+      },
+      {
+        id: `scheduled-expired-b-${mode}`,
+        tenant: "tenant:99005",
+        expires: "2000-01-01T00:00:00.000Z",
+      },
+      {
+        id: `scheduled-fresh-${mode}`,
+        tenant: "tenant:99004",
+        expires: "2099-01-01T00:00:00.000Z",
+      },
+    ];
+    const insert = env.DB.prepare(
+      `INSERT INTO studio_file_drafts
+        (id,tenant_id,object_name,field_name,name,mime,size,storage_key,expires_at)
+        VALUES (?,?,'tickets','documents','draft.txt','text/plain',5,?,?)`,
+    );
+    for (const { id, tenant, expires } of drafts) {
+      await env.DOCUMENTS.put(id, "draft");
+      await insert.bind(id, tenant, id, expires).run();
+    }
+
+    await worker.scheduled({} as ScheduledController, {
+      ...localSchedulerEnv,
+      SAVIA_WORKFLOW_ONLY_SCHEDULE: mode,
+    });
+
+    const [expiredA, expiredB, fresh] = drafts.map(({ id }) => id);
+    const { results } = await env.DB.prepare(
+      "SELECT id FROM studio_file_drafts WHERE id IN (?,?,?)",
+    )
+      .bind(expiredA, expiredB, fresh)
+      .all();
+    expect(results).toEqual([{ id: fresh }]);
+    expect(await env.DOCUMENTS.head(expiredA)).toBeNull();
+    expect(await env.DOCUMENTS.head(expiredB)).toBeNull();
+    expect(await env.DOCUMENTS.head(fresh)).not.toBeNull();
+
+    await env.DOCUMENTS.delete(fresh);
+    await env.DB.prepare("DELETE FROM studio_file_drafts WHERE id=?")
+      .bind(fresh)
+      .run();
+  },
+);
+
+it.each(["true", "false"])(
   "runs Jira privacy maintenance in schedule mode %s",
   async (mode) => {
     vi.clearAllMocks();

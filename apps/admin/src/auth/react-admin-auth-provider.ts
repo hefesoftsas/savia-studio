@@ -1,4 +1,9 @@
-import { beginLogout } from "./logout-progress";
+import {
+  beginLogout,
+  getLogoutPending,
+  resumeSessionReads,
+} from "./logout-progress";
+import { getSessionGeneration } from "./session-scope";
 import type { AuthProvider } from "ra-core";
 import { isSaviaFlowsDisabled } from "@/features/savia-flows/availability";
 import { ApiClientError } from "../api/api-client";
@@ -36,11 +41,14 @@ export function createReactAdminAuthProvider(
       const finishLogout = params?.logoutFromProvider
         ? beginLogout()
         : undefined;
+      let completed = false;
       try {
         if (params?.logoutFromProvider) {
           // Keep mounted auth queries intact until the server clears its cookies.
           // Returning the promise without awaiting it runs finally too early.
-          return await session.logout();
+          const redirect = await session.logout();
+          completed = true;
+          return redirect;
         }
         await session.clearSession();
         return session.getAuthorizeUrl();
@@ -52,11 +60,17 @@ export function createReactAdminAuthProvider(
         } catch {
           // ignore cleanup failures on the way out
         } finally {
-          finishLogout?.();
+          finishLogout?.(completed);
         }
       }
     },
-    checkAuth: () => session.checkSession(),
+    checkAuth: async () => {
+      const generation = getSessionGeneration();
+      const startedDuringLogout = getLogoutPending();
+      await session.checkSession();
+      if (!startedDuringLogout && generation === getSessionGeneration())
+        resumeSessionReads();
+    },
     checkError: async (error: unknown) => {
       if (error instanceof ApiClientError && error.status === 401) {
         await session.clearSession();

@@ -323,9 +323,14 @@ HubSpot summary widgets use the live collection total and status breakdown.
 Summaries support up to 1,000 records and show a recovery state if the query
 exceeds that limit.
 
-For connected CRM sources without status summaries, summary widgets show the
-total when the source supplies one. If the total is unavailable, the widget says
-so. Summary and item widgets omit ordering when the source cannot sort records.
+A local collection summary keeps a freshly verified total visible when its
+status breakdown is unavailable. It offers a retry for temporary failures and
+reports a full read error when access is denied.
+
+For linked collections without status summaries, the summary widget reads the
+record list for a total. It shows a total only when the returned rows and
+pagination are consistent with that count. An incomplete response offers a
+retry. Summary and item widgets omit ordering when the source cannot sort records.
 Status charts require grouping support, and action widgets require sorting by
 due date. The widget picker explains when a source lacks either capability.
 

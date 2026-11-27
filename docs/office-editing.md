@@ -20,6 +20,8 @@ Open **Office suite** from the sidebar to create a Document (DOCX), Spreadsheet
 tab. Use **Delete document** beside a Savia file and confirm to permanently
 remove it and all its versions. Deletion checks the displayed version so a
 concurrent edit cannot be silently discarded; reload and review before retrying.
+The document becomes inaccessible as soon as deletion succeeds. If storage is
+unavailable, scheduled maintenance retries removing the stored versions.
 Files are private to their owner by default and can be shared with selected
 active members of the same workspace. Document bytes stay in R2 and metadata,
 sharing permissions and immutable revision history stay in D1. Returning to the
@@ -137,7 +139,7 @@ follow its normal upload/save flow; a new record must be saved before editing
 its attachments. Existing file-count, size and server permission checks apply.
 Blank templates are bundled static assets and contain no user data.
 
-Open an existing supported attachment with **Editar**. Edit the document and press
+Open an existing supported attachment with **Abrir en Office**. Edit the document and press
 **Guardar** (or Ctrl/Cmd+S). The native editor Save action also requests a Savia save.
 Every successful save creates a revision; **Historial de versiones** downloads old
 versions. **Descargar copia** exports the current in-memory document, including when
@@ -147,6 +149,16 @@ A stale save returns a conflict and keeps the draft in the current tab. Download
 copy before reopening the newest version; there is no automatic merge. Temporary
 attachments must first be attached to a saved record. Read-only fields cannot be
 edited. Existing collection/domain permissions apply to all revision operations.
+
+The editor releases the save controls if the upload or its confirmation stalls
+for 45 seconds. Retrying checks the expected revision against the original
+save's bytes. If that revision already contains the same file, the editor
+confirms it without uploading again. Edits made since that attempt stay pending
+for the next save.
+
+Revision history refreshes in the background after a save. If a refresh fails,
+use **Reintentar historial** in the history panel. The editor preserves previously
+loaded versions during a temporary failure and remains available for editing.
 
 Saved attachments can also be copied to OneDrive or sent through Outlook after a separate review and confirmation. See [Documents and deliveries](guides/document-delivery.md). These actions use the saved revision; save Office edits first.
 
@@ -224,6 +236,10 @@ admin HTML shell. Verify the uploaded metadata before enabling editing for users
 
 ## Persistence and limits
 
+- For record attachments, the Office viewer and revision downloads require read
+  access to the record and attachment field. Saving a revision also requires
+  update access to both. The editor opens in read-only mode when the caller can
+  view the file and the field or permissions restrict editing.
 - Maximum edited file: 5 MiB, or the field's smaller configured limit. The field's
   MIME allowlist is rechecked on save.
 - ZIP validation checks headers, paths, duplicates, overlap and actual streamed
@@ -234,8 +250,8 @@ admin HTML shell. Verify the uploaded metadata before enabling editing for users
 - R2 receives a new immutable object before a version-checked D1 transaction updates
   the current pointer, history and audit entry. Conflicts preserve the old revision;
   unreferenced failed uploads are removed when commit status can be established.
-- File deletion checks the version transactionally before removing revision blobs.
-  A storage cleanup failure can leave inaccessible orphan objects for maintenance.
+- File deletion checks the version transactionally and records every revision
+  blob for removal. Scheduled maintenance retries pending storage cleanup.
 - Editing is single-user with optimistic conflicts, not collaborative coauthoring.
   There is no offline draft persistence or automatic recovery after closing the tab.
 - Prefer a current desktop browser. The shell is responsive, but the embedded Office
