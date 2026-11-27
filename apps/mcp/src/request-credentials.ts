@@ -4,6 +4,7 @@ export class McpRequestCredentialError extends Error {}
 
 export type DelegatedRequestCredentials = {
   authorization: string;
+  studioTenantId?: number;
 };
 
 function matchesSecret(expected: string, received: string | null): boolean {
@@ -30,5 +31,14 @@ export function readDelegatedRequestCredentials(
     throw new McpRequestCredentialError("MCP request credentials are invalid");
   }
 
-  return { authorization };
+  const rawStudioTenantId = headers.get("x-savia-mcp-tenant-id");
+  if (rawStudioTenantId === null) return { authorization };
+  const studioTenantId = Number(rawStudioTenantId);
+  if (
+    !/^\d+$/.test(rawStudioTenantId) ||
+    !Number.isSafeInteger(studioTenantId)
+  ) {
+    throw new McpRequestCredentialError("MCP request credentials are invalid");
+  }
+  return { authorization, studioTenantId };
 }

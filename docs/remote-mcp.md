@@ -166,7 +166,9 @@ aggregates reject structured filter conditions.
 In record pages and total-only aggregates, `"total": null` means the total is
 unknown. The number of records on a page does not identify the collection
 total. When returned records or pagination contradict a reported total, MCP
-keeps the records and reports the total as unknown. A missing record page
+keeps the records and reports the total as unknown. That check includes
+the number of records before the current page and any provider page limit
+that leaves more records unread. A missing record page
 returns a read error. A live result with `"total": 0` reports an empty result
 for the requested filters.
 

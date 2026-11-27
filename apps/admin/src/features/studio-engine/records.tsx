@@ -406,7 +406,8 @@ export default function Records({
     usesNativeRecordStorage(object) &&
     capabilities.read &&
     capabilities.restore === true;
-  const isLinkedCollection = Boolean(object.config.studio?.collection);
+  const source = object.config.studio?.collection;
+  const isLinkedCollection = Boolean(source);
   const canConfigureSourceForm =
     !capabilities.schema && !capabilities.customFields;
   const managedCustomer = object.config.studio?.business === "managed-customer";
@@ -553,7 +554,16 @@ export default function Records({
     }
   };
   const querySearch = useDebouncedSearch(s.q);
-  const querySettings = { ...s, q: querySearch, stage };
+  const querySettings = {
+    ...s,
+    q: capabilities.search === false ? "" : querySearch,
+    searchField:
+      source?.kind === "crm" || capabilities.search === false
+        ? ""
+        : s.searchField,
+    filters: capabilities.filter === false ? defaults.filters : s.filters,
+    stage: capabilities.filter === false ? "" : stage,
+  };
   const listFilter = removeEmpty({
     ...params(querySettings, trash),
     __collectionSearch: capabilities.search,
@@ -583,10 +593,10 @@ export default function Records({
     queryKey: [
       "summary",
       object.name,
-      querySearch,
-      s.searchField,
-      stage,
-      s.filters,
+      querySettings.q,
+      querySettings.searchField,
+      querySettings.stage,
+      querySettings.filters,
       s.group,
       trash,
     ],
@@ -632,7 +642,6 @@ export default function Records({
   const visibleColumnCount = s.columns.filter((key) =>
     availableColumnKeys.includes(key),
   ).length;
-  const source = object.config.studio?.collection;
   const canExportCsv =
     capabilities.list &&
     object.exportFields?.length !== 0 &&
@@ -692,10 +701,9 @@ export default function Records({
       ...(capabilities.search === false
         ? {}
         : {
-            q: querySearch,
-            ...(s.searchField &&
-            object.config.studio?.collection?.kind !== "crm"
-              ? { searchField: s.searchField }
+            q: querySettings.q,
+            ...(querySettings.searchField
+              ? { searchField: querySettings.searchField }
               : {}),
           }),
     });

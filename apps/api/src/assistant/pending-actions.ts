@@ -7,6 +7,7 @@ export type PendingActionInput = {
   domain: string;
   command: string;
   input: Record<string, unknown>;
+  studioTenantId?: number;
 };
 
 export type PendingAction = PendingActionInput & {
@@ -28,6 +29,7 @@ type PendingActionRow = {
   expires_at: string;
   resolved_at: string | null;
   result_json: string | null;
+  studio_tenant_id: number | null;
 };
 
 const approvalLifetimeMilliseconds = 5 * 60 * 1_000;
@@ -39,6 +41,9 @@ function toPendingAction(row: PendingActionRow): PendingAction {
     domain: row.domain,
     command: row.command,
     input: JSON.parse(row.input_json) as Record<string, unknown>,
+    ...(row.studio_tenant_id === null
+      ? {}
+      : { studioTenantId: row.studio_tenant_id }),
     status: row.status,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
@@ -61,9 +66,9 @@ export class PendingActionRepository {
     const row = await this.database
       .prepare(
         `INSERT INTO assistant_pending_actions (
-          id, principal_id, domain, command, input_json, status, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-        RETURNING id, principal_id, domain, command, input_json, status, created_at, expires_at, resolved_at, result_json`,
+          id, principal_id, domain, command, input_json, studio_tenant_id, status, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        RETURNING id, principal_id, domain, command, input_json, studio_tenant_id, status, created_at, expires_at, resolved_at, result_json`,
       )
       .bind(
         input.id,
@@ -71,6 +76,7 @@ export class PendingActionRepository {
         input.domain,
         input.command,
         JSON.stringify(input.input),
+        input.studioTenantId ?? null,
         createdAt.toISOString(),
         expiresAt.toISOString(),
       )
@@ -82,16 +88,17 @@ export class PendingActionRepository {
   async status(
     id: string,
     principalId: string,
-  ): Promise<{ state: string; result: unknown } | null> {
+  ): Promise<{ state: string; result: unknown; studioTenantId?: number } | null> {
     const row = await this.database
       .prepare(
-        "SELECT status,result_json,expires_at FROM assistant_pending_actions WHERE id=? AND principal_id=?",
+        "SELECT status,result_json,expires_at,studio_tenant_id FROM assistant_pending_actions WHERE id=? AND principal_id=?",
       )
       .bind(id, principalId)
       .first<{
         status: string;
         result_json: string | null;
         expires_at: string;
+        studio_tenant_id: number | null;
       }>();
     if (!row) return null;
     return {
@@ -100,6 +107,9 @@ export class PendingActionRepository {
           ? "expired"
           : row.status,
       result: row.result_json === null ? null : JSON.parse(row.result_json),
+      ...(row.studio_tenant_id === null
+        ? {}
+        : { studioTenantId: row.studio_tenant_id }),
     };
   }
 
@@ -116,7 +126,7 @@ export class PendingActionRepository {
           AND principal_id = ?
           AND status = 'pending'
           AND expires_at > ?
-        RETURNING id, principal_id, domain, command, input_json, status, created_at, expires_at, resolved_at, result_json`,
+        RETURNING id, principal_id, domain, command, input_json, studio_tenant_id, status, created_at, expires_at, resolved_at, result_json`,
       )
       .bind(now.toISOString(), id, principalId, now.toISOString())
       .first<PendingActionRow>();
@@ -138,7 +148,7 @@ export class PendingActionRepository {
           AND status = 'executing'
           AND result_json IS NULL
           AND expires_at > ?
-        RETURNING id, principal_id, domain, command, input_json, status, created_at, expires_at, resolved_at, result_json`,
+        RETURNING id, principal_id, domain, command, input_json, studio_tenant_id, status, created_at, expires_at, resolved_at, result_json`,
       )
       .bind(
         JSON.stringify({ state: "dispatching" }),
@@ -197,7 +207,7 @@ export class PendingActionRepository {
         `UPDATE assistant_pending_actions
         SET status = ?, resolved_at = ?, result_json = ?
         WHERE id = ? AND status = 'executing'
-        RETURNING id, principal_id, domain, command, input_json, status, created_at, expires_at, resolved_at, result_json`,
+        RETURNING id, principal_id, domain, command, input_json, studio_tenant_id, status, created_at, expires_at, resolved_at, result_json`,
       )
       .bind(status, now.toISOString(), JSON.stringify(result), id)
       .first<PendingActionRow>();

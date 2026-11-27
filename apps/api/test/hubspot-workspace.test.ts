@@ -593,6 +593,38 @@ describe("HubSpot record pagination", () => {
     expect(proxy).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    "/api/records/hubspot_contacts",
+    "/api/records/hubspot_contacts/summary",
+    "/api/export/hubspot_contacts",
+  ])(
+    "rejects unsupported query options for %s before reading HubSpot",
+    async (path) => {
+      const proxy = vi.fn(async () =>
+        Response.json({
+          results: [{ id: "1", properties: { firstname: "Ana" } }],
+        }),
+      );
+      const app = createHubspotWorkspaceApp({
+        ...pageContext,
+        crm: { nango: { proxy } },
+      });
+
+      for (const query of [
+        "sort=firstname&order=ASC",
+        "q=Ana&searchField=firstname",
+        "emptyStage=true",
+      ]) {
+        expect((await app.request(`${path}?${query}`)).status, query).toBe(422);
+      }
+      expect(proxy).not.toHaveBeenCalled();
+
+      const supported = await app.request(`${path}?q=Ana&order=DESC`);
+      expect(supported.status).toBe(200);
+      expect(proxy).toHaveBeenCalledOnce();
+    },
+  );
+
   it("continues from the previous page and preserves the exact total without replaying it", async () => {
     const proxy = vi.fn(async ({ path }: { path: string }) => {
       const after = new URL(path, "https://hubspot.test").searchParams.get(
@@ -1506,75 +1538,111 @@ it("resolves native links and performs safe provider association mutations", asy
   );
   expect(calls.at(-1).body).toEqual({});
 });
-it("reads a zero association cursor and preserves association order in the next page", async () => {
+describe("HubSpot association pages", () => {
   const relationContext = {
     ...context,
     tenant: "tenant:hubspot-relation-pages",
   };
-  const installed = await createHubspotWorkspaceApp(relationContext).request(
-    "/api/crm-workspace/install",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ resources: ["contacts", "companies"] }),
-    },
-  );
-  expect(installed.status).toBe(200);
-  let batchRecords = [
-    { id: "4", properties: { name: "Fourth" } },
-    { id: "3", properties: { name: "Third" } },
-  ];
-  const proxy = vi.fn(async ({ path }: { path: string; body?: unknown }) => {
-    if (path.endsWith("/labels"))
-      return Response.json({
-        results: [{ label: null, category: "HUBSPOT_DEFINED", typeId: 1 }],
-      });
-    if (path.includes("/associations/")) {
-      const after = new URL(`https://hubspot.test${path}`).searchParams.get(
-        "after",
-      );
-      return Response.json(
-        after === "0"
-          ? { results: [{ id: "3" }, { id: "4" }] }
-          : {
-              results: [{ id: "1" }, { id: "2" }],
-              paging: { next: { after: 0 } },
-            },
-      );
-    }
-    if (path.endsWith("/batch/read"))
-      return Response.json({ results: batchRecords });
-    return Response.json({ id: "7" });
-  });
-  const app = createHubspotWorkspaceApp({
-    ...relationContext,
-    crm: { nango: { proxy } },
-  });
-  const url =
-    "/api/record-links/hubspot_contacts/7?relationId=hubspot:hubspot_contacts:hubspot_companies&page=2&perPage=2";
-  const response = await app.request(url);
-
-  expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({
-    data: [
+  beforeAll(async () => {
+    const installed = await createHubspotWorkspaceApp(relationContext).request(
+      "/api/crm-workspace/install",
       {
-        records: [
-          { id: "3", label: "Third" },
-          { id: "4", label: "Fourth" },
-        ],
-        total: 4,
-        hasNextPage: false,
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ resources: ["contacts", "companies"] }),
       },
-    ],
+    );
+    expect(installed.status).toBe(200);
   });
-  expect(proxy).toHaveBeenCalledWith(
-    expect.objectContaining({
-      path: "/crm/v3/objects/companies/batch/read",
-      body: expect.objectContaining({ inputs: [{ id: "3" }, { id: "4" }] }),
-    }),
-  );
-  batchRecords = [{ id: "5", properties: { name: "Unrelated" } }];
-  expect((await app.request(url)).status).toBe(502);
+
+  it.each([
+    { name: "zero cursor", repeated: false, batchIds: ["4", "3"], status: 200 },
+    {
+      name: "repeated target",
+      repeated: true,
+      batchIds: ["4", "3"],
+      status: 200,
+    },
+    { name: "incomplete batch", repeated: false, batchIds: ["3"], status: 502 },
+    { name: "unrelated record", repeated: false, batchIds: ["5"], status: 502 },
+  ])("validates related records for a $name", async (scenario) => {
+    const proxy = vi.fn(async ({ path }: { path: string; body?: unknown }) => {
+      if (path.endsWith("/labels"))
+        return Response.json({
+          results: [{ label: null, category: "HUBSPOT_DEFINED", typeId: 1 }],
+        });
+      if (path.includes("/associations/")) {
+        const after = new URL(`https://hubspot.test${path}`).searchParams.get(
+          "after",
+        );
+        return Response.json(
+          after === "0"
+            ? {
+                results: [
+                  ...(scenario.repeated ? [{ id: 2 }] : []),
+                  { id: "3" },
+                  { id: "4" },
+                ],
+              }
+            : {
+                results: [{ id: "1" }, { id: "2" }],
+                paging: { next: { after: 0 } },
+              },
+        );
+      }
+      if (path.endsWith("/batch/read"))
+        return Response.json({
+          results: scenario.batchIds.map((id) => ({
+            id,
+            properties: { name: `Company ${id}` },
+          })),
+        });
+      return Response.json({ id: "7" });
+    });
+    const app = createHubspotWorkspaceApp({
+      ...relationContext,
+      crm: { nango: { proxy } },
+    });
+    const url =
+      "/api/record-links/hubspot_contacts/7?relationId=hubspot:hubspot_contacts:hubspot_companies&page=2&perPage=2";
+    const response = await app.request(url);
+
+    expect(proxy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "/crm/v3/objects/companies/batch/read",
+        body: expect.objectContaining({ inputs: [{ id: "3" }, { id: "4" }] }),
+      }),
+    );
+    expect(response.status).toBe(scenario.status);
+    if (scenario.status === 200) {
+      expect(await response.json()).toMatchObject({
+        data: [
+          {
+            records: [
+              { id: "3", label: "Company 3" },
+              { id: "4", label: "Company 4" },
+            ],
+            total: 4,
+            hasNextPage: false,
+          },
+        ],
+      });
+    }
+
+    if (scenario.repeated) {
+      proxy.mockClear();
+      const metadata = await app.request(`${url}&includeRecords=false`);
+      expect(metadata.status).toBe(200);
+      expect(await metadata.json()).toMatchObject({
+        data: [{ records: [], total: 4, hasNextPage: false }],
+      });
+      expect(
+        proxy.mock.calls.some(([request]) =>
+          request.path.endsWith("/batch/read"),
+        ),
+      ).toBe(false);
+    }
+  });
 });
 
 it("keeps bound field contracts immutable through generic metadata routes", async () => {

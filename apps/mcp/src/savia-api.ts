@@ -5,7 +5,8 @@ export class SaviaApiClient extends SharedSaviaApiClient {
     baseUrl = process.env.SAVIA_API_URL ?? "http://127.0.0.1:8787",
     accessToken = process.env.SAVIA_API_TOKEN,
     fetcher: typeof fetch = fetch,
+    fixedTenantId?: number,
   ) {
-    super(baseUrl, accessToken, fetcher);
+    super(baseUrl, accessToken, fetcher, fixedTenantId);
   }
 }

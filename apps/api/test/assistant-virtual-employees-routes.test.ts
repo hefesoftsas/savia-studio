@@ -660,4 +660,232 @@ describe("Virtual Employees API Routes", () => {
       headers: { authorization: "Bearer admin-token" },
     });
   });
+
+  it("records an uploaded document without indexable text as failed", async () => {
+    const app = createTestApp();
+    const createRes = await app.request("/api/assistant/employees", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer admin-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Source checks",
+        handle: "source-checks",
+        systemPrompt: "Read the attached documentation.",
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const { data: employee } = await createRes.json<{ data: { id: string } }>();
+
+    const uploadRes = await app.request(
+      `/api/assistant/employees/${employee.id}/files`,
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer admin-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          name: "blank.txt",
+          contentType: "text/plain",
+          content: " \n\t ",
+        }),
+      },
+    );
+
+    expect(uploadRes.status).toBe(201);
+    const { data: file } = await uploadRes.json<{
+      data: { id: string; ragStatus: string };
+    }>();
+    expect(file.ragStatus).toBe("failed");
+    expect(
+      await new VirtualEmployeesRepository(env.DB).getFile(file.id),
+    ).toMatchObject({ employeeId: employee.id, ragStatus: "failed" });
+  });
+
+  it.each([
+    [
+      "missing multipart boundary",
+      "multipart/form-data",
+      "body without a multipart boundary",
+    ],
+    [
+      "invalid Base64",
+      "application/json",
+      JSON.stringify({ name: "notes.txt", content: "???", isBase64: true }),
+    ],
+    [
+      "numeric content type",
+      "application/json",
+      JSON.stringify({ name: "notes.txt", content: "Notes", contentType: 17 }),
+    ],
+    [
+      "string encoding flag",
+      "application/json",
+      JSON.stringify({
+        name: "notes.txt",
+        content: "Tm90ZXM=",
+        isBase64: "false",
+      }),
+    ],
+  ])(
+    "rejects malformed document uploads with %s before writing",
+    async (_, type, body) => {
+      const repo = new VirtualEmployeesRepository(env.DB);
+      const employee = await repo.create({
+        name: "Upload validation",
+        handle: `upload-validation-${crypto.randomUUID()}`,
+        systemPrompt: "Read workspace documents.",
+      });
+
+      const response = await createTestApp().request(
+        `/api/assistant/employees/${employee.id}/files`,
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer admin-token",
+            "content-type": type,
+          },
+          body,
+        },
+      );
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: "VALIDATION_ERROR" },
+      });
+      expect(await repo.listFiles(employee.id)).toEqual([]);
+      const stored = await env.DOCUMENTS.list({
+        prefix: `assistant/employees/${employee.id}/files/`,
+      });
+      expect(stored.objects).toEqual([]);
+    },
+  );
+
+  it.each(["multipart", "Base64"])(
+    "preserves the bytes from a valid %s upload",
+    async (encoding) => {
+      const repo = new VirtualEmployeesRepository(env.DB);
+      const employee = await repo.create({
+        name: "Document upload",
+        handle: `upload-${crypto.randomUUID()}`,
+        systemPrompt: "Read workspace documents.",
+      });
+      const content = "Workspace notes";
+      const headers = new Headers({ authorization: "Bearer admin-token" });
+      let body: string | FormData;
+      if (encoding === "multipart") {
+        const form = new FormData();
+        form.append(
+          "file",
+          new File([content], "notes.txt", { type: "text/plain" }),
+        );
+        body = form;
+      } else {
+        headers.set("content-type", "application/json");
+        body = JSON.stringify({
+          name: "notes.txt",
+          content: btoa(content),
+          isBase64: true,
+        });
+      }
+
+      const response = await createTestApp().request(
+        `/api/assistant/employees/${employee.id}/files`,
+        { method: "POST", headers, body },
+      );
+      expect(response.status).toBe(201);
+      const [file] = await repo.listFiles(employee.id);
+      expect(file).toMatchObject({
+        name: "notes.txt",
+        contentType: "text/plain",
+        ragStatus: "indexed",
+      });
+      const stored = await env.DOCUMENTS.get(file.r2Key);
+      expect(await stored?.text()).toBe(content);
+    },
+  );
+
+  it.each([
+    { outcome: "insert rejected", commit: false, readable: true, status: 500 },
+    { outcome: "confirmation lost", commit: true, readable: true, status: 201 },
+    {
+      outcome: "database unavailable",
+      commit: true,
+      readable: false,
+      status: 500,
+    },
+  ])(
+    "handles $outcome without losing document consistency",
+    async (scenario) => {
+      const repo = new VirtualEmployeesRepository(env.DB);
+      const employee = await repo.create({
+        name: "Document registration",
+        handle: `registration-${crypto.randomUUID()}`,
+        systemPrompt: "Read workspace documents.",
+      });
+      const prepare = env.DB.prepare.bind(env.DB);
+      const fault = vi.spyOn(env.DB, "prepare").mockImplementation((sql) => {
+        if (
+          !scenario.readable &&
+          sql.includes("FROM assistant_virtual_employee_files WHERE id =")
+        ) {
+          throw new Error("File metadata unavailable");
+        }
+        const statement = prepare(sql);
+        if (!sql.includes("INSERT INTO assistant_virtual_employee_files")) {
+          return statement;
+        }
+        return {
+          bind: (...args: unknown[]) => ({
+            async run() {
+              if (scenario.commit) await statement.bind(...args).run();
+              throw new Error(
+                "File registration did not acknowledge the insert",
+              );
+            },
+          }),
+        } as D1PreparedStatement;
+      });
+
+      try {
+        const response = await createTestApp().request(
+          `/api/assistant/employees/${employee.id}/files`,
+          {
+            method: "POST",
+            headers: {
+              authorization: "Bearer admin-token",
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              name: "notes.txt",
+              content: "Workspace notes",
+            }),
+          },
+        );
+        expect(response.status).toBe(scenario.status);
+      } finally {
+        fault.mockRestore();
+      }
+
+      const files = await repo.listFiles(employee.id);
+      const { objects } = await env.DOCUMENTS.list({
+        prefix: `assistant/employees/${employee.id}/files/`,
+      });
+      expect(objects.map((object) => object.key)).toEqual(
+        files.map((file) => file.r2Key),
+      );
+      if (scenario.commit) {
+        expect(files).toHaveLength(1);
+        expect(files[0].ragStatus).toBe(
+          scenario.readable ? "indexed" : "pending",
+        );
+        const stored = await env.DOCUMENTS.get(files[0].r2Key);
+        expect(await stored?.text()).toBe("Workspace notes");
+      } else {
+        expect(files).toEqual([]);
+      }
+    },
+  );
 });

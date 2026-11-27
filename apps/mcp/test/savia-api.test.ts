@@ -271,6 +271,69 @@ it("discovers and queries authorized collections hidden only from navigation", a
   expect(paths).toContain("/v1/studio/0/api/records/cotizaciones");
 });
 
+it.each([
+  {
+    scenario: "an empty later page",
+    data: [],
+    recordOffset: 5,
+    pageLimitReached: false,
+    total: 0,
+    expected: null,
+  },
+  {
+    scenario: "a page at the provider limit",
+    data: [{ id: "6" }],
+    recordOffset: 5,
+    pageLimitReached: true,
+    total: 6,
+    expected: null,
+  },
+  {
+    scenario: "a page with a consistent total beyond the limit",
+    data: [{ id: "6" }],
+    recordOffset: 5,
+    pageLimitReached: true,
+    total: 7,
+    expected: 7,
+  },
+  {
+    scenario: "a page with an invalid offset",
+    data: [{ id: "6" }],
+    recordOffset: -1,
+    pageLimitReached: false,
+    total: 1,
+    expected: null,
+  },
+])("checks a Studio total on $scenario", async (page) => {
+  const client = new SaviaApiClient(
+    "https://api.test",
+    "caller",
+    async (url) => {
+      const { pathname } = new URL(String(url));
+      if (pathname.endsWith("/active-tenant"))
+        return Response.json({ activeTenantId: 14 });
+      if (pathname.endsWith("/objects"))
+        return Response.json({ data: [{ name: "hubspot_contacts" }] });
+      expect(pathname).toBe("/v1/studio/14/api/records/hubspot_contacts");
+      return Response.json({
+        data: page.data,
+        total: page.total,
+        pageInfo: { hasNextPage: false },
+        meta: {
+          recordOffset: page.recordOffset,
+          pageLimitReached: page.pageLimitReached,
+        },
+      });
+    },
+  );
+  await expect(
+    client.listStudioRecords("hubspot_contacts", { page: 6 }),
+  ).resolves.toMatchObject({
+    data: page.data,
+    total: page.expected,
+  });
+});
+
 it("uses live HubSpot records and totals instead of the catalog's local count", async () => {
   const calls: string[] = [];
   let summaryTotal: unknown = 6;

@@ -12,6 +12,15 @@ saved. A caller with multiple or no active memberships must select an authorized
 tenant. Platform administrators without a selected tenant operate on platform
 employees and platform collections.
 
+In a Savia chat turn, Studio queries use the organization resolved when the
+turn starts. An organization change applies to the next turn. Studio still
+checks the caller's current permissions on each request.
+
+Confirmations for Studio record changes and optional quote actions use the
+organization saved with the proposal. This scope stays fixed between preparation
+and confirmation, and the API checks access again when executing the action.
+Earlier proposals without a saved organization require a new proposal.
+
 The employee editor has two explicit modes. **Text only** processes the supplied
 text and employee instructions without workspace collections, documents, MCP
 tools, employee knowledge-file retrieval, or workspace business guidance. The
@@ -28,6 +37,20 @@ allowlist is checked in addition to tenant ownership; choose one or more
 collections or explicitly enable all collections. Switching from text-only mode
 starts with no workspace grants, and the editor asks for an explicit scope before
 saving. Employees cannot grant access to another tenant's collections.
+
+Knowledge files show as indexed once Savia has saved searchable text. Empty
+text or an indexing error puts the file in the failed state. Employee responses
+use only indexed files and look up relevant passages by keyword in Savia's
+database. Document lookup does not require an embedding provider.
+
+Savia rejects malformed multipart forms and invalid JSON upload fields or
+Base64 content before storing a file. For JSON uploads, use a string for
+`contentType` and a boolean for `isBase64` when supplying those fields.
+
+If file registration fails after storage, Savia checks for the saved record.
+It resumes indexing when the record is present and attempts to remove the
+stored object when the record is absent. If the check fails, Savia preserves
+the object to avoid losing a document that may already have been registered.
 
 Existing employees with a nonempty collection allowlist remain in Workspace tools
 mode with their current scope when edited. A Spanish-to-English translator

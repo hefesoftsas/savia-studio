@@ -49,6 +49,13 @@ const activeScreenContextSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
+const employeeFileUploadSchema = z.object({
+  name: z.string(),
+  content: z.string(),
+  contentType: z.string().nullish(),
+  isBase64: z.boolean().nullish(),
+});
+
 const chatRequestSchema = z.object({
   messages: assistantThreadMessagesSchema,
   employeeId: z.string().optional(),
@@ -908,7 +915,6 @@ export function registerAssistantRoutes(
     // Clean up RAG vectors for all files of this employee
     const ragEnv = dependencies.ragEnv ?? {
       DB: dependencies.db,
-      DOCUMENTS: dependencies.documents,
     };
     if (existing.files) {
       for (const file of existing.files) {
@@ -925,7 +931,7 @@ export function registerAssistantRoutes(
     return context.json({ data: { success: true } });
   });
 
-  // --- Virtual Employee Files & Cloudflare RAG ---
+  // --- Virtual Employee Files ---
 
   app.post("/api/assistant/employees/:id/files", async (context) => {
     if (!dependencies?.db) return unavailableResponse();
@@ -956,9 +962,9 @@ export function registerAssistantRoutes(
     let fileBuffer: ArrayBuffer;
 
     if (reqContentType.includes("multipart/form-data")) {
-      const form = await context.req.formData();
-      const file = form.get("file");
-      if (!file || !(file instanceof File)) {
+      const form = await context.req.formData().catch(() => undefined);
+      const file = form?.get("file");
+      if (!(file instanceof File)) {
         return context.json(
           {
             error: { code: "VALIDATION_ERROR", message: "Archivo no provisto" },
@@ -970,75 +976,102 @@ export function registerAssistantRoutes(
       fileType = file.type || "application/octet-stream";
       fileBuffer = await file.arrayBuffer();
     } else {
-      const json = await context.req.json().catch(() => undefined);
-      if (
-        !json ||
-        typeof json.name !== "string" ||
-        typeof json.content !== "string"
-      ) {
+      const upload = employeeFileUploadSchema.safeParse(
+        await context.req.json().catch(() => undefined),
+      );
+      if (!upload.success) {
         return context.json(
           {
             error: {
               code: "VALIDATION_ERROR",
               message:
-                "Se requiere un objeto con { name, contentType, content }",
+                "Revisa el nombre, contenido, tipo y codificación del archivo.",
             },
           },
           400,
         );
       }
-      filename = json.name;
-      fileType = json.contentType || "text/plain";
-      if (json.isBase64) {
-        const binaryString = atob(json.content);
+      const { name, contentType, content, isBase64 } = upload.data;
+      filename = name;
+      fileType = contentType || "text/plain";
+      if (isBase64) {
+        let binaryString: string;
+        try {
+          binaryString = atob(content);
+        } catch {
+          return context.json(
+            {
+              error: {
+                code: "VALIDATION_ERROR",
+                message: "El contenido Base64 no es válido.",
+              },
+            },
+            400,
+          );
+        }
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
           bytes[i] = binaryString.charCodeAt(i);
         }
         fileBuffer = bytes.buffer;
       } else {
-        fileBuffer = new TextEncoder().encode(json.content).buffer;
+        fileBuffer = new TextEncoder().encode(content).buffer;
       }
     }
 
     const fileId = crypto.randomUUID();
     const r2Key = `assistant/employees/${employeeId}/files/${fileId}-${filename}`;
+    const text = extractTextFromFile(fileBuffer, fileType, filename);
+    const documents = dependencies.documents;
 
-    // 1. Upload to R2 if available
-    if (dependencies.documents) {
-      await dependencies.documents.put(r2Key, fileBuffer, {
+    if (documents) {
+      await documents.put(r2Key, fileBuffer, {
         httpMetadata: { contentType: fileType },
       });
     }
 
-    // 2. Extract text from file
-    const text = extractTextFromFile(fileBuffer, fileType, filename);
+    const fileRecord = await repo
+      .addFile({
+        id: fileId,
+        employeeId,
+        name: filename,
+        contentType: fileType,
+        sizeBytes: fileBuffer.byteLength,
+        r2Key,
+        ragStatus: "pending",
+      })
+      .catch(async (error: unknown) => {
+        // A failed acknowledgement can follow a committed insert.
+        const saved = await repo.getFile(fileId).catch(() => undefined);
+        if (saved?.employeeId === employeeId && saved.r2Key === r2Key) {
+          return saved;
+        }
+        if (documents && saved === null) {
+          await documents.delete(r2Key).catch(() => {
+            console.warn("Unable to clean up an unregistered employee file");
+          });
+        }
+        throw error;
+      });
 
-    // 3. Register in D1
-    const fileRecord = await repo.addFile({
-      id: fileId,
-      employeeId,
-      name: filename,
-      contentType: fileType,
-      sizeBytes: fileBuffer.byteLength,
-      r2Key,
-      ragStatus: "indexed",
-    });
-
-    // 4. Index in Cloudflare RAG (Workers AI Embeddings + Vectorize, with D1 chunk persistence)
     const ragEnv = dependencies.ragEnv ?? {
       DB: dependencies.db,
-      DOCUMENTS: dependencies.documents,
     };
+    let ragStatus: "indexed" | "failed" = "failed";
     try {
-      await indexDocument(ragEnv, employeeId, fileId, filename, text);
+      const { chunksCount } = await indexDocument(
+        ragEnv,
+        employeeId,
+        fileId,
+        text,
+      );
+      if (chunksCount > 0) ragStatus = "indexed";
     } catch (error) {
-      console.warn("[Cloudflare RAG] Error indexing file:", error);
-      await repo.updateFileStatus(fileId, "failed");
-      fileRecord.ragStatus = "failed";
+      console.warn("[Assistant RAG] Error indexing file:", error);
     }
+    await repo.updateFileStatus(fileId, ragStatus);
 
-    return context.json({ data: fileRecord }, 201);
+    return context.json({ data: { ...fileRecord, ragStatus } }, 201);
   });
 
   app.delete("/api/assistant/employees/:id/files/:fileId", async (context) => {
@@ -1076,7 +1109,6 @@ export function registerAssistantRoutes(
 
     const ragEnv = dependencies.ragEnv ?? {
       DB: dependencies.db,
-      DOCUMENTS: dependencies.documents,
     };
     await deleteFileVectors(ragEnv, employeeId, fileId);
 

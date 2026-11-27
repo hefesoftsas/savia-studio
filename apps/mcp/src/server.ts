@@ -15,29 +15,46 @@ export type SaviaMcpServerOptions = {
   mcpSharedSecret?: string;
 };
 
-type DelegatedClaims = { delegatedAuthorization?: unknown };
+type DelegatedClaims = {
+  delegatedAuthorization?: unknown;
+  studioTenantId?: unknown;
+};
 
 function getDelegatedClient(
   server: FastMCP,
   apiUrl: string,
   apiFetch?: typeof fetch,
 ): SaviaApiClient {
-  const auth = server.getContext().auth as any;
-  const claims = auth?.claims as DelegatedClaims | undefined;
+  const auth = server.getContext().auth as
+    | (DelegatedClaims & { claims?: DelegatedClaims; extra?: DelegatedClaims })
+    | undefined;
+  const claims = auth?.claims;
   const authorization =
     claims?.delegatedAuthorization ??
     auth?.extra?.delegatedAuthorization ??
     auth?.delegatedAuthorization;
+  const studioTenantId = [claims, auth?.extra, auth].find(
+    (candidate) => candidate?.studioTenantId !== undefined,
+  )?.studioTenantId;
   if (
     typeof authorization !== "string" ||
     !/^Bearer\s+\S+$/i.test(authorization)
   ) {
     throw new Error("A delegated Savia user authorization is required");
   }
+  if (
+    studioTenantId !== undefined &&
+    (typeof studioTenantId !== "number" ||
+      !Number.isSafeInteger(studioTenantId) ||
+      studioTenantId < 0)
+  ) {
+    throw new Error("A valid delegated Savia Studio tenant ID is required");
+  }
   return new SaviaApiClient(
     apiUrl,
     authorization.replace(/^Bearer\s+/i, ""),
     apiFetch,
+    studioTenantId,
   );
 }
 
@@ -60,21 +77,23 @@ export function createSaviaMcpServer(
     auth: mcpSharedSecret
       ? {
           verifyRequest: async (request) => {
-            const { authorization } = readDelegatedRequestCredentials(
-              request.headers,
-              mcpSharedSecret,
-            );
+            const { authorization, studioTenantId } =
+              readDelegatedRequestCredentials(request.headers, mcpSharedSecret);
             return {
               token: createHash("sha256").update(authorization).digest("hex"),
               scopes: [],
-              claims: { delegatedAuthorization: authorization },
+              claims: { delegatedAuthorization: authorization, studioTenantId },
             };
           },
         }
       : undefined,
     http: mcpSharedSecret
       ? {
-          redactHeaders: ["x-savia-mcp-secret", "x-savia-user-authorization"],
+          redactHeaders: [
+            "x-savia-mcp-secret",
+            "x-savia-user-authorization",
+            "x-savia-mcp-tenant-id",
+          ],
         }
       : undefined,
   });

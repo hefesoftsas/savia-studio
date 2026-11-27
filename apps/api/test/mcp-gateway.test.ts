@@ -49,6 +49,7 @@ describe("public MCP boundary", () => {
           cookie: "admin=forged",
           "x-savia-mcp-secret": "forged",
           "x-savia-user-authorization": "Bearer forged",
+          "x-savia-mcp-tenant-id": "14",
           "mcp-session-id": "someone-else",
           "mcp-protocol-version": "2026-07-28",
           "mcp-method": "tools/call",
@@ -75,6 +76,7 @@ describe("public MCP boundary", () => {
       "Bearer internal-api-token",
     );
     expect(mcpRequest.headers.get("x-savia-mcp-secret")).toBe("private-secret");
+    expect(mcpRequest.headers.get("x-savia-mcp-tenant-id")).toBeNull();
   });
   it("fails closed on denied token exchange and rejects untrusted origins", async () => {
     const env = environment();
