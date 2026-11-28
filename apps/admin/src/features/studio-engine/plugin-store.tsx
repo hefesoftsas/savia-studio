@@ -185,6 +185,7 @@ export default function PluginStoreManager({
   const listGeneration = useRef(0);
 
   const [inventory, setInventory] = useState(emptyInventory);
+  const latestWorkspaceVersions = useRef(emptyInventory.items);
   const { items, bundled, canDeleteFromRegistry } = inventory;
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -227,17 +228,23 @@ export default function PluginStoreManager({
       canDeleteFromRegistry: response.canDeleteFromRegistry === true,
     };
   }
+
+  function updateInventory(next: PluginInventory) {
+    latestWorkspaceVersions.current = next.items;
+    setInventory(next);
+  }
+
   async function reload() {
     const generation = ++listGeneration.current;
     try {
       const response = await loadItems();
       if (generation === listGeneration.current) {
-        setInventory(response);
+        updateInventory(response);
         setError("");
       }
     } catch (reason) {
       if (generation === listGeneration.current && isReadAccessDenied(reason)) {
-        setInventory(emptyInventory);
+        updateInventory(emptyInventory);
         setOpenPluginId(null);
         setDeleteTarget(null);
         setError(message(reason));
@@ -282,12 +289,12 @@ export default function PluginStoreManager({
     loadItems()
       .then((response) => {
         if (active && generation === listGeneration.current) {
-          setInventory(response);
+          updateInventory(response);
         }
       })
       .catch((reason) => {
         if (active && generation === listGeneration.current) {
-          if (isReadAccessDenied(reason)) setInventory(emptyInventory);
+          if (isReadAccessDenied(reason)) updateInventory(emptyInventory);
           setError(message(reason));
         }
       })
@@ -422,6 +429,7 @@ export default function PluginStoreManager({
       <PluginRegistry
         key={getStudioRuntime().tenantId}
         workspaceVersions={items}
+        getLatestWorkspaceVersions={() => latestWorkspaceVersions.current}
         onImported={async () => {
           await reload();
           await onChanged();

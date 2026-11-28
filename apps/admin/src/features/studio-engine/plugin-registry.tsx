@@ -75,9 +75,11 @@ function pinnedReleaseKey(id: string, version: string, sha256: string) {
 export function PluginRegistry({
   onImported,
   workspaceVersions = noWorkspaceVersions,
+  getLatestWorkspaceVersions,
 }: {
   onImported: () => void | Promise<unknown>;
   workspaceVersions?: readonly WorkspaceVersion[];
+  getLatestWorkspaceVersions?: () => readonly WorkspaceVersion[];
 }) {
   const t = useMessages(messages);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -162,12 +164,14 @@ export function PluginRegistry({
 
   function rememberRelease(release: Release, action: "add" | "install") {
     const key = pinnedReleaseKey(release.id, release.version, release.sha256);
+    // An earlier read may have completed while the mutation was pending.
+    const inventory = getLatestWorkspaceVersions?.() ?? workspaceVersions;
     setConfirmed((previous) => {
       const current =
-        previous?.inventory === workspaceVersions
+        previous?.inventory === inventory
           ? previous
           : {
-              inventory: workspaceVersions,
+              inventory,
               added: new Set<string>(),
               active: new Map<string, string>(),
             };
