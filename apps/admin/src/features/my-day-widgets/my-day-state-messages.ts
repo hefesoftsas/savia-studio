@@ -2,11 +2,6 @@ import type { MessageCatalog } from "@/i18n/core";
 
 export const myDayStateMessages = {
   "Email sent.": ["Correo enviado.", "Email sent.", "E-mail enviado."],
-  "Saved widgets could not be read. Starting over.": [
-    "Tus widgets guardados no se pudieron leer. Empezamos de cero.",
-    "Your saved widgets could not be read. Starting over.",
-    "Não foi possível ler seus widgets salvos. Vamos começar de novo.",
-  ],
   "Could not load widgets. Try again.": [
     "No pudimos cargar tus widgets. Reintenta.",
     "Could not load your widgets. Try again.",

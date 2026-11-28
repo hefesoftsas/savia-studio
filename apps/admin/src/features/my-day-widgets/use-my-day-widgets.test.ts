@@ -160,6 +160,94 @@ describe("useMyDayWidgets", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
   });
 
+  it("keeps the new client's cached layout when its refresh fails", async () => {
+    const first = createPreferences([{ id: "first-owner", kind: "agenda" }]);
+    const second = createPreferences([
+      { id: "second-owner", kind: "quick_task" },
+    ]);
+    const cached = renderHook(() => useMyDayWidgets(second as never));
+    await waitFor(() => expect(cached.result.current.loading).toBe(false));
+    cached.unmount();
+    const { result, rerender } = renderHook(
+      ({ preferences }) => useMyDayWidgets(preferences as never),
+      { initialProps: { preferences: first } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    second.getMyDayWidgets.mockRejectedValueOnce(
+      new Error("Temporary failure"),
+    );
+    rerender({ preferences: second });
+    await waitFor(() => expect(result.current.readError).toBeDefined());
+    expect(result.current.widgets.map(({ id }) => id)).toEqual([
+      "second-owner",
+    ]);
+  });
+
+  it("does not save a replacement layout before the current layout can be loaded", async () => {
+    const preferences = createPreferences([{ id: "saved", kind: "agenda" }]);
+    preferences.getMyDayWidgets.mockRejectedValueOnce(
+      new Error("Temporary failure"),
+    );
+    const { result } = renderHook(() => useMyDayWidgets(preferences as never));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    const widget = { id: "new", kind: "quick_task" } as const;
+    await act(async () => {
+      expect(await result.current.add(widget)).toBe(false);
+    });
+    expect(preferences.saveMyDayWidgets).not.toHaveBeenCalled();
+    await act(async () => result.current.reload());
+    await act(async () => {
+      expect(await result.current.add(widget)).toBe(true);
+    });
+    expect(result.current.widgets.map(({ id }) => id)).toEqual([
+      "saved",
+      "new",
+    ]);
+  });
+
+  it("waits for an in-flight layout save before loading after remount", async () => {
+    let stored: { version: number; widgets: unknown[] } = {
+      version: 1,
+      widgets: [
+        { id: "first", kind: "agenda" },
+        { id: "second", kind: "quick_task" },
+      ],
+    };
+    const preferences = createPreferences();
+    preferences.getMyDayWidgets.mockImplementation(async () => stored);
+    let finishSave!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finishSave = resolve;
+    });
+    preferences.saveMyDayWidgets.mockImplementationOnce(async (next) => {
+      await pending;
+      stored = next as typeof stored;
+      return stored;
+    });
+    const previous = renderHook(() => useMyDayWidgets(preferences as never));
+    await waitFor(() => expect(previous.result.current.loading).toBe(false));
+    let saved!: Promise<boolean>;
+    act(() => {
+      saved = previous.result.current.move("second", -1);
+    });
+    previous.unmount();
+
+    const remounted = renderHook(() => useMyDayWidgets(preferences as never));
+    expect(preferences.getMyDayWidgets).toHaveBeenCalledOnce();
+    await act(async () => {
+      finishSave();
+      await saved;
+    });
+    await waitFor(() =>
+      expect(remounted.result.current.widgets.map(({ id }) => id)).toEqual([
+        "second",
+        "first",
+      ]),
+    );
+  });
+
   it("persists widgets added to the layout", async () => {
     const preferences = createPreferences([]);
     const { result } = renderHook(() => useMyDayWidgets(preferences as never));
@@ -190,13 +278,13 @@ describe("useMyDayWidgets", () => {
       wrapper,
     });
     await waitFor(() =>
-      expect(hooked.result.current.feedback).toBe(
+      expect(hooked.result.current.readError).toBe(
         "No pudimos cargar tus widgets. Reintenta.",
       ),
     );
     act(() => store.setItem("locale", "en"));
     await waitFor(() =>
-      expect(hooked.result.current.feedback).toBe(
+      expect(hooked.result.current.readError).toBe(
         "Could not load your widgets. Try again.",
       ),
     );

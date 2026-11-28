@@ -115,6 +115,26 @@ describe("MyDayWidgetsSection", () => {
     ).toBeVisible();
   });
 
+  it("offers a read retry instead of an editable empty dashboard after a load failure", async () => {
+    const preferences = createPreferences();
+    preferences.getMyDayWidgets.mockRejectedValueOnce(new Error("Unavailable"));
+    render(
+      <MyDayWidgetsSection
+        apiClient={createApiClient() as never}
+        userPreferences={preferences as never}
+      />,
+    );
+    const retry = await screen.findByRole("button", { name: "Reintentar" });
+    const add = screen.getByRole("button", { name: "Agregar widget" });
+    expect(add).toBeDisabled();
+    expect(screen.queryByTestId("my-day-widgets-empty")).toBeNull();
+
+    fireEvent.click(retry);
+    expect(await screen.findByTestId("my-day-widgets-empty")).toBeVisible();
+    expect(add).toBeEnabled();
+    expect(preferences.saveMyDayWidgets).not.toHaveBeenCalled();
+  });
+
   it("renders a summary widget with server totals and groups", async () => {
     render(
       <MyDayWidgetsSection
