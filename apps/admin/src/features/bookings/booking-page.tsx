@@ -285,6 +285,9 @@ function BookingWorkspace({
   ]);
   const reservationsLoading =
     reservationReadPending || requestedReservationRange !== reservationRange;
+  const publicReady = Boolean(
+    bootstrap?.settings.enabled && bootstrap.settings.published,
+  );
   const currentProfessional = useMemo(
     () =>
       bootstrap?.settings.professionals.find(
@@ -292,24 +295,32 @@ function BookingWorkspace({
       ),
     [bootstrap],
   );
-  const linkProfessional = useMemo(
-    () =>
-      bootstrap?.settings.professionals.find(
-        (item) =>
-          item.principalId === bootstrap.principalId &&
-          item.enabled &&
-          bootstrap.settings.enabled &&
-          bootstrap.settings.published &&
-          bootstrap.candidates.some(
-            (candidate) => candidate.principalId === item.principalId,
-          ) &&
-          bootstrap.settings.services.some(
-            (service) =>
-              service.enabled && service.professionalIds.includes(item.id),
-          ),
-      ),
-    [bootstrap],
-  );
+  const savedLinkServices = useMemo(() => {
+    if (!bootstrap) return [];
+    const candidates = new Set(
+      (bootstrap.candidates ?? []).map((p) => p.principalId),
+    );
+    const activeProfessionals = new Set(
+      bootstrap.settings.professionals
+        .filter((p) => p.enabled && candidates.has(p.principalId))
+        .map((p) => p.id),
+    );
+    return bootstrap.settings.services.map((service) => ({
+      id: service.id,
+      name: service.name,
+      eligibleProfessionalIds:
+        publicReady && service.enabled
+          ? service.professionalIds.filter((id) => activeProfessionals.has(id))
+          : [],
+    }));
+  }, [bootstrap, publicReady]);
+  const linkProfessional =
+    currentProfessional &&
+    savedLinkServices.some((service) =>
+      service.eligibleProfessionalIds.includes(currentProfessional.id),
+    )
+      ? currentProfessional
+      : undefined;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -981,8 +992,6 @@ function BookingWorkspace({
       </main>
     );
 
-  const publicReady =
-    bootstrap.settings.enabled && bootstrap.settings.published;
   return (
     <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 md:px-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -1090,9 +1099,7 @@ function BookingWorkspace({
           canManageTeamLinks={bootstrap.canManage}
           apiClient={services.apiClient}
           recoverExpiredSession={recoverExpiredSession}
-          services={bootstrap.settings.services
-            .filter((service) => service.enabled)
-            .map(({ id, name }) => ({ id, name }))}
+          services={savedLinkServices}
         />
       )}
 

@@ -51,7 +51,11 @@ function LinkAction({
   );
 }
 
-type ServiceOption = { id: string; name: string };
+type ServiceOption = {
+  id: string;
+  name: string;
+  eligibleProfessionalIds: readonly string[];
+};
 type Expiry = "24h" | "7d" | "30d" | "never";
 
 function expiryDate(expiry: Expiry) {
@@ -101,6 +105,24 @@ export function BookingPublicLinksPanel({
   const [qrVisible, setQrVisible] = useState<Record<string, boolean>>({});
   const [copied, setCopied] = useState("");
 
+  const availableServices = services.filter((service) =>
+    canManageTeamLinks
+      ? service.eligibleProfessionalIds.length > 0
+      : currentProfessionalId !== null &&
+        service.eligibleProfessionalIds.includes(currentProfessionalId),
+  );
+  const selectedServices = serviceId
+    ? availableServices.filter((service) => service.id === serviceId)
+    : availableServices;
+  const selectedServiceUnavailable =
+    serviceId !== "" && !selectedServices.length;
+  const canCreatePersonal =
+    currentProfessionalId !== null &&
+    selectedServices.some((service) =>
+      service.eligibleProfessionalIds.includes(currentProfessionalId),
+    );
+  const canCreateTeam = canManageTeamLinks && selectedServices.length > 0;
+
   const endpoint = `/v1/tenants/${encodeURIComponent(tenantId)}/booking/public-links`;
   const handleRequestError = useCallback(
     (error: unknown) => {
@@ -139,6 +161,12 @@ export function BookingPublicLinksPanel({
       : t("No expiry");
 
   async function create(scope: BookingLinkScope) {
+    if (
+      loading ||
+      busy ||
+      (scope.kind === "team" ? !canCreateTeam : !canCreatePersonal)
+    )
+      return;
     setBusy(true);
     setError(false);
     setNotice("");
@@ -296,7 +324,12 @@ export function BookingPublicLinksPanel({
             onChange={(event) => setServiceId(event.target.value)}
           >
             <option value="">{t("Any eligible service")}</option>
-            {services.map((service) => (
+            {selectedServiceUnavailable && (
+              <option value={serviceId} disabled>
+                {t("Service no longer available")}
+              </option>
+            )}
+            {availableServices.map((service) => (
               <option key={service.id} value={service.id}>
                 {service.name}
               </option>
@@ -330,7 +363,7 @@ export function BookingPublicLinksPanel({
           <Button
             type="button"
             className="min-h-11"
-            disabled={loading || busy || !currentProfessionalId}
+            disabled={loading || busy || !canCreatePersonal}
             onClick={() =>
               currentProfessionalId &&
               void create({
@@ -346,13 +379,27 @@ export function BookingPublicLinksPanel({
               type="button"
               variant="outline"
               className="min-h-11"
-              disabled={loading || busy}
+              disabled={loading || busy || !canCreateTeam}
               onClick={() => void create({ kind: "team" })}
             >
               {t("Create team agenda link")}
             </Button>
           )}
         </div>
+        {canManageTeamLinks && !availableServices.length && (
+          <p role="status" className="text-sm text-muted-foreground">
+            {t(
+              "Publish booking with an enabled service assigned to an active professional to create team links.",
+            )}
+          </p>
+        )}
+        {currentProfessionalId &&
+          !selectedServiceUnavailable &&
+          !canCreatePersonal && (
+            <p role="status" className="text-sm text-muted-foreground">
+              {t("Choose a service assigned to you to create a personal link.")}
+            </p>
+          )}
         {!currentProfessionalId && (
           <p role="status" className="text-sm text-muted-foreground">
             {t(
@@ -399,7 +446,7 @@ export function BookingPublicLinksPanel({
       )}
       {!loading && !error && !links.length && (
         <p className="text-sm text-muted-foreground">
-          {t("No booking links yet. Create a personal link to get started.")}
+          {t("No booking links yet.")}
         </p>
       )}
       {!loading && !!links.length && (
