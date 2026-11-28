@@ -26,6 +26,10 @@ Use domain-specific invalidation. Account hints invalidate permissions and ident
 
 Keep draft state independent of server read models. Clean forms may adopt fresh values. Dirty/submitting forms defer refresh/reset and surface the existing remote-change notice. Revision conflicts, deleted records and revoked permissions retain explicit domain handling.
 
+In Assistant Configuration, retrying a failed background read preserves unsaved
+fields. Once a save returns, older background results and temporary errors
+cannot replace its state. An authorization failure still clears the settings.
+
 The Admin and Studio QueryClient factories use `createProtectedReadCache`, which discards a denied query's cached data while preserving its error. Specialized manual loaders apply the same `isReadAccessDenied` check.
 
 Transient errors preserve the last successful data. Initial errors show a load error rather than a false empty success. A 401/403 or logout removes protected content; background error retention never overrides access checks. Scope/request generation guards prevent late completions from committing into a newer scope. A later action result takes precedence over older background errors.
