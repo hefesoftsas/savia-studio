@@ -346,9 +346,13 @@ export function AppSidebar() {
     itemsById: staticItems,
   } = useVisibleSidebarNavigation();
   const location = useLocation();
-  const { children: studioChildren, tenantId } = useStudioSidebarNavigation(
-    Boolean(staticItems["studio"]),
-  );
+  const {
+    children: studioChildren,
+    tenantId,
+    metadataReadFailed,
+    metadataRetrying,
+    retryMetadata,
+  } = useStudioSidebarNavigation(Boolean(staticItems["studio"]));
   const pageAdmin = studioChildren.find((child) => child.id === "studio:admin");
   const itemsById = useMemo(() => {
     const items = { ...staticItems };
@@ -1035,6 +1039,13 @@ export function AppSidebar() {
               refreshing={readingPreferences}
               error={translate("savia.sidebar.loadOrderError")}
               onRetry={() => void reloadPreferences()}
+            />
+          ) : null}
+          {metadataReadFailed ? (
+            <ReadRefreshStatus
+              refreshing={metadataRetrying}
+              error={translate("savia.sidebar.loadScreensError")}
+              onRetry={retryMetadata}
             />
           ) : null}
           {saveError ? (

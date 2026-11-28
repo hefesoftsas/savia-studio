@@ -288,6 +288,45 @@ describe("AppSidebar navigation preferences", () => {
     ).toBeVisible();
   });
 
+  it("retries an initial Studio collections read and restores workspace links", async () => {
+    const services = createServices();
+    let reads = 0;
+    vi.mocked(services.apiClient.get).mockImplementation(
+      async (path: string) => {
+        if (path === "/v1/tenant-workspaces")
+          return {
+            data: [
+              {
+                id: "tenant:0",
+                tenantId: 0,
+                label: "Plataforma",
+                kind: "platform",
+                apiBasePath: "/v1/studio/0",
+              },
+            ],
+          } as never;
+        if (path === "/v1/studio/0/api/objects") {
+          reads += 1;
+          if (reads === 1)
+            throw new ApiClientError(503, "UNAVAILABLE", "Temporarily offline");
+          return {
+            data: [{ name: "retry-collection", label: "Retry collection" }],
+          } as never;
+        }
+        return { data: [] } as never;
+      },
+    );
+    render(<App services={services} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reintentar" }));
+
+    expect(
+      await screen.findByRole("link", { name: "Retry collection" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Reintentar" })).toBeNull();
+    expect(reads).toBe(2);
+  });
+
   it("restores the last confirmed menu when saving fails", async () => {
     const user = userEvent.setup();
     const services = createServices();

@@ -23,6 +23,9 @@ Three independent controls determine discoverability:
 
 Menu search includes authorized, personally hidden destinations. These results are labeled as hidden from the personal menu and can be opened without changing preferences. The explicit Show action restores the destination using the preferences API; failed saves restore the last confirmed state. Search also indexes domain tool aliases such as automations, collections and audit. Domain-hidden screens are still managed from Screens rather than added to personal search results.
 
+When the workspace screens fail to load, the sidebar keeps the links it already
+has for that workspace. Select **Retry** to reload the screen links.
+
 ## Existing preferences
 
 If the saved menu cannot be loaded, the default menu remains available for
