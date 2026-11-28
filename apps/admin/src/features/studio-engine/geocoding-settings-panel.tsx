@@ -1,7 +1,8 @@
 import { useMessages, useAppLocale, intlLocale } from "@/i18n/core";
 import { studioMessages } from "@/i18n/locales/studio";
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSessionGeneration } from "@/auth/session-scope";
 import { CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -10,7 +11,8 @@ import {
   CredentialDescriptionTooltip,
   formatConfiguredDate,
 } from "@/features/service-credentials/credential-registry";
-import { api } from "./api";
+import { createStudioRequest } from "./api";
+import { getStudioRuntime, type StudioRuntime } from "./runtime";
 
 type GeocodingSettings = {
   geoapifyConfigured: boolean;
@@ -18,16 +20,56 @@ type GeocodingSettings = {
   updatedAt?: string | null;
 };
 
-export function GeocodingSettingsPanel() {
+export function geocodingSettingsQuery(
+  runtime: StudioRuntime,
+  sessionGeneration: number,
+) {
+  const request = createStudioRequest({ ...runtime, sessionGeneration });
+  return queryOptions({
+    queryKey: [
+      "geocoding-settings",
+      sessionGeneration,
+      runtime.apiBasePath ?? runtime.tenantId ?? null,
+    ] as const,
+    queryFn: ({ signal }) =>
+      request<GeocodingSettings>("/settings/geocoding", "GET", undefined, {
+        signal,
+      }),
+  });
+}
+
+export function GeocodingSettingsPanel({
+  runtime = getStudioRuntime(),
+}: { runtime?: StudioRuntime } = {}) {
+  const sessionGeneration = useSessionGeneration();
+  const generation = runtime.sessionGeneration ?? sessionGeneration;
+  if (generation !== sessionGeneration) return null;
+  const query = geocodingSettingsQuery(runtime, generation);
+  return (
+    <GeocodingKeyEditor
+      key={JSON.stringify(query.queryKey)}
+      query={query}
+      request={createStudioRequest({
+        ...runtime,
+        sessionGeneration: generation,
+      })}
+    />
+  );
+}
+
+function GeocodingKeyEditor({
+  query,
+  request,
+}: {
+  query: ReturnType<typeof geocodingSettingsQuery>;
+  request: ReturnType<typeof createStudioRequest>;
+}) {
   const t = useMessages(studioMessages);
   const locale = useAppLocale();
   const queryClient = useQueryClient();
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
-  const settings = useQuery({
-    queryKey: ["geocoding-settings"],
-    queryFn: () => api<GeocodingSettings>("/settings/geocoding"),
-  });
+  const settings = useQuery(query);
 
   async function saveKey() {
     if (!apiKey.trim()) {
@@ -36,11 +78,14 @@ export function GeocodingSettingsPanel() {
     }
     setBusy(true);
     try {
-      await api("/settings/geocoding", "PUT", {
+      await request("/settings/geocoding", "PUT", {
         geoapifyApiKey: apiKey.trim(),
       });
       setApiKey("");
-      await queryClient.invalidateQueries({ queryKey: ["geocoding-settings"] });
+      await queryClient.invalidateQueries({
+        queryKey: query.queryKey,
+        exact: true,
+      });
       toast.success(t("API key de Geoapify guardada"));
     } catch (error) {
       toast.error((error as Error).message);
@@ -52,9 +97,14 @@ export function GeocodingSettingsPanel() {
   async function clearKey() {
     setBusy(true);
     try {
-      await api("/settings/geocoding", "PUT", { clearGeoapifyApiKey: true });
+      await request("/settings/geocoding", "PUT", {
+        clearGeoapifyApiKey: true,
+      });
       setApiKey("");
-      await queryClient.invalidateQueries({ queryKey: ["geocoding-settings"] });
+      await queryClient.invalidateQueries({
+        queryKey: query.queryKey,
+        exact: true,
+      });
       toast.success(t("API key de Geoapify eliminada"));
     } catch (error) {
       toast.error((error as Error).message);

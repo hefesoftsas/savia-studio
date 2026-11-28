@@ -1,4 +1,6 @@
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement, ReactNode } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "@/features/studio-engine/test/locale-test-render";
@@ -17,19 +19,6 @@ const testState = vi.hoisted(() => ({
   }>,
 }));
 
-vi.mock("@tanstack/react-query", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@tanstack/react-query")>()),
-  useQuery: ({ queryKey }: { queryKey: string[] }) =>
-    queryKey[0] === "integrations"
-      ? { data: { data: [] }, isLoading: false, error: null }
-      : {
-          data: { geoapifyConfigured: false, geoapifyStored: false },
-          isLoading: false,
-          error: null,
-        },
-  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
-}));
-
 vi.mock("react-router-dom", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react-router-dom")>()),
   useNavigate: () => vi.fn(),
@@ -43,18 +32,6 @@ vi.mock("@/features/studio/studio-tenants", async (importOriginal) => ({
     testState.tenantReads();
     return testState.workspaces;
   },
-}));
-
-vi.mock("@/api/embedded-transport", () => ({
-  createEmbeddedTransport: () => ({}),
-}));
-
-vi.mock("@/features/studio-engine/runtime", () => ({
-  setStudioRuntime: vi.fn(),
-}));
-
-vi.mock("@/features/studio-engine/geocoding-settings-panel", () => ({
-  GeocodingSettingsPanel: () => null,
 }));
 
 vi.mock("@/features/tenant-sso/tenant-sso-settings-panel", () => ({
@@ -86,7 +63,24 @@ vi.mock(
 
 afterEach(cleanup);
 
-const services = { apiClient: { get: vi.fn() } } as unknown as AppServices;
+const services = {
+  apiClient: {
+    get: vi.fn(),
+    requestResponseWithBody: async (
+      path: string,
+      _init: RequestInit,
+      read: (response: Response) => Promise<Response>,
+    ) => ({
+      body: await read(
+        Response.json(
+          path.endsWith("/integrations")
+            ? { data: [] }
+            : { geoapifyConfigured: false, geoapifyStored: false },
+        ),
+      ),
+    }),
+  },
+} as unknown as AppServices;
 
 function workspace(tenantId: number): TenantWorkspace {
   return {
@@ -98,8 +92,17 @@ function workspace(tenantId: number): TenantWorkspace {
   };
 }
 
+function renderWithQueries(ui: ReactElement) {
+  const client = new QueryClient();
+  return render(ui, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+}
+
 function renderCredentials(path = "/service-credentials") {
-  return render(
+  return renderWithQueries(
     <MemoryRouter initialEntries={[path]}>
       <StudioTenantCredentialsSection services={services} />
       <Link to="/service-credentials?tenantId=102&tab=social">
@@ -245,7 +248,7 @@ it("opens office administration for the selected tenant", async () => {
 it("does not refetch workspaces when only the services wrapper changes", async () => {
   testState.tenantReads.mockClear();
   testState.workspaces = [workspace(101)];
-  const view = render(
+  const view = renderWithQueries(
     <MemoryRouter>
       <StudioTenantCredentialsSection services={services} />
     </MemoryRouter>,
