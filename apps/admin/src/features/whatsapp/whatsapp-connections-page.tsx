@@ -132,6 +132,7 @@ export function WhatsappConnectionsPage({
   const [readFailure, setReadFailure] = useState<{
     tenantId: number | null;
     message: string;
+    blocksContent: boolean;
   }>();
   const [loadedTenantId, setLoadedTenantId] = useState<number | null>();
   const [phoneNumberId, setPhoneNumberId] = useState("");
@@ -209,19 +210,20 @@ export function WhatsappConnectionsPage({
         requestTenantId !== latestTenant.current.id
       )
         return;
-      const accessDenied = isReadAccessDenied(exception);
-      if (!keepVisible || accessDenied) {
+      const blocksContent = !keepVisible || isReadAccessDenied(exception);
+      if (blocksContent) {
         setProvider(null);
         setConnection(null);
         setLoadedTenantId(undefined);
       }
       if (
-        accessDenied ||
+        blocksContent ||
         requestFeedbackVersion === actionFeedbackVersion.current
       )
         setReadFailure({
           tenantId: requestTenantId,
           message: feedbackFrom(exception),
+          blocksContent,
         });
     } finally {
       if (
@@ -290,7 +292,7 @@ export function WhatsappConnectionsPage({
   function showActionFeedback(message: string | null) {
     if (currentTenant.id !== latestTenant.current.id) return;
     actionFeedbackVersion.current += 1;
-    setReadFailure(undefined);
+    setReadFailure((failure) => (failure?.blocksContent ? failure : undefined));
     setFeedback(message);
   }
 

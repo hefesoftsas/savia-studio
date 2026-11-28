@@ -196,6 +196,49 @@ describe("WhatsappConnectionsPage", () => {
     expect(screen.getByText(/Access denied/)).toBeVisible();
   });
 
+  it("keeps retry available when an earlier action finishes after a denied read", async () => {
+    tenantState.id = 101;
+    const user = userEvent.setup();
+    const services = createServices();
+    const connection = await services.whatsapp.complete("connection-1", {
+      agencyId: 101,
+    });
+    vi.mocked(services.whatsapp.listConnections).mockResolvedValue([
+      { ...connection, phoneNumberId: "12345" },
+    ]);
+    let resolveSend!: (result: { messageId: string }) => void;
+    vi.mocked(services.whatsapp.testSend).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <WhatsappConnectionsPage services={services} />
+      </MemoryRouter>,
+    );
+    await user.type(
+      await screen.findByRole("textbox", { name: "Destino" }),
+      "+573001234567",
+    );
+    await user.type(screen.getByRole("textbox", { name: "Texto" }), "Test");
+    await user.click(screen.getByRole("button", { name: "Enviar prueba" }));
+    vi.mocked(services.whatsapp.listConnections).mockRejectedValueOnce(
+      new ApiClientError(403, "denied", "Access denied"),
+    );
+    await act(async () => {
+      await realtime.refresh?.();
+    });
+    expect(screen.getByRole("button", { name: "Reintentar" })).toBeVisible();
+    await act(async () => resolveSend({ messageId: "wamid.test" }));
+
+    expect(screen.getByText(/Access denied/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Reintentar" }));
+    expect(
+      await screen.findByRole("button", { name: "Desconectar" }),
+    ).toBeVisible();
+  });
+
   it("does not let a late background failure hide a newer send result", async () => {
     tenantState.id = 101;
     const user = userEvent.setup();
@@ -242,7 +285,7 @@ describe("WhatsappConnectionsPage", () => {
     expect(
       screen.getByText("Mensaje de prueba aceptado (wamid.test)."),
     ).toBeVisible();
-    expect(screen.queryByText("Late background failure")).toBeNull();
+    expect(screen.queryByText(/Late background failure/)).toBeNull();
   });
 
   it.each([

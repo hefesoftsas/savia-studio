@@ -103,8 +103,9 @@ separate; sharing a test phone does not mean sharing a Nango connection id.
    metadata. Select **Reintentar** when the provider or connection list fails
    to load. A transient background failure keeps the last loaded settings and
    draft, and a successful retry clears the error. Starting a user action
-   clears stale refresh errors so its result remains visible. A denied read
-   hides connection details. Switching tenants hides the previous tenant's
+   clears stale nonblocking refresh errors so its result remains visible.
+   A denied read hides connection details and keeps **Reintentar** available
+   when a previous action finishes. Switching tenants hides the previous tenant's
    settings until the new scope loads. An empty provider list shows that
    WhatsApp is unavailable in the current environment.
 2. **Conectar** creates a short-lived Nango Connect session for that tenant.
