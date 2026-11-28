@@ -76,10 +76,14 @@ export function PluginRegistry({
   onImported,
   workspaceVersions = noWorkspaceVersions,
   getLatestWorkspaceVersions,
+  mutationPending = false,
+  runMutation = (operation) => operation(),
 }: {
   onImported: () => void | Promise<unknown>;
   workspaceVersions?: readonly WorkspaceVersion[];
   getLatestWorkspaceVersions?: () => readonly WorkspaceVersion[];
+  mutationPending?: boolean;
+  runMutation?: (operation: () => Promise<void>) => Promise<void>;
 }) {
   const t = useMessages(messages);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -88,6 +92,7 @@ export function PluginRegistry({
   const [error, setError] = useState("");
   const [refreshFailed, setRefreshFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const operationPending = mutationPending || busy !== null;
   const [confirmed, setConfirmed] = useState<{
     inventory: readonly WorkspaceVersion[];
     added: ReadonlySet<string>;
@@ -265,7 +270,7 @@ export function PluginRegistry({
           <Button
             size="sm"
             variant="outline"
-            disabled={busy !== null}
+            disabled={operationPending}
             onClick={() => void refreshWorkspace()}
           >
             {t("refreshWorkspace")}
@@ -323,9 +328,9 @@ export function PluginRegistry({
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={busy !== null || installed}
+                        disabled={operationPending || installed}
                         aria-label={`${t("install")} ${release.label} ${release.version}`}
-                        onClick={() => void install(release)}
+                        onClick={() => void runMutation(() => install(release))}
                       >
                         {t("install")}
                       </Button>
@@ -334,9 +339,9 @@ export function PluginRegistry({
                     <Button
                       size="sm"
                       variant="outline"
-                      disabled={busy !== null}
+                      disabled={operationPending}
                       aria-label={`${t("add")} ${release.label} ${release.version}`}
-                      onClick={() => void add(release)}
+                      onClick={() => void runMutation(() => add(release))}
                     >
                       <Download aria-hidden="true" className="size-4" />
                       {busy === key ? t("adding") : t("add")}

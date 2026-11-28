@@ -187,6 +187,110 @@ it("lista, instala y muestra un plugin del store", async () => {
   await waitFor(() => expect(changed).toHaveBeenCalled());
 });
 
+it("serializes plugin and connection changes through reconciliation", async () => {
+  const second = {
+    ...item,
+    manifest: { ...item.manifest, id: "custom.second", label: "Second" },
+  };
+  const sharedRelease = {
+    id: "custom.shared",
+    version: "1.0.0",
+    label: "Shared",
+    sha256: "a".repeat(64),
+    sizeBytes: 1024,
+    createdAt: "2026-01-01",
+  };
+  const installation = Promise.withResolvers<void>();
+  const inventoryRefresh = Promise.withResolvers<void>();
+  const imported = Promise.withResolvers<void>();
+  const savedConnection = Promise.withResolvers<void>();
+  let installed: { enabled: boolean; version: string } | null = null;
+  let sharedAdded = false;
+  const demo = {
+    ...item,
+    declarations: {
+      connectors: [{ id: "demo-api", label: "Demo API", fields: [] }],
+    },
+  };
+  vi.mocked(api).mockImplementation(async (path, method) => {
+    if (path === "/plugin-store") {
+      const data = [{ ...demo, installed }, second];
+      if (sharedAdded)
+        data.push({
+          ...item,
+          manifest: {
+            ...item.manifest,
+            id: sharedRelease.id,
+            label: sharedRelease.label,
+          },
+          sha256: sharedRelease.sha256,
+        });
+      return { data };
+    }
+    if (path === "/plugin-store/registry")
+      return { configured: true, data: [sharedRelease], cursor: null };
+    if (path === "/extensions/custom.demo/install" && method === "POST") {
+      await installation.promise;
+      installed = { enabled: true, version: item.version };
+      return { data: { id: item.manifest.id, ...installed } };
+    }
+    if (path === "/plugin-store/registry/import" && method === "POST") {
+      await imported.promise;
+      sharedAdded = true;
+      return { data: { id: sharedRelease.id } };
+    }
+    if (path === "/extensions/custom.demo/connections") return { data: [] };
+    if (
+      path === "/extensions/custom.demo/connections/demo-api" &&
+      method === "PUT"
+    )
+      return savedConnection.promise;
+    throw new Error(`Unexpected API request: ${method} ${path}`);
+  });
+  const changed = vi.fn().mockReturnValueOnce(inventoryRefresh.promise);
+  renderStore({ onChanged: changed });
+  const installFirst = await screen.findByRole("button", {
+    name: "Instalar Demo",
+  });
+  const installSecond = screen.getByRole("button", { name: "Instalar Second" });
+  const addShared = await screen.findByRole("button", {
+    name: "Añadir al espacio Shared 1.0.0",
+  });
+  const upload = screen.getByRole("button", { name: "Subir plugin" });
+
+  fireEvent.click(installFirst);
+  expect(installFirst).toBeDisabled();
+  expect(installSecond).toBeDisabled();
+  expect(addShared).toBeDisabled();
+  expect(upload).toBeDisabled();
+
+  await act(async () => installation.resolve());
+  expect(changed).toHaveBeenCalledOnce();
+  expect(installSecond).toBeDisabled();
+  await act(async () => inventoryRefresh.resolve());
+  expect(installSecond).toBeEnabled();
+
+  const saveConnection = screen.getByRole("button", {
+    name: "Configurar conexión de Demo API",
+  });
+  fireEvent.click(addShared);
+  expect(installSecond).toBeDisabled();
+  expect(upload).toBeDisabled();
+  expect(saveConnection).toBeDisabled();
+  await act(async () => imported.resolve());
+  expect(installSecond).toBeEnabled();
+  expect(upload).toBeEnabled();
+  expect(saveConnection).toBeEnabled();
+
+  fireEvent.click(saveConnection);
+  expect(installSecond).toBeDisabled();
+  await act(async () =>
+    savedConnection.reject(new Error("Connection save failed")),
+  );
+  expect(screen.getByText("Connection save failed")).toBeVisible();
+  expect(installSecond).toBeEnabled();
+});
+
 it("sube un zip y desactiva un plugin activo", async () => {
   const installed = { enabled: true, version: "1.0.0" };
   vi.mocked(api).mockImplementation(async (path, method, body) => {

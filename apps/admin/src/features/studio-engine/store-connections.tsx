@@ -42,9 +42,13 @@ function fieldValue(
 export function StoreConnections({
   extensionId,
   connectors,
+  mutationPending = false,
+  runMutation = (operation) => operation(),
 }: {
   extensionId: string;
   connectors: StoreConnectorDeclaration[];
+  mutationPending?: boolean;
+  runMutation?: (operation: () => Promise<void>) => Promise<void>;
 }) {
   const t = useMessages(automationMessages);
   const [summaries, setSummaries] = useState<ConnectionSummary[]>([]);
@@ -56,6 +60,7 @@ export function StoreConnections({
   );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const operationPending = mutationPending || busy !== null;
 
   async function reload() {
     const response = await api<{ data: ConnectionSummary[] }>(
@@ -137,8 +142,8 @@ export function StoreConnections({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={busy !== null}
-                onClick={() => void remove(connector.id)}
+                disabled={operationPending}
+                onClick={() => void runMutation(() => remove(connector.id))}
                 aria-label={t("Eliminar %{value0}", {
                   value0: connector.label,
                 })}
@@ -195,8 +200,10 @@ export function StoreConnections({
           </div>
           <Button
             size="sm"
-            disabled={busy !== null}
-            onClick={() => void save(connector.id, connector.fields)}
+            disabled={operationPending}
+            onClick={() =>
+              void runMutation(() => save(connector.id, connector.fields))
+            }
             aria-label={t("Configurar conexión de %{value0}", {
               value0: connector.label,
             })}
