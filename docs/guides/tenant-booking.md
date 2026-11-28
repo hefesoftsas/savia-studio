@@ -90,6 +90,9 @@ Publish when booking is enabled and an enabled service has an enabled profession
 
 ### Personal and team public links
 
+The service options in **Booking links** come from saved settings. Draft
+changes stay in the setup wizard and appear in the link selector after saving.
+
 If your session expires while loading or managing links, **Sign in again**
 returns to the **Booking links** tab in the same workspace. The tab reloads
 the current list, so you can review it before trying the action again.
