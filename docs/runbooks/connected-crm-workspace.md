@@ -193,6 +193,8 @@ from [HubSpot CRM Search](https://developers.hubspot.com/docs/api-reference/lega
 It uses that total when it exceeds the number of records already scanned.
 Grouped summaries require a complete scan of up to 1,000 matching records and
 return an error if provider pagination ends before the reported total is reached.
+If an empty page reports zero and includes a continuation cursor, lists,
+summaries, and CSV exports continue without carrying that zero into later pages.
 
 HubSpot relation pages follow the provider's association cursor and keep
 the first occurrence of each related record. Totals count unique records.

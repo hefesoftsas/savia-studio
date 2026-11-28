@@ -1111,7 +1111,7 @@ describe("HubSpot record pagination", () => {
     expect(proxy).toHaveBeenCalledOnce();
   });
 
-  it("continues the summary when a zero total has a next cursor", async () => {
+  it("counts the remaining records when a zero total has a next cursor and the last page omits the total", async () => {
     const proxy = vi
       .fn()
       .mockResolvedValueOnce(
@@ -1122,7 +1122,7 @@ describe("HubSpot record pagination", () => {
         }),
       )
       .mockResolvedValueOnce(
-        Response.json({ results: [{ id: "1" }, { id: "2" }], total: 2 }),
+        Response.json({ results: [{ id: "1" }, { id: "2" }] }),
       );
     const response = await createHubspotWorkspaceApp({
       ...pageContext,
@@ -1201,18 +1201,23 @@ describe("HubSpot record pagination", () => {
     },
   );
 
-  it("omits a zero total for a list with a next cursor", async () => {
-    const proxy = vi.fn(async () =>
-      Response.json({
-        results: [],
-        total: 0,
-        paging: { next: { after: "next" } },
-      }),
-    );
-    const response = await createHubspotWorkspaceApp({
+  it("omits a zero total for a list with a next cursor and counts the last page without it", async () => {
+    const proxy = vi.fn(async ({ path }: { path: string }) => {
+      const after = new URL(path, "https://hubspot.test").searchParams.get(
+        "after",
+      );
+      return Response.json(
+        after === "next"
+          ? { results: [{ id: "1" }, { id: "2" }] }
+          : { results: [], total: 0, paging: { next: { after: "next" } } },
+      );
+    });
+    const app = createHubspotWorkspaceApp({
       ...pageContext,
       crm: { nango: { proxy } },
-    }).request("/api/records/hubspot_contacts");
+    });
+    const path = "/api/records/hubspot_contacts";
+    const response = await app.request(path);
 
     expect(response.status).toBe(200);
     const result = await response.json();
@@ -1221,6 +1226,47 @@ describe("HubSpot record pagination", () => {
       pageInfo: { hasNextPage: true, hasPreviousPage: false },
     });
     expect(result).not.toHaveProperty("total");
+    expect(result.nextCursor).toEqual(expect.any(String));
+
+    const lastPage = await app.request(
+      `${path}?page=2&cursor=${encodeURIComponent(result.nextCursor)}`,
+    );
+    expect(lastPage.status).toBe(200);
+    expect(await lastPage.json()).toMatchObject({
+      data: [{ id: "1" }, { id: "2" }],
+      total: 2,
+      pageInfo: { hasNextPage: false, hasPreviousPage: true },
+    });
+    expect(proxy).toHaveBeenCalledTimes(2);
+  });
+
+  it("exports records after an empty HubSpot page with a zero total and a next cursor", async () => {
+    const proxy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          results: [],
+          total: 0,
+          paging: { next: { after: "next" } },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          results: [{ id: "1", properties: { firstname: "Ana" } }],
+        }),
+      );
+    const query = new URLSearchParams({
+      columns: JSON.stringify(["firstname"]),
+      headers: JSON.stringify(["Name"]),
+    });
+    const response = await createHubspotWorkspaceApp({
+      ...pageContext,
+      crm: { nango: { proxy } },
+    }).request(`/api/export/hubspot_contacts?${query}`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('"Ana"\r\n');
+    expect(proxy).toHaveBeenCalledTimes(2);
   });
 
   it.each([

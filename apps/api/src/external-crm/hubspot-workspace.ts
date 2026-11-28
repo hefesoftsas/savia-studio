@@ -183,9 +183,15 @@ function readRecordPage(
   return { records: result.results, after, total };
 }
 
-function verifyScannedTotal(total: number | undefined, scanned: number) {
+function verifyPageTotal(
+  total: number | undefined,
+  scanned: number,
+  after: HubspotCursor | undefined,
+) {
   if (total !== undefined && total < scanned)
     fail("El total de HubSpot es menor que los registros leídos.", 502);
+  // An empty page with a continuation does not establish a zero total.
+  return total === 0 && after !== undefined ? undefined : total;
 }
 
 function verifySummarizedTotal(total: number | undefined, scanned: number) {
@@ -931,9 +937,12 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
         after: next,
         total: providerTotal,
       } = readRecordPage(result, cursors, recordIds);
-      reportedTotal = providerTotal ?? reportedTotal;
       total += records.length;
-      verifyScannedTotal(reportedTotal, total);
+      reportedTotal = verifyPageTotal(
+        providerTotal ?? reportedTotal,
+        total,
+        next,
+      );
       if (!query && next === undefined)
         verifySummarizedTotal(reportedTotal, total);
       if (
@@ -1315,10 +1324,13 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
         });
         signal.throwIfAborted();
         const next = readRecordPage(result, cursors, recordIds);
-        reportedTotal = next.total ?? reportedTotal;
         rows.push(...next.records.map(project));
-        verifyScannedTotal(reportedTotal, rows.length);
         after = next.after;
+        reportedTotal = verifyPageTotal(
+          next.total ?? reportedTotal,
+          rows.length,
+          after,
+        );
         if (
           rows.length > pageSize * maxPages ||
           (reportedTotal !== undefined &&
@@ -1401,9 +1413,12 @@ export function createHubspotWorkspaceApp(context: CollectionGatewayContext) {
         }
         const nextPage = readRecordPage(result, cursors, recordIds);
         records = nextPage.records;
-        providerTotal = nextPage.total ?? providerTotal;
-        verifyScannedTotal(providerTotal, recordIds.size);
         after = nextPage.after;
+        providerTotal = verifyPageTotal(
+          nextPage.total ?? providerTotal,
+          recordIds.size,
+          after,
+        );
         if (current < page && after === undefined) {
           records = [];
           break;
