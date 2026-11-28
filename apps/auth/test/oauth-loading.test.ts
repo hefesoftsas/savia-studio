@@ -196,6 +196,33 @@ describe("shared authentication loading", () => {
     expect(h.requests).toEqual(["/api/auth/oauth2/continue"]);
   });
 
+  it("returns to sign-in for the same application when consent loses its session", async () => {
+    const query = new URLSearchParams([
+      ["sig", "active-request"],
+      ["ba_param", "client_id"],
+      ["ba_param", "redirect_uri"],
+      ["ba_param", "state"],
+      ["client_id", "savia-integration"],
+      ["redirect_uri", "https://client.example.test/oauth/callback"],
+      ["state", "original-request"],
+    ]).toString();
+    const h = await loadingHarness(
+      "consent",
+      undefined,
+      "?" + query + "&mode=forgot",
+      true,
+      "https://example.test/#/login",
+    );
+    const submission = h.submit({ preventDefault() {} });
+    h.resolve(Response.json({ code: "UNAUTHORIZED" }, { status: 401 }));
+    await submission;
+
+    expect(h.requests).toEqual(["/api/auth/oauth2/consent"]);
+    expect(h.requestBodies).toEqual([{ accept: true, oauth_query: query }]);
+    expect(h.redirects).toEqual(["/api/auth/login?" + query]);
+    expect(h.loading.hidden).toBe(false);
+  });
+
   it("focuses the authenticator field after returning from SSO", async () => {
     const h = await loadingHarness("sign-in", undefined, "?mode=sso-mfa");
     expect(h.secondFactor.hidden).toBe(false);

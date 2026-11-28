@@ -160,31 +160,34 @@ describe("MCP token exchange", () => {
   });
 });
 
-it("completes authorization-code PKCE, consent and refresh for a dynamically registered MCP client", async () => {
+it("completes PKCE, consent after reauthentication, and refresh for a dynamically registered MCP client", async () => {
   const auth = createBetterAuth(env);
   const email = `mcp-flow-${crypto.randomUUID()}@example.test`;
+  const password = "TestPassword321!";
   await auth.api.createUser({
     body: {
       email,
       name: "MCP Flow User",
-      password: "TestPassword321!",
+      password,
       role: "user",
       data: { emailVerified: true },
     },
   });
-  const signIn = await worker.fetch(
-    new Request(`${runtime.apiResource}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: runtime.apiResource,
-      },
-      body: JSON.stringify({ email, password: "TestPassword321!" }),
-    }),
-    env,
-  );
-  expect(signIn.status).toBe(200);
-  const cookie = signIn.headers.get("set-cookie")!;
+  const signIn = (oauthQuery?: string) =>
+    worker.fetch(
+      new Request(`${runtime.apiResource}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: runtime.apiResource,
+        },
+        body: JSON.stringify({ email, password, oauth_query: oauthQuery }),
+      }),
+      env,
+    );
+  const initialSession = await signIn();
+  expect(initialSession.status).toBe(200);
+  const cookie = initialSession.headers.get("set-cookie")!;
   const registration = await worker.fetch(
     new Request(`${runtime.issuer}/oauth2/register`, {
       method: "POST",
@@ -233,21 +236,35 @@ it("completes authorization-code PKCE, consent and refresh for a dynamically reg
     runtime.apiResource,
   );
   expect(consentUrl.pathname).toBe("/api/auth/consent");
-  const consent = await worker.fetch(
-    new Request(`${runtime.issuer}/oauth2/consent`, {
-      method: "POST",
-      headers: {
-        cookie,
-        "content-type": "application/json",
-        origin: runtime.apiResource,
-      },
-      body: JSON.stringify({
-        accept: true,
-        oauth_query: consentUrl.search.slice(1),
+  const submitConsent = (authorization: URL, session?: string) =>
+    worker.fetch(
+      new Request(`${runtime.issuer}/oauth2/consent`, {
+        method: "POST",
+        headers: {
+          ...(session ? { cookie: session } : {}),
+          "content-type": "application/json",
+          origin: runtime.apiResource,
+        },
+        body: JSON.stringify({
+          accept: true,
+          oauth_query: authorization.search.slice(1),
+        }),
       }),
-    }),
-    env,
-  );
+      env,
+    );
+  expect((await submitConsent(consentUrl)).status).toBe(401);
+  const recovered = await signIn(consentUrl.search.slice(1));
+  expect(recovered.status).toBe(200);
+  const recoveredCookie = recovered.headers.get("set-cookie")!;
+  expect(recoveredCookie).toBeTruthy();
+  expect(recoveredCookie).not.toBe(cookie);
+  const { url } = (await recovered.json()) as { url: string };
+  expect(url).toBeTruthy();
+  const recoveredConsent = new URL(url, runtime.apiResource);
+  expect(recoveredConsent.pathname).toBe("/api/auth/consent");
+  expect(recoveredConsent.searchParams.get("client_id")).toBe(client_id);
+  expect(recoveredConsent.searchParams.get("state")).toBe("test-state");
+  const consent = await submitConsent(recoveredConsent, recoveredCookie);
   expect(consent.status).toBe(200);
   const approved = (await consent.json()) as { url: string };
   const callback = new URL(approved.url);

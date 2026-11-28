@@ -39,6 +39,8 @@ for real account work; preview is intended for controlled verification.
    registration (DCR); do not paste Savia's internal shared secret into a
    client.
 3. Sign in to Savia, complete MFA when required, and review the consent screen.
+   If your Savia session ends while the consent request is still valid,
+   Savia asks you to sign in again for the same client request.
    `savia.api.read` permits discovery and reading; `savia.api.write` also permits
    authorized mutations and pending-action confirmations. Request `offline_access`
    for refresh tokens. Availability of custom connectors and administrator approval
