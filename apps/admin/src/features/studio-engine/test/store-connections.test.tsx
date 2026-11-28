@@ -2,7 +2,13 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { render } from "./locale-test-render";
 import { StoreConnections } from "../store-connections";
 import { api } from "../api";
@@ -110,4 +116,80 @@ it("ofrece eliminar una conexión configurada", async () => {
       "DELETE",
     ),
   );
+});
+
+it.each(["empty response", "failure"] as const)(
+  "keeps a saved connection after an older read completes with %s",
+  async (outcome) => {
+    const initial = Promise.withResolvers<{ data: [] }>();
+    let saved = false;
+    vi.mocked(api).mockImplementation(async (path, method) => {
+      if (path === "/extensions/custom.echo/connections")
+        return saved
+          ? {
+              data: [
+                { connectionId: "demo", connectorId: "demo", configured: true },
+              ],
+            }
+          : initial.promise;
+      if (
+        path === "/extensions/custom.echo/connections/demo" &&
+        method === "PUT"
+      ) {
+        saved = true;
+        return undefined;
+      }
+      throw new Error(`Unexpected API request: ${path}`);
+    });
+    render(
+      <StoreConnections extensionId="custom.echo" connectors={connectors} />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/baseUrl/), {
+      target: { value: "api.example.test" },
+    });
+    fireEvent.change(screen.getByLabelText(/apiKey/), {
+      target: { value: "test-credential" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Configurar conexión de API demo" }),
+    );
+    await screen.findByRole("button", { name: "Eliminar API demo" });
+
+    await act(async () => {
+      if (outcome === "failure") initial.reject(new Error("Old read failed"));
+      else initial.resolve({ data: [] });
+    });
+    expect(
+      screen.getByRole("button", { name: "Eliminar API demo" }),
+    ).toBeVisible();
+    expect(screen.queryByText("Old read failed")).toBeNull();
+  },
+);
+
+it("shows existing connection data when an overlapping save fails", async () => {
+  const existing = {
+    data: [{ connectionId: "demo", connectorId: "demo", configured: true }],
+  };
+  const initial = Promise.withResolvers<typeof existing>();
+  vi.mocked(api).mockImplementation(async (path, method) => {
+    if (path === "/extensions/custom.echo/connections") return initial.promise;
+    if (path === "/extensions/custom.echo/connections/demo" && method === "PUT")
+      throw new Error("Save rejected");
+    throw new Error(`Unexpected API request: ${path}`);
+  });
+  render(
+    <StoreConnections extensionId="custom.echo" connectors={connectors} />,
+  );
+
+  fireEvent.click(
+    screen.getByRole("button", { name: "Configurar conexión de API demo" }),
+  );
+  await screen.findByText("Save rejected");
+  await act(async () => initial.resolve(existing));
+
+  expect(
+    screen.getByRole("button", { name: "Eliminar API demo" }),
+  ).toBeVisible();
+  expect(screen.getByText("Save rejected")).toBeVisible();
 });

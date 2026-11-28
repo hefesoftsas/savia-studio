@@ -1,6 +1,6 @@
 import { useMessages } from "@/i18n/core";
 import { automationMessages } from "@/i18n/locales/automation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "./api";
@@ -58,26 +58,39 @@ export function StoreConnections({
   const [checks, setChecks] = useState<Record<string, Record<string, boolean>>>(
     {},
   );
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [mutationError, setMutationError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const readGeneration = useRef(0);
+  const error = mutationError || readError;
   const operationPending = mutationPending || busy !== null;
 
   async function reload() {
-    const response = await api<{ data: ConnectionSummary[] }>(
-      `/extensions/${extensionId}/connections`,
-    );
-    setSummaries(response.data);
+    const generation = ++readGeneration.current;
+    try {
+      const response = await api<{ data: ConnectionSummary[] }>(
+        `/extensions/${extensionId}/connections`,
+      );
+      if (generation === readGeneration.current) {
+        setSummaries(response.data);
+        setReadError("");
+      }
+    } catch (reason) {
+      if (generation === readGeneration.current)
+        setReadError(reason instanceof Error ? reason.message : String(reason));
+    }
   }
 
   useEffect(() => {
-    reload().catch((reason) =>
-      setError(reason instanceof Error ? reason.message : String(reason)),
-    );
+    void reload();
+    return () => {
+      readGeneration.current += 1;
+    };
   }, [extensionId]);
 
   async function save(connectorId: string, fields: StoreConnectorField[]) {
     setBusy(connectorId);
-    setError("");
+    setMutationError("");
     try {
       const values: Record<string, unknown> = {};
       for (const field of fields) {
@@ -97,7 +110,9 @@ export function StoreConnections({
       );
       await reload();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setMutationError(
+        reason instanceof Error ? reason.message : String(reason),
+      );
     } finally {
       setBusy(null);
     }
@@ -105,7 +120,7 @@ export function StoreConnections({
 
   async function remove(connectionId: string) {
     setBusy(connectionId);
-    setError("");
+    setMutationError("");
     try {
       await api(
         `/extensions/${extensionId}/connections/${connectionId}`,
@@ -113,7 +128,9 @@ export function StoreConnections({
       );
       await reload();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setMutationError(
+        reason instanceof Error ? reason.message : String(reason),
+      );
     } finally {
       setBusy(null);
     }
