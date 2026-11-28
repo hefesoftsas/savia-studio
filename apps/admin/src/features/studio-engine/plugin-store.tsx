@@ -1,5 +1,8 @@
 import { PwaSplash } from "@/pwa/pwa-splash";
-import { PluginRegistry } from "./plugin-registry";
+import {
+  PluginInventoryRefreshNotice,
+  PluginRegistry,
+} from "./plugin-registry";
 import { resolveLocalizedContent } from "@savia/studio-shared/plugin-localization";
 import { compareSolutionVersions } from "@savia/studio-shared/solution-package";
 import { useAppLocale, useMessages } from "@/i18n/core";
@@ -184,13 +187,18 @@ export default function PluginStoreManager({
   const fileRef = useRef<HTMLInputElement>(null);
   const listGeneration = useRef(0);
   const mutationInFlight = useRef(false);
+  const needsInventoryRefreshRef = useRef(false);
 
   const [inventory, setInventory] = useState(emptyInventory);
   const latestWorkspaceVersions = useRef(emptyInventory.items);
   const { items, bundled, canDeleteFromRegistry } = inventory;
   const [loading, setLoading] = useState(true);
-  const [mutation, setMutation] = useState<"change" | "upload" | null>(null);
+  const [mutation, setMutation] = useState<
+    "change" | "upload" | "refresh" | null
+  >(null);
+  const [needsInventoryRefresh, setNeedsInventoryRefresh] = useState(false);
   const mutationPending = mutation !== null;
+  const writesBlocked = mutationPending || needsInventoryRefresh;
   const uploading = mutation === "upload";
   const [error, setError] = useState("");
   const [openPluginId, setOpenPluginId] = useState<string | null>(null);
@@ -243,7 +251,9 @@ export default function PluginStoreManager({
       if (generation === listGeneration.current) {
         updateInventory(response);
         setError("");
+        return true;
       }
+      return false;
     } catch (reason) {
       if (generation === listGeneration.current && isReadAccessDenied(reason)) {
         updateInventory(emptyInventory);
@@ -256,9 +266,14 @@ export default function PluginStoreManager({
   }
 
   async function reloadRemoteChanges() {
-    await reload();
-    setOpenPluginId(null);
-    setDeleteTarget(null);
+    if (needsInventoryRefreshRef.current) {
+      await runMutation(reconcileInventory, "refresh");
+      return;
+    }
+    if (await reload()) {
+      setOpenPluginId(null);
+      setDeleteTarget(null);
+    }
   }
 
   const remoteChanges = useRealtimeRefresh({
@@ -308,9 +323,13 @@ export default function PluginStoreManager({
 
   async function runMutation(
     operation: () => Promise<void>,
-    kind: "change" | "upload" = "change",
+    kind: "change" | "upload" | "refresh" = "change",
   ) {
-    if (mutationInFlight.current) return;
+    if (
+      mutationInFlight.current ||
+      (needsInventoryRefreshRef.current && kind !== "refresh")
+    )
+      return;
     mutationInFlight.current = true;
     setMutation(kind);
     try {
@@ -321,16 +340,30 @@ export default function PluginStoreManager({
     }
   }
 
+  async function reconcileInventory() {
+    let refreshed = false;
+    try {
+      if (await reload()) {
+        await onChanged();
+        refreshed = true;
+      }
+    } catch {
+      // The write was confirmed. Keep recovery on the read path.
+    }
+    needsInventoryRefreshRef.current = !refreshed;
+    setNeedsInventoryRefresh(!refreshed);
+  }
+
   function run(operation: () => Promise<unknown>, kind?: "upload") {
     return runMutation(async () => {
       setError("");
       try {
         await operation();
-        await reload();
-        await onChanged();
       } catch (reason) {
         setError(message(reason));
+        return;
       }
+      await reconcileInventory();
     }, kind);
   }
 
@@ -428,18 +461,27 @@ export default function PluginStoreManager({
 
   return (
     <section aria-label={t("Mis plugins")} className="space-y-5">
-      <RemoteChangesNotice {...remoteChanges} />
+      <RemoteChangesNotice
+        {...remoteChanges}
+        changed={remoteChanges.changed && !needsInventoryRefresh}
+        disabled={mutationPending}
+      />
       <PluginVscodeGuide tenantId={getStudioRuntime().tenantId} />
+      {needsInventoryRefresh ? (
+        <div className="savia-surface-card">
+          <PluginInventoryRefreshNotice
+            disabled={mutationPending}
+            onRetry={() => void runMutation(reconcileInventory, "refresh")}
+          />
+        </div>
+      ) : null}
       <PluginRegistry
         key={getStudioRuntime().tenantId}
         workspaceVersions={items}
         getLatestWorkspaceVersions={() => latestWorkspaceVersions.current}
-        mutationPending={mutationPending}
+        mutationPending={writesBlocked}
         runMutation={runMutation}
-        onImported={async () => {
-          await reload();
-          await onChanged();
-        }}
+        onImported={reconcileInventory}
       />
       <div className="savia-surface-card overflow-hidden">
         <header className="flex flex-wrap items-center gap-2 border-b px-6 py-5">
@@ -468,7 +510,7 @@ export default function PluginStoreManager({
               accept=".zip"
               className="hidden"
               aria-label={t("Subir plugin")}
-              disabled={mutationPending}
+              disabled={writesBlocked}
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) void upload(file);
@@ -476,7 +518,7 @@ export default function PluginStoreManager({
             />
             <Button
               size="sm"
-              disabled={mutationPending}
+              disabled={writesBlocked}
               onClick={() => fileRef.current?.click()}
             >
               <Upload aria-hidden="true" />
@@ -558,15 +600,17 @@ export default function PluginStoreManager({
             className="mx-6 mt-5 flex flex-wrap items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm"
           >
             <p className="min-w-0 flex-1 text-destructive">{error}</p>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={mutationPending}
-              onClick={() => void fetchInitial()}
-            >
-              {t("Reintentar")}
-            </Button>
+            {needsInventoryRefresh ? null : (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={mutationPending}
+                onClick={() => void fetchInitial()}
+              >
+                {t("Reintentar")}
+              </Button>
+            )}
           </div>
         ) : null}
 
@@ -574,7 +618,8 @@ export default function PluginStoreManager({
           <div className="h-64">
             <PwaSplash contained message={t("Cargando…")} />
           </div>
-        ) : grouped.length === 0 ? (
+        ) : grouped.length === 0 &&
+          needsInventoryRefresh ? null : grouped.length === 0 ? (
           <div className="flex flex-col items-center gap-2 px-6 py-10 text-center">
             <span className="flex size-11 items-center justify-center rounded-full bg-muted">
               <PackageOpen
@@ -594,7 +639,7 @@ export default function PluginStoreManager({
               type="button"
               size="sm"
               className="mt-2"
-              disabled={mutationPending}
+              disabled={writesBlocked}
               onClick={() => fileRef.current?.click()}
             >
               <Upload aria-hidden="true" />
@@ -744,7 +789,7 @@ export default function PluginStoreManager({
                         size="sm"
                         variant="ghost"
                         disabled={
-                          mutationPending ||
+                          writesBlocked ||
                           (active && item.installed?.version === item.version)
                         }
                         title={
@@ -791,7 +836,7 @@ export default function PluginStoreManager({
                                     size="sm"
                                     variant="ghost"
                                     disabled={
-                                      mutationPending ||
+                                      writesBlocked ||
                                       (active &&
                                         item.installed?.version ===
                                           version.version)
@@ -823,7 +868,7 @@ export default function PluginStoreManager({
                       {!item.installed ? (
                         <Button
                           size="sm"
-                          disabled={mutationPending}
+                          disabled={writesBlocked}
                           onClick={() =>
                             void run(() =>
                               api(
@@ -843,7 +888,7 @@ export default function PluginStoreManager({
                           {updateAvailable ? (
                             <Button
                               size="sm"
-                              disabled={mutationPending}
+                              disabled={writesBlocked}
                               onClick={() =>
                                 void run(() =>
                                   api(
@@ -860,7 +905,7 @@ export default function PluginStoreManager({
                           <Button
                             size="sm"
                             variant="outline"
-                            disabled={mutationPending}
+                            disabled={writesBlocked}
                             onClick={() =>
                               void run(() =>
                                 api(
@@ -899,7 +944,7 @@ export default function PluginStoreManager({
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={mutationPending}
+                          disabled={writesBlocked}
                           onClick={() => confirmDeletion(group)}
                           aria-label={t("Eliminar %{value0}", {
                             value0: label,
@@ -923,7 +968,7 @@ export default function PluginStoreManager({
                     <StoreConnections
                       extensionId={item.manifest.id}
                       connectors={item.declarations!.connectors}
-                      mutationPending={mutationPending}
+                      mutationPending={writesBlocked}
                       runMutation={runMutation}
                     />
                   ) : null}
@@ -1000,7 +1045,7 @@ export default function PluginStoreManager({
             <Button
               type="button"
               variant="destructive"
-              disabled={!deleteTarget || mutationPending}
+              disabled={!deleteTarget || writesBlocked}
               onClick={() => {
                 const target = deleteTarget;
                 if (!target) return;
