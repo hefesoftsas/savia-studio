@@ -1212,6 +1212,55 @@ it("retries the rate-limited HubSpot page in place with its original cursor", as
   ]);
 });
 
+it("describes an empty HubSpot page without treating the collection as empty", async () => {
+  const requests: Array<{ page: number; cursor: string | null }> = [];
+  setStudioRuntime({
+    embedded: true,
+    tenantId: 24,
+    transport: async (path) => {
+      const url = new URL(path, "https://savia.test");
+      if (url.pathname === "/api/objects")
+        return Response.json({ data: [hubspotContacts] });
+      if (url.pathname === "/api/records/hubspot_contacts/summary")
+        return Response.json({ data: [], total: 1 });
+      if (url.pathname !== "/api/records/hubspot_contacts")
+        return Response.json({ data: [] });
+      const page = Number(url.searchParams.get("page"));
+      requests.push({ page, cursor: url.searchParams.get("cursor") });
+      return page === 1
+        ? Response.json({
+            data: [],
+            nextCursor: "page-two",
+            pageInfo: { hasNextPage: true, hasPreviousPage: false },
+          })
+        : Response.json({
+            data: [{ id: "1", firstname: "Contacto en la segunda página" }],
+            total: 1,
+            pageInfo: { hasNextPage: false, hasPreviousPage: true },
+          });
+    },
+  });
+  render(<Root embedded search="object=hubspot_contacts&view=records" />);
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "No hay registros en esta página.",
+    }),
+  ).toBeVisible();
+  expect(
+    screen.getByText("Ve a la página siguiente para ver más registros."),
+  ).toBeVisible();
+  expect(
+    screen.queryByText("Prueba otros filtros o crea un registro."),
+  ).toBeNull();
+  fireEvent.click(screen.getByRole("link", { name: /siguiente|next/i }));
+  expect(await screen.findByText("Contacto en la segunda página")).toBeVisible();
+  expect(requests).toEqual([
+    { page: 1, cursor: null },
+    { page: 2, cursor: "page-two" },
+  ]);
+});
+
 it("starts a new HubSpot search at page one when browsing a later page", async () => {
   const listRequests: Array<{
     page: number;

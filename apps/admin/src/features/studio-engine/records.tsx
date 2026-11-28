@@ -1658,6 +1658,7 @@ function RecordTable({
     page,
     perPage,
     meta,
+    hasNextPage,
     setPerPage,
   } = useListContext<StudioRecord>();
   const { canScrollLeft, canScrollRight, hasOverflow, scrollByPage, shellRef } =
@@ -1883,8 +1884,16 @@ function RecordTable({
       ) : (
         <div className="empty-state">
           <Search size={28} />
-          <h2>{t("No hay registros para mostrar")}</h2>
-          <p>{t("Prueba otros filtros o crea un registro.")}</p>
+          <h2>
+            {hasNextPage || meta?.pageLimitReached === true
+              ? t("No hay registros en esta página.")
+              : t("No hay registros para mostrar")}
+          </h2>
+          {hasNextPage ? (
+            <p>{t("Ve a la página siguiente para ver más registros.")}</p>
+          ) : meta?.pageLimitReached !== true ? (
+            <p>{t("Prueba otros filtros o crea un registro.")}</p>
+          ) : null}
         </div>
       )}
       {!data.length && (

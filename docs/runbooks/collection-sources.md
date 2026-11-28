@@ -31,9 +31,11 @@ For JSON and JSON:API sources, Savia omits a total that falls below the
 returned rows or would place an explicit JSON:API next page out of range.
 When the source provides a next link, that link determines whether the user can
 advance.
-An empty page with a continuation keeps the current position and allows the
-user to advance. The footer shows zero results for that page, even when the
-collection total is known. The tracked `ra-core` patch uses the provider's
+An empty page with a continuation shows that only the current page has no
+records and directs the user to the next page. When the source reaches the
+page limit, the footer indicates that more records exist at the source. The
+footer shows zero results for the empty page, even when the collection total
+is known. The tracked `ra-core` patch uses the provider's
 continuation metadata to keep valid pages accessible. HubSpot row ranges use
 the number of records read on previous pages, including after short pages.
 
@@ -135,6 +137,9 @@ provider-reported total where available.
 Record lists, summaries, and CSV exports reject malformed pages and repeated
 cursors. A non-null `paging` value must be an object. Malformed pagination
 raises a provider error without supplying a total or producing a partial CSV.
+The direct contacts, companies, and deals CRM reads return a provider error
+when a successful HubSpot response lacks a valid results array or contains an
+invalid record. An empty results array remains a valid response.
 A HubSpot record list leaves the total unknown when it matches the
 number of scanned records and HubSpot still supplies a next cursor. The
 summary follows that cursor before returning a total. When an unfiltered
