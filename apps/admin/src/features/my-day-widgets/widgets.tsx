@@ -137,8 +137,8 @@ function WidgetSkeleton() {
 }
 
 type WidgetSchemaResult =
-  | { status: "pending" | "missing" | "failed" }
-  | { status: "ready"; schema: WidgetCollectionSchema };
+  | { status: "pending" | "missing" | "failed"; schemaRevision?: never }
+  | { status: "ready"; schema: WidgetCollectionSchema; schemaRevision: number };
 
 type WidgetReadScope = {
   apiClient: ApiClient | undefined;
@@ -216,14 +216,28 @@ function useWidgetSchema(
     if (!apiClient || getLogoutPending()) return;
     const controller = new AbortController();
     const { signal } = controller;
-    const finish = (result: WidgetSchemaResult) => {
-      if (!signal.aborted) setRequest({ scope, revision, result });
-    };
     void describeWidgetCollection(apiClient, apiBasePath, collection, {
       signal,
     }).then(
-      (schema) =>
-        finish(schema ? { status: "ready", schema } : { status: "missing" }),
+      (schema) => {
+        if (signal.aborted) return;
+        setRequest((previous) => {
+          if (!schema) return { scope, revision, result: { status: "missing" } };
+          const prior = previous?.scope === scope ? previous.result : undefined;
+          // A metadata reread still refreshes data. Only reuse a result from
+          // the same schema when no missing or denied read intervened.
+          const schemaRevision =
+            prior?.status === "ready" &&
+            JSON.stringify(prior.schema) === JSON.stringify(schema)
+              ? prior.schemaRevision
+              : revision;
+          return {
+            scope,
+            revision,
+            result: { status: "ready", schema, schemaRevision },
+          };
+        });
+      },
       (error: unknown) => {
         if (signal.aborted) return;
         setRequest((previous) => {
@@ -285,12 +299,12 @@ type WidgetReadFailure = {
 
 function useWidgetResult<T extends object>(
   scope: WidgetReadScope,
-  schema: WidgetCollectionSchema | null,
+  schemaRevision: number | undefined,
   selectionKey: string,
 ) {
   const [request, setRequest] = useState<{
     scope: WidgetReadScope;
-    schema: WidgetCollectionSchema | null;
+    schemaRevision: number | undefined;
     selectionKey: string;
     data?: T;
     failure?: WidgetReadFailure;
@@ -300,7 +314,7 @@ function useWidgetResult<T extends object>(
       setRequest((previous) => {
         const current =
           previous?.scope === scope &&
-          previous.schema === schema &&
+          previous.schemaRevision === schemaRevision &&
           previous.selectionKey === selectionKey
             ? previous
             : undefined;
@@ -309,11 +323,11 @@ function useWidgetResult<T extends object>(
             ? { ...current, failure: undefined }
             : current;
         if (!("error" in result))
-          return { scope, schema, selectionKey, data: result.data };
+          return { scope, schemaRevision, selectionKey, data: result.data };
         const { error, data } = result;
         return {
           scope,
-          schema,
+          schemaRevision,
           selectionKey,
           failure: {
             ...(error instanceof ApiClientError
@@ -326,11 +340,13 @@ function useWidgetResult<T extends object>(
         };
       });
     },
-    [scope, schema, selectionKey],
+    [scope, schemaRevision, selectionKey],
   );
   const current = request?.scope === scope ? request : undefined;
   const result =
-    current?.schema === schema && current.selectionKey === selectionKey
+    current &&
+    current.schemaRevision === schemaRevision &&
+    current.selectionKey === selectionKey
       ? current
       : undefined;
   // A new selection invalidates the data but still reads the same source.
@@ -411,7 +427,7 @@ export function SummaryWidgetBody({
   const [result, failed, setResult, failure] =
     useWidgetResult<SummaryWidgetResult>(
       metadata.scope,
-      schema,
+      metadata.schemaRevision,
       JSON.stringify([statusField, amountField]),
     );
   const { nonce, retryAt, retryDisabled, retry, rateLimitMessage } =
@@ -595,7 +611,7 @@ export function ItemsWidgetBody({
     { id: string; title: string; status?: string; date?: string }[]
   >(
     metadata.scope,
-    schema,
+    metadata.schemaRevision,
     JSON.stringify([limit, sort, order, statusField, dateField, uiLocale]),
   );
   const { nonce, retryAt, retryDisabled, retry, rateLimitMessage } =
@@ -711,7 +727,11 @@ export function ChartWidgetBody({
   const unsupported = schema?.summarySupported === false;
   const [groups, failed, setGroups, failure] = useWidgetResult<
     WidgetSummaryGroup[]
-  >(metadata.scope, schema, JSON.stringify([groupField, amountField]));
+  >(
+    metadata.scope,
+    metadata.schemaRevision,
+    JSON.stringify([groupField, amountField]),
+  );
   const { nonce, retryAt, retryDisabled, retry, rateLimitMessage } =
     useWidgetRefresh(metadata.scope, {
       failure,
@@ -855,7 +875,7 @@ export function ActionsWidgetBody({
       day: string;
       bucket: "overdue" | "today" | "week";
     }[]
-  >(metadata.scope, schema, dateField ?? "");
+  >(metadata.scope, metadata.schemaRevision, dateField ?? "");
   const { nonce, retryAt, retryDisabled, retry, rateLimitMessage } =
     useWidgetRefresh(metadata.scope, {
       failure,
