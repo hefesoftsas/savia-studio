@@ -817,6 +817,42 @@ describe("Savia Better Auth worker", () => {
   );
 
   it.each([
+    [
+      "https://clinic.savia-preview.hefesoft.com",
+      "https://clinic.savia-preview.hefesoft.com",
+    ],
+    ["https://unrelated.example", "https://savia-preview.hefesoft.com"],
+  ])(
+    "restarts Bookings from a separate API origin with return origin %s",
+    async (returnTo, expectedOrigin) => {
+      const environment = {
+        ...env,
+        SAVIA_ADMIN_REDIRECT_URI:
+          "https://savia-preview.hefesoft.com/auth/callback",
+      };
+      const booking = new URLSearchParams({
+        tab: "reservations",
+        date: "2026-11-25",
+        return_to: returnTo,
+      });
+      const url = new URL(
+        "https://savia-preview.hefesoft.com/api/auth/mfa-enroll",
+      );
+      url.search = new URLSearchParams({
+        state: `${"a".repeat(43)}.bookings?${booking}`,
+        sig: "expired",
+        ba_param: "state",
+      }).toString();
+      const response = await authWorker.fetch(new Request(url), environment);
+      const html = await response.text();
+      const restartUrl = html.match(/data-oauth-restart-url="([^"]+)"/)?.[1];
+      expect(restartUrl?.replace(/&amp;/g, "&")).toBe(
+        `${expectedOrigin}/#/login?resume=bookings&tab=reservations&date=2026-11-25`,
+      );
+    },
+  );
+
+  it.each([
     ["verify-totp", "INVALID_TWO_FACTOR_COOKIE"],
     ["verify-backup-code", "INVALID_TWO_FACTOR_COOKIE"],
     ["verify-totp", "TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE"],

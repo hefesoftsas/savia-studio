@@ -835,6 +835,12 @@ describe("admin OAuth bridge", () => {
         booking_query: "tab=reservations&date=2026-11-25&ignored=1",
       });
       const callback = await f.signIn(canonicalOrigin, "", `?${search}`);
+      const authorization = f.authFetch.mock.calls
+        .map(([request]) => new URL(request.url))
+        .find((url) => url.pathname === "/api/auth/oauth2/authorize");
+      const state = authorization?.searchParams.get("state");
+      const restartQuery = new URLSearchParams(state?.split("?")[1]);
+      expect(restartQuery.get("return_to")).toBe(tenantOrigin);
       expect(callback.status).toBe(200);
       expect(await callback.json()).toMatchObject({
         returnOrigin: tenantOrigin,

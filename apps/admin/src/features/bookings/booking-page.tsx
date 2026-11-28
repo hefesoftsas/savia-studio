@@ -1077,7 +1077,7 @@ function BookingWorkspace({
         </section>
       )}
 
-      {tab === "sharing" && settings && (
+      {tab === "sharing" && (
         <BookingPublicLinksPanel
           tenantId={String(tenantId)}
           currentProfessionalId={linkProfessional?.id ?? null}
@@ -1090,7 +1090,7 @@ function BookingWorkspace({
           canManageTeamLinks={bootstrap.canManage}
           apiClient={services.apiClient}
           recoverExpiredSession={recoverExpiredSession}
-          services={settings.services
+          services={bootstrap.settings.services
             .filter((service) => service.enabled)
             .map(({ id, name }) => ({ id, name }))}
         />

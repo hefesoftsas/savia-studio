@@ -60,7 +60,7 @@ import {
   normalizeCanonicalHost,
   parseTenantSlugFromHostname,
 } from "@savia/tenant-host/tenant-host";
-import { bookingQueryFromOAuthState } from "@savia/tenant-host/bookings-route";
+import { readBookingOAuthState } from "@savia/tenant-host/bookings-route";
 import { toString as qrCodeSvg } from "qrcode";
 import {
   ensureAdminOAuthClient,
@@ -213,20 +213,28 @@ function adminLoginUrl(
     environment.SAVIA_ADMIN_REDIRECT_URI ??
       "http://127.0.0.1:5173/auth/callback",
   );
+  const canonicalHost = url.hostname;
   let bookingQuery: string | undefined;
   // Direct SSO/social login has no OAuth transaction to restore the tenant.
   // Keep its validated public host when starting a fresh Admin authorization.
   if (requestUrl) {
     const requested = new URL(requestUrl);
-    if (isAllowedTenantOrigin(requested.origin, url.hostname))
+    if (isAllowedTenantOrigin(requested.origin, canonicalHost))
       url = new URL(requested.origin);
     if (
       requested.searchParams.has("sig") &&
       requested.searchParams.getAll("ba_param").includes("state")
-    )
-      bookingQuery = bookingQueryFromOAuthState(
+    ) {
+      const booking = readBookingOAuthState(
         requested.searchParams.get("state"),
       );
+      bookingQuery = booking?.query;
+      const returnOrigin = booking?.returnOrigin;
+      if (returnOrigin && isAllowedTenantOrigin(returnOrigin, canonicalHost)) {
+        const target = new URL(returnOrigin);
+        if (target.origin === returnOrigin) url = target;
+      }
+    }
   }
   url.pathname = "/";
   url.search = "";

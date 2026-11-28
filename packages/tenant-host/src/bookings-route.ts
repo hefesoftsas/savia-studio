@@ -45,14 +45,21 @@ export function normalizeBookingRouteQuery(
   return normalized.toString();
 }
 
-/** Read only the Bookings destination. The OAuth state still needs server validation. */
-export function bookingQueryFromOAuthState(
-  state: string | null,
-): string | undefined {
+/** Read navigation hints. Authentication still requires the server transaction. */
+export function readBookingOAuthState(state: string | null) {
   const bookingState = /^[A-Za-z0-9_-]+\.bookings(?:\?(.*))?$/.exec(
     state ?? "",
   );
-  return bookingState
-    ? normalizeBookingRouteQuery(bookingState[1] ?? "")
-    : undefined;
+  if (!bookingState) return undefined;
+  const returnOrigins = new URLSearchParams(bookingState[1]).getAll(
+    "return_to",
+  );
+  return {
+    query: normalizeBookingRouteQuery(bookingState[1] ?? ""),
+    returnOrigin: returnOrigins.length === 1 ? returnOrigins[0] : undefined,
+  };
+}
+
+export function bookingQueryFromOAuthState(state: string | null) {
+  return readBookingOAuthState(state)?.query;
 }

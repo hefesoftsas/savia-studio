@@ -365,14 +365,15 @@ async function createTransaction(
   d1: D1Database,
   client: AdminOAuthClient,
   initiatedOrigin: string,
-  bookingQuery: string | undefined,
+  bookingStateQuery: string | undefined,
 ): Promise<{ codeChallenge: string; state: string }> {
   // Bind the allowlisted destination to the one-time server-side transaction.
   const state =
     randomValue() +
-    (bookingQuery === undefined
+    (bookingStateQuery === undefined
       ? ""
-      : bookingsStateSuffix + (bookingQuery ? `?${bookingQuery}` : ""));
+      : bookingsStateSuffix +
+        (bookingStateQuery ? `?${bookingStateQuery}` : ""));
   const codeVerifier = randomValue(64);
   const now = new Date();
   const expiresAt = new Date(
@@ -703,14 +704,20 @@ export function registerAdminOAuthRoutes(
       (isAllowedPublicOrigin(new URL(context.req.url).origin, canonicalHost)
         ? new URL(context.req.url).origin
         : new URL(client.redirectUri).origin);
+    let bookingStateQuery: string | undefined;
+    if (context.req.query("resume") === "bookings") {
+      const navigation = new URLSearchParams(
+        normalizeBookingRouteQuery(context.req.query("booking_query") ?? ""),
+      );
+      if (targetOrigin) navigation.set("return_to", targetOrigin);
+      bookingStateQuery = navigation.toString();
+    }
     phaseStarted = performance.now();
     const transaction = await createTransaction(
       d1,
       client,
       initiatedOrigin,
-      context.req.query("resume") === "bookings"
-        ? normalizeBookingRouteQuery(context.req.query("booking_query") ?? "")
-        : undefined,
+      bookingStateQuery,
     );
     const transactionDuration = performance.now() - phaseStarted;
     const authorization = new URL(

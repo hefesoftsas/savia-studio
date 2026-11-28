@@ -61,7 +61,8 @@ If the identity provider returns an error during authorization or during the
 code exchange for a valid Bookings transaction, **Sign in again** starts a new
 transaction for the same workspace, tab, and date.
 If the authentication page restarts access because the authorization or its MFA
-challenge expired, the new sign-in also retains the selected tab and date.
+challenge expired, the new sign-in retains the organization, tab, and date,
+including when the API and organization use different hostnames.
 When the final callback arrives within five minutes after the login transaction
 expires, **Sign in again** preserves the same workspace and Bookings view.
 
@@ -89,6 +90,9 @@ Use **Remove service** or **Remove professional** to remove an item from the dra
 Publish when booking is enabled and an enabled service has an enabled professional assigned. Save the configuration before opening the public page; the link is offered only for saved, enabled and published settings. The form explains missing publication requirements before submitting. If the API rejects a save, its HTTP status and reason are shown, with known booking validation messages translated. Network failures retain the connection recovery message. Open the **Booking links** tab to create **My booking link**, bound to your configured professional, or an explicit **Team agenda** link. Customers following a personal link never select a professional. A single eligible service opens availability directly; several services add a service step. The public flow is **Service, if needed → Availability → Your details**. Availability uses a visible month calendar and time buttons together, stacked on mobile. Unavailable days are disabled, month navigation respects the booking horizon, and no time is selected until the customer clicks it. The display time zone defaults to the tenant zone and can be changed; calendar dates, times, summary, and confirmation then use that zone while reservation timestamps remain UTC. Customers review their selection, provide their name and email, and complete the configured captcha before confirming. Going back preserves their details; changing a service or professional clears the previous time. Refreshed availability must still include the selected time before proceeding. Public pages bypass the authenticated app and its offline storage. Their HTML uses no-store, no-referrer and noindex headers, and booking navigation is excluded from the service worker fallback. Public catalogs contain names and opaque booking identifiers, never internal principal identifiers or customer lists.
 
 ### Personal and team public links
+
+The service options in **Booking links** come from saved settings. Draft
+changes stay in the setup wizard and appear in the link selector after saving.
 
 If your session expires while loading or managing links, **Sign in again**
 returns to the **Booking links** tab in the same workspace. The tab reloads

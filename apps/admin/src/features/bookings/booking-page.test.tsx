@@ -2025,6 +2025,42 @@ it("restores a removed service when discarding unsaved changes", async () => {
   expect(screen.getByLabelText("Service name")).toHaveValue("Consultation");
 });
 
+it("offers saved service options in Booking links until settings are saved", async () => {
+  const apiClient = managementClient();
+  const bootstrap = await apiClient.get();
+  bootstrap.data.settings.published = true;
+  apiClient.get.mockImplementation(async (path: string) =>
+    path.endsWith("/public-links") ? { data: { links: [] } } : bootstrap,
+  );
+  mount(apiClient);
+  await screen.findByLabelText("Public title");
+  fireEvent.click(screen.getByRole("button", { name: "Services" }));
+  fireEvent.change(screen.getByLabelText("Service name"), {
+    target: { value: "Follow-up consultation" },
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Booking links" }));
+  expect(
+    await screen.findByRole("option", { name: "Consultation" }),
+  ).toBeVisible();
+  expect(
+    screen.queryByRole("option", { name: "Follow-up consultation" }),
+  ).not.toBeInTheDocument();
+  expect(apiClient.put).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Booking settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Services" }));
+  expect(screen.getByLabelText("Service name")).toHaveValue(
+    "Follow-up consultation",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await screen.findByText("Booking settings saved.");
+  fireEvent.click(screen.getByRole("button", { name: "Booking links" }));
+  expect(
+    await screen.findByRole("option", { name: "Follow-up consultation" }),
+  ).toBeVisible();
+});
+
 it("uses the saved time zone for reservations when settings have an unsaved time zone", async () => {
   const apiClient = {
     get: vi.fn(async (path: string) => ({

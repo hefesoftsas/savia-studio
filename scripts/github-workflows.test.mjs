@@ -36,6 +36,29 @@ function workflow(name) {
   );
 }
 
+test("Pulumi helper tests install the API runtime dependencies from the frozen workspace", async () => {
+  const pulumi = await workflow("pulumi.yml");
+  const unit = pulumi.slice(
+    pulumi.indexOf("  unit:\n"),
+    pulumi.indexOf("\n  preview:"),
+  );
+
+  assert.match(
+    unit,
+    /uses: pnpm\/action-setup@v5\.0\.0\s+with:\s+version: 11\.24\.0/,
+  );
+  assert.match(
+    unit,
+    /pnpm install --frozen-lockfile --filter @savia\/api\.\.\./,
+  );
+  assert.ok(
+    unit.indexOf("pnpm install --frozen-lockfile --filter @savia/api...") <
+      unit.indexOf("Run Pulumi helper tests"),
+  );
+  assert.match(pulumi, /^  runtime-compatibility:\n/m);
+  assert.match(pulumi, /^  preview:\n/m);
+});
+
 test("mixed frontend and assistant CI requires the union of existing checks", async () => {
   const admin = [
     "admin",
