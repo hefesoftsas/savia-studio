@@ -816,6 +816,30 @@ describe("Savia Better Auth worker", () => {
     },
   );
 
+  it("restarts Studio on the original workspace host when MFA expires", async () => {
+    const environment = {
+      ...env,
+      SAVIA_ADMIN_REDIRECT_URI: "https://savia-preview.hefesoft.com/auth/callback",
+    };
+    const url = new URL("https://savia-preview.hefesoft.com/api/auth/mfa-enroll");
+    const destination = new URLSearchParams({
+      tenantId: "14",
+      object: "ventas",
+      view: "collection-sources",
+      return_to: "https://demo.savia-preview.hefesoft.com",
+    });
+    url.search = new URLSearchParams({
+      state: `${"a".repeat(43)}.studio?${destination}`,
+      sig: "expired",
+      ba_param: "state",
+    }).toString();
+    const response = await authWorker.fetch(new Request(url), environment);
+    const html = await response.text();
+    expect(html).toContain(
+      'data-oauth-restart-url="https://demo.savia-preview.hefesoft.com/#/login?resume=studio&amp;tenantId=14&amp;object=ventas&amp;view=collection-sources"',
+    );
+  });
+
   it.each([
     [
       "https://clinic.savia-preview.hefesoft.com",

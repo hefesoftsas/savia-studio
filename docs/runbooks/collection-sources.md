@@ -24,6 +24,12 @@ Las conexiones JSON:API admiten únicamente destinos públicos HTTPS y recursos 
 
 ## Uso y alcance actual
 
+Studio links preserve the selected workspace, collection, and supported view
+after sign-in. This includes links to Collection Sources and supported record
+links that name both the workspace and collection. A sign-in retry keeps that
+destination while the original request is available. Studio verifies workspace
+and record access after authentication before showing protected data.
+
 When a linked collection omits its total, the list marks the current page and
 shows the range of records returned on that page. The source's pagination
 metadata determines whether the next page is available.

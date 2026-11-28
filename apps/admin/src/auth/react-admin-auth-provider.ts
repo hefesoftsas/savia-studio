@@ -33,10 +33,8 @@ export function createReactAdminAuthProvider(
   },
 ): AuthProvider {
   return {
-    login: (params?: { bookingQuery?: unknown }) =>
-      typeof params?.bookingQuery === "string"
-        ? session.login(params.bookingQuery)
-        : session.login(),
+    login: (params?: { destination?: Parameters<AuthSession["login"]>[0] }) =>
+      params?.destination ? session.login(params.destination) : session.login(),
     logout: async (params?: { logoutFromProvider?: boolean }) => {
       const finishLogout = params?.logoutFromProvider
         ? beginLogout()

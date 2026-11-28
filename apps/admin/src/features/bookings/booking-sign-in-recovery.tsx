@@ -19,7 +19,9 @@ export function BookingSignInRecovery({ className }: { className?: string }) {
         {t("sessionExpired")}
       </p>
       <Button asChild className="min-h-11 whitespace-normal">
-        <a href={getAdminAuthorizeUrl(search)}>{t("signInAgain")}</a>
+        <a href={getAdminAuthorizeUrl({ route: "bookings", query: search })}>
+          {t("signInAgain")}
+        </a>
       </Button>
     </div>
   );

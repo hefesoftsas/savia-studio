@@ -257,7 +257,7 @@ export function createLocalSession(
     }
   };
   return {
-    login: (bookingQuery) => remote.login(bookingQuery),
+    login: (destination) => remote.login(destination),
     getAuthorizeUrl: () => remote.getAuthorizeUrl(),
     getAccessToken: () => remote.getAccessToken(),
     handleCallback: async () => {

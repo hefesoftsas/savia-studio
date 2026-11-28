@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useAuthProvider, useNotify, useTranslate } from "ra-core";
-import { matchPath, useLocation } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import { PwaSplash } from "@/pwa/pwa-splash";
 import { Notification } from "@/components/admin/notification";
 import { getAdminAuthorizeUrl } from "@/components/admin/loading-recovery";
+import { adminResumeForPath } from "@/auth/admin-authorize-url";
 
 /**
  * Login page displayed when authentication is enabled and the user is not authenticated.
@@ -19,20 +20,17 @@ export const LoginPage = (_props: { redirectTo?: string }) => {
   const notify = useNotify();
   const translate = useTranslate();
   const { state } = useLocation();
-  const bookingQuery =
-    typeof state?.nextPathname === "string" &&
-    matchPath("/bookings", state.nextPathname)
-      ? typeof state.nextSearch === "string"
-        ? state.nextSearch
-        : ""
-      : undefined;
+  const destination = useMemo(
+    () => adminResumeForPath(state?.nextPathname, state?.nextSearch),
+    [state?.nextPathname, state?.nextSearch],
+  );
   const loginStarted = useRef(false);
 
   useEffect(() => {
     if (!authProvider || loginStarted.current) return;
     loginStarted.current = true;
     void authProvider
-      .login(bookingQuery === undefined ? {} : { bookingQuery })
+      .login(destination ? { destination } : {})
       .catch((error) => {
         notify(
           typeof error === "string"
@@ -53,12 +51,12 @@ export const LoginPage = (_props: { redirectTo?: string }) => {
           },
         );
       });
-  }, [authProvider, bookingQuery, notify]);
+  }, [authProvider, destination, notify]);
 
   return (
     <>
       <PwaSplash
-        recoveryHref={getAdminAuthorizeUrl(bookingQuery)}
+        recoveryHref={getAdminAuthorizeUrl(destination)}
         message={translate("savia.auth.signingIn", {
           _: "Iniciando sesión con Savia…",
         })}

@@ -4,7 +4,13 @@ import { symmetricEncrypt } from "better-auth/crypto";
 import { createApiShell } from "../../api/src/api-shell";
 import { createAuthHandler, createBetterAuth } from "../src/index";
 
-it("completes the original OAuth login after an incorrect code and valid TOTP", async () => {
+it.each([
+  { route: "bookings", query: "tab=reservations&date=2026-11-25" },
+  {
+    route: "studio",
+    query: "tenantId=14&object=ventas&view=collection-sources",
+  },
+])("resumes the original $route login after MFA", async ({ route, query }) => {
   const origin = "http://127.0.0.1:8787";
   const auth = createAuthHandler(env);
   const clientResponse = await auth.fetch(
@@ -55,7 +61,7 @@ it("completes the original OAuth login after an incorrect code and valid TOTP", 
     .replace(/\+/g, "-")
     .replace(/\//g, "_");
   const authorization = new URL(origin + "/api/auth/oauth2/authorize");
-  const state = "mfa-continuation.bookings?tab=reservations&date=2026-11-25";
+  const state = `mfa-continuation.${route}?${query}`;
   authorization.search = new URLSearchParams({
     client_id: client.clientId,
     redirect_uri: client.redirectUri,
@@ -73,7 +79,7 @@ it("completes the original OAuth login after an incorrect code and valid TOTP", 
   expect(login.pathname).toBe("/api/auth/login");
   const loginPage = await auth.fetch(new Request(login));
   expect(await loginPage.text()).toContain(
-    'data-oauth-restart-url="http://127.0.0.1:5173/#/login?resume=bookings&amp;tab=reservations&amp;date=2026-11-25"',
+    `data-oauth-restart-url="http://127.0.0.1:5173/#/login?resume=${route}&amp;${query.replaceAll("&", "&amp;")}"`,
   );
   const oauthQuery = login.search.slice(1);
   const api = createApiShell(env.AUTH_DB, undefined, auth);

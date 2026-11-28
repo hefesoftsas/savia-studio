@@ -314,6 +314,62 @@ describe("BetterAuthOAuthSession", () => {
     );
   });
 
+  it.each(["studio", "crm"])("preserves a Studio link entered through /%s", async (path) => {
+    const apiUrl = "https://savia-preview.hefesoft.com";
+    const origin = "https://demo.savia-preview.hefesoft.com";
+    const redirect = vi.fn();
+    const session = new BetterAuthOAuthSession({
+      apiUrl,
+      navigation: {
+        currentUrl: () =>
+          `${origin}/#/${path}?tenantId=14&object=ventas&view=collection-sources&tab=sources&ignored=1`,
+        redirect,
+      },
+    });
+
+    await session.login();
+    const authorize = new URL(redirect.mock.calls[0][0]);
+    expect(authorize.origin).toBe(apiUrl);
+    expect(authorize.searchParams.get("return_to")).toBe(origin);
+    expect(authorize.searchParams.get("resume")).toBe("studio");
+    expect(authorize.searchParams.get("studio_query")).toBe(
+      "tenantId=14&object=ventas&view=collection-sources&tab=sources",
+    );
+  });
+
+  it("returns to the Studio destination if starting again after a callback failure", async () => {
+    const apiUrl = "https://savia-preview.hefesoft.com";
+    const returnOrigin = "https://demo.savia-preview.hefesoft.com";
+    const query = "tenantId=14&object=ventas&view=collection-sources";
+    const session = new BetterAuthOAuthSession({
+      apiUrl,
+      navigation: {
+        currentUrl: () => `${apiUrl}/auth/callback?error=access_denied&state=original`,
+        redirect: vi.fn(),
+      },
+      fetcher: vi.fn().mockResolvedValueOnce(
+        Response.json(
+          {
+            error: { message: "The authorization request did not complete" },
+            returnOrigin,
+            returnRoute: "studio",
+            returnStudioQuery: query + "&ignored=1",
+          },
+          { status: 401 },
+        ),
+      ),
+    });
+    const retry = new URL("/api/auth/admin/authorize", apiUrl);
+    retry.search = new URLSearchParams({
+      return_to: returnOrigin,
+      resume: "studio",
+      studio_query: query,
+    }).toString();
+    await expect(session.handleCallback()).rejects.toMatchObject({
+      retryHref: retry.href,
+    });
+  });
+
   it("reports the safe OAuth error returned by the callback bridge", async () => {
     const session = new BetterAuthOAuthSession({
       apiUrl: "http://127.0.0.1:8787",
