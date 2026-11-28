@@ -201,6 +201,7 @@ export function AssistantConfigurationPanel({
     fixedTenantId === undefined ? "global" : "tenant",
   );
   const readGeneration = useRef(0);
+  const savedSummaryRevision = useRef(0);
   const readScope = useRef({ client, globalOnly, fixedTenantId });
   if (
     readScope.current.client !== client ||
@@ -238,10 +239,18 @@ export function AssistantConfigurationPanel({
     clearTenantKey,
     selectedTenantId,
   ]);
-  const load = async () => {
+  const commitSavedSummary = (next: AssistantConfigurationSummary) => {
+    savedSummaryRevision.current += 1;
+    setSummary(next);
+    setRefreshError(null);
+  };
+
+  const load = async ({ keepDraft = false }: { keepDraft?: boolean } = {}) => {
     const generation = ++readGeneration.current;
     const scope = readScope.current;
     const snapshot = draftSnapshot.current;
+    const savedRevision = savedSummaryRevision.current;
+    const preserveEdits = keepDraft && draftDirty;
     setLoading(true);
     if (summary === null) {
       setError(null);
@@ -255,11 +264,15 @@ export function AssistantConfigurationPanel({
           ? Promise.resolve({ tenants: [] })
           : client.activeTenant(),
       ]);
-      if (generation !== readGeneration.current || scope !== readScope.current)
+      if (
+        generation !== readGeneration.current ||
+        scope !== readScope.current ||
+        savedRevision !== savedSummaryRevision.current
+      )
         return;
       setRefreshError(null);
       setAccessDenied(false);
-      if (draftSnapshot.current !== snapshot) return;
+      if (preserveEdits || draftSnapshot.current !== snapshot) return;
       setSummary(nextSummary);
       const accessibleTenants = nextSummary.manageableTenantIds
         ? activeTenant.tenants.filter((tenant) =>
@@ -319,6 +332,7 @@ export function AssistantConfigurationPanel({
     } catch (exception) {
       if (generation !== readGeneration.current || scope !== readScope.current)
         return;
+      // A same-scope denial can reflect access revoked after a save.
       if (isReadAccessDenied(exception)) {
         setAccessDenied(true);
         setSummary(null);
@@ -342,7 +356,7 @@ export function AssistantConfigurationPanel({
         setTenantSpeechModel("");
         setError(null);
         setRefreshError(null);
-      } else {
+      } else if (savedRevision === savedSummaryRevision.current) {
         const message = failureMessage(
           exception,
           t("No fue posible cargar la configuración."),
@@ -484,7 +498,7 @@ export function AssistantConfigurationPanel({
         model: globalModel.trim() || null,
         allowedModels: globalAllowedModels,
       });
-      setSummary(next);
+      commitSavedSummary(next);
       setGlobalAllowedModels(next.global?.allowedModels ?? null);
       setGlobalKey("");
       setNotice("Configuración global guardada.");
@@ -513,7 +527,7 @@ export function AssistantConfigurationPanel({
       const next = await client.saveGlobal({
         allowedModels: globalAllowedModels,
       });
-      setSummary(next);
+      commitSavedSummary(next);
       setGlobalAllowedModels(next.global?.allowedModels ?? globalAllowedModels);
       setNotice("Modelos habilitados guardados.");
     } catch (exception) {
@@ -553,7 +567,7 @@ export function AssistantConfigurationPanel({
         ...transcriptionRouting(transcriptionModel, summary.global),
         summaryModel: summaryModel.trim() || null,
       });
-      setSummary(next);
+      commitSavedSummary(next);
       setTranscriptionModel(next.global?.transcriptionModel ?? "");
       setSummaryModel(next.global?.summaryModel ?? "");
       setMeetingModelNotice(true);
@@ -577,7 +591,7 @@ export function AssistantConfigurationPanel({
         imageGenerationModel: imageGenerationModel.trim() || null,
         speechModel: speechModel.trim() || null,
       });
-      setSummary(next);
+      commitSavedSummary(next);
       setImageGenerationModel(next.global?.imageGenerationModel ?? "");
       setSpeechModel(next.global?.speechModel ?? "");
       setOutputModelNotice(true);
@@ -599,7 +613,7 @@ export function AssistantConfigurationPanel({
         clearApiKey: true,
         model: globalModel.trim() || null,
       });
-      setSummary(next);
+      commitSavedSummary(next);
       setGlobalKey("");
       setConfirmGlobalKeyClear(false);
       setNotice("Clave global eliminada.");
@@ -636,7 +650,7 @@ export function AssistantConfigurationPanel({
         imageGenerationModel: tenantImageGenerationModel.trim() || null,
         speechModel: tenantSpeechModel.trim() || null,
       });
-      setSummary(next);
+      commitSavedSummary(next);
       setTenantKey("");
       setClearTenantKey(false);
       try {
@@ -666,7 +680,7 @@ export function AssistantConfigurationPanel({
     try {
       await client.clearTenantOverride(pendingDeletion);
       const next = await client.summary();
-      setSummary(next);
+      commitSavedSummary(next);
       setTenantKey("");
       setClearTenantKey(false);
       setTenantModel("");
@@ -1048,7 +1062,7 @@ export function AssistantConfigurationPanel({
         <ReadRefreshStatus
           refreshing={loading}
           error={refreshError ?? undefined}
-          onRetry={() => void load()}
+          onRetry={() => void load({ keepDraft: true })}
         />
       ) : null}
       {embedded && globalOnly ? (

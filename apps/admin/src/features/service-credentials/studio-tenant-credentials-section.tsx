@@ -3,18 +3,17 @@ import { officeSuiteMessages } from "@/features/office-suite/messages";
 import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
 import { useMessages, useAppLocale, intlLocale } from "@/i18n/core";
 import { settingsMessages } from "@/i18n/locales/settings";
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
+import { automationMessages } from "@/i18n/locales/automation";
+import { useEffect, useMemo, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import type { AppServices } from "@/app-services";
 import { createEmbeddedTransport } from "@/api/embedded-transport";
+import { useSessionGeneration } from "@/auth/session-scope";
+import { getSessionReadsPaused } from "@/auth/logout-progress";
+import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
+import { isReadAccessDenied } from "@/queries/read-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -28,9 +27,12 @@ import { studioHref } from "@/features/studio/studio-navigation";
 import {
   listStudioTenants,
   selectStudioTenant,
-  type StudioTenant,
+  STUDIO_TENANTS_CHANGED,
 } from "@/features/studio/studio-tenants";
-import { GeocodingSettingsPanel } from "@/features/studio-engine/geocoding-settings-panel";
+import {
+  GeocodingSettingsPanel,
+  geocodingSettingsQuery,
+} from "@/features/studio-engine/geocoding-settings-panel";
 import { TenantEmailSettingsPanel } from "@/features/tenant-email/tenant-email-settings-panel";
 import { tenantEmailMessages } from "@/features/tenant-email/tenant-email-messages";
 import { TenantSSOSettingsPanel } from "@/features/tenant-sso/tenant-sso-settings-panel";
@@ -42,8 +44,8 @@ import { TenantRegistrationSettingsPanel } from "@/features/tenant-registration/
 import { tenantRegistrationMessages } from "@/features/tenant-registration/tenant-registration-messages";
 import { TenantPagesSearchSettingsPanel } from "@/features/tenant-pages-search/tenant-pages-search-settings-panel";
 import { tenantPagesSearchMessages } from "@/features/tenant-pages-search/messages";
-import { setStudioRuntime } from "@/features/studio-engine/runtime";
-import { api } from "@/features/studio-engine/api";
+import type { StudioRuntime } from "@/features/studio-engine/runtime";
+import { createStudioRequest } from "@/features/studio-engine/api";
 import {
   CredentialEntry,
   CredentialFreeServiceList,
@@ -59,12 +61,6 @@ type IntegrationSummary = {
   connection?: { mode?: string; authType?: string };
   hasSecret?: boolean;
   created_at?: string;
-};
-
-type GeocodingSettings = {
-  geoapifyConfigured: boolean;
-  geoapifyStored: boolean;
-  updatedAt?: string | null;
 };
 
 function CredentialTab({
@@ -182,6 +178,7 @@ export function StudioTenantCredentialsSection({
   tenantCredentials?: (tenantId: number) => ReactNode;
 }) {
   const t = useMessages(settingsMessages);
+  const workspaceT = useMessages(automationMessages);
   const officeT = useMessages(officeSuiteMessages);
   const emailT = useMessages(tenantEmailMessages);
   const ssoT = useMessages(tenantSSOMessages);
@@ -192,8 +189,20 @@ export function StudioTenantCredentialsSection({
   const locale = intlLocale(useAppLocale());
   const navigate = useNavigate();
   const cache = useQueryClient();
-  const [tenants, setTenants] = useState<StudioTenant[]>([]);
-  const [loadingTenants, setLoadingTenants] = useState(true);
+  const sessionGeneration = useSessionGeneration();
+  const workspaceKey = useMemo(
+    () => ["credential-workspaces", sessionGeneration] as const,
+    [sessionGeneration],
+  );
+  const workspaces = useQuery({
+    queryKey: workspaceKey,
+    queryFn: () => listStudioTenants(services as AppServices),
+    enabled: !!services.apiClient?.get && !getSessionReadsPaused(),
+  });
+  const tenants = isReadAccessDenied(workspaces.error)
+    ? []
+    : (workspaces.data ?? []);
+  const loadingTenants = workspaces.isLoading;
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTenantId = searchParams.get("tenantId");
   const selectedTenantId =
@@ -228,43 +237,44 @@ export function StudioTenantCredentialsSection({
   const fallbackObject = "cotizador";
 
   useEffect(() => {
-    if (!services.apiClient?.get) {
-      setLoadingTenants(false);
-      return;
-    }
-    let active = true;
-    void listStudioTenants(services as AppServices)
-      .then((result) => {
-        if (active) setTenants(result);
-      })
-      .finally(() => {
-        if (active) setLoadingTenants(false);
-      });
-    return () => {
-      active = false;
+    const refresh = () => {
+      const filter = { queryKey: workspaceKey, exact: true };
+      void cache
+        .cancelQueries(filter)
+        .then(() => cache.invalidateQueries(filter));
     };
-  }, [services.apiClient]);
+    window.addEventListener(STUDIO_TENANTS_CHANGED, refresh);
+    return () => window.removeEventListener(STUDIO_TENANTS_CHANGED, refresh);
+  }, [cache, workspaceKey]);
 
-  useLayoutEffect(() => {
-    if (!tenant || !transport) return;
-    setStudioRuntime({
-      embedded: true,
-      tenantId: tenant.tenantId,
-      apiBasePath: tenant.apiBasePath,
-      transport,
-    });
-    return () => setStudioRuntime({ embedded: false });
-  }, [tenant, transport]);
-
+  const runtime: StudioRuntime = {
+    embedded: true,
+    tenantId: tenant?.tenantId,
+    apiBasePath: tenant?.apiBasePath,
+    sessionGeneration,
+    transport: transport ?? undefined,
+  };
+  const request = createStudioRequest(runtime);
+  const integrationsKey = [
+    "integrations",
+    sessionGeneration,
+    tenant?.apiBasePath,
+  ];
+  const geocodingQuery = geocodingSettingsQuery(runtime, sessionGeneration);
   const integrations = useQuery({
-    queryKey: ["integrations", tenant?.id],
-    queryFn: () => api<{ data: IntegrationSummary[] }>("/integrations"),
+    queryKey: integrationsKey,
+    queryFn: ({ signal }) =>
+      request<{ data: IntegrationSummary[] }>(
+        "/integrations",
+        "GET",
+        undefined,
+        { signal },
+      ),
     enabled: !!transport,
   });
 
   const geocoding = useQuery({
-    queryKey: ["geocoding-settings", tenant?.id],
-    queryFn: () => api<GeocodingSettings>("/settings/geocoding"),
+    ...geocodingQuery,
     enabled: !!transport,
   });
 
@@ -274,11 +284,24 @@ export function StudioTenantCredentialsSection({
     enabled: !!tenant,
     refresh: async () => {
       await Promise.all([
-        cache.invalidateQueries({ queryKey: ["integrations"] }),
-        cache.invalidateQueries({ queryKey: ["geocoding-settings"] }),
+        cache.invalidateQueries({ queryKey: integrationsKey, exact: true }),
+        cache.invalidateQueries({
+          queryKey: geocodingQuery.queryKey,
+          exact: true,
+        }),
       ]);
     },
   });
+
+  const workspaceStatus = (
+    <ReadRefreshStatus
+      refreshing={workspaces.isFetching && !loadingTenants}
+      error={
+        workspaces.isError ? workspaceT("Could not load tenants.") : undefined
+      }
+      onRetry={() => void workspaces.refetch()}
+    />
+  );
 
   if (loadingTenants) {
     return (
@@ -346,7 +369,8 @@ export function StudioTenantCredentialsSection({
   if (!tenant || !transport) {
     return (
       <div>
-        {requestedTenantId !== null && !loadingTenants ? (
+        {workspaceStatus}
+        {requestedTenantId !== null && !workspaces.isError ? (
           <p role="alert" className="text-sm text-destructive">
             {signInT(
               "The requested workspace is unavailable. Select another workspace to continue.",
@@ -421,11 +445,13 @@ export function StudioTenantCredentialsSection({
               globalCredentials={globalCredentials}
               freeServicesEntry={<FreeServicesEntry />}
               loadingMessage={
-                <p className="credentials-muted">
-                  {t(
-                    "No hay tenants disponibles para Geoapify o integraciones de Studio.",
-                  )}
-                </p>
+                workspaces.isError ? undefined : (
+                  <p className="credentials-muted">
+                    {t(
+                      "No hay tenants disponibles para Geoapify o integraciones de Studio.",
+                    )}
+                  </p>
+                )
               }
             />
           </TabsContent>
@@ -472,7 +498,7 @@ export function StudioTenantCredentialsSection({
       )}
       requirement="optional"
       status={
-        geocoding.isLoading ? null : (
+        geocoding.data ? (
           <CredentialStatusBadge
             configured={Boolean(geoapifyConfigured)}
             label={
@@ -483,10 +509,10 @@ export function StudioTenantCredentialsSection({
                   : t("Sin clave")
             }
           />
-        )
+        ) : null
       }
     >
-      <GeocodingSettingsPanel />
+      <GeocodingSettingsPanel runtime={runtime} />
     </CredentialEntry>
   );
 
@@ -642,6 +668,7 @@ export function StudioTenantCredentialsSection({
 
   return (
     <div className="grid gap-3">
+      {workspaceStatus}
       {tenants.length > 1 && (
         <label className="grid max-w-sm gap-1.5 text-sm">
           {t("Workspace")}

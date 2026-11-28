@@ -49,6 +49,16 @@ vi.mock("@/realtime/use-realtime-refresh", async (importOriginal) => {
 afterEach(cleanup);
 beforeEach(() => realtimeRefreshes.clear());
 
+function pendingRead<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((complete, fail) => {
+    resolve = complete;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function servicesWithSummary(
   overrides: Array<{ tenantId: number; model: string | null }> = [],
 ) {
@@ -942,6 +952,56 @@ it("switches assistant settings without losing an unsaved key or model identifie
 });
 
 describe("assistant configuration background reads", () => {
+  it.each(["old settings", "temporary failure", "denied access"])(
+    "handles a previously started read returning %s after a confirmed save",
+    async (outcome) => {
+      const user = userEvent.setup();
+      const services = servicesWithSummary();
+      const initial = await services.assistantConfiguration.summary();
+      const background = pendingRead<typeof initial>();
+      services.assistantConfiguration.summary = vi
+        .fn()
+        .mockResolvedValueOnce(initial)
+        .mockReturnValueOnce(background.promise);
+      services.assistantConfiguration.saveGlobal = vi.fn().mockResolvedValue({
+        ...initial,
+        global: { ...initial.global!, keyState: "not_configured" },
+      });
+      render(
+        <AssistantConfigurationPanel services={services} embedded globalOnly />,
+      );
+      await screen.findByRole("button", { name: "Eliminar clave" });
+
+      let refresh: Promise<unknown> | undefined;
+      act(() => {
+        refresh = Promise.resolve(realtimeRefreshes.get("settings:0")?.());
+      });
+      expect(services.assistantConfiguration.summary).toHaveBeenCalledTimes(2);
+      await user.click(screen.getByRole("button", { name: "Eliminar clave" }));
+      await user.click(
+        screen.getByRole("button", { name: "Confirmar eliminación" }),
+      );
+      await screen.findByText("Clave global eliminada.");
+      expect(screen.queryByRole("button", { name: "Eliminar clave" })).toBeNull();
+
+      await act(async () => {
+        if (outcome === "old settings") background.resolve(initial);
+        else if (outcome === "denied access")
+          background.reject(new ApiClientError(403, "denied", "Access denied"));
+        else background.reject(new Error("Refresh temporarily unavailable"));
+        await refresh;
+      });
+      expect(screen.queryByRole("button", { name: "Eliminar clave" })).toBeNull();
+      expect(screen.queryByText(/Refresh temporarily unavailable/)).toBeNull();
+      if (outcome === "denied access") {
+        expect(screen.getByRole("alert")).toBeVisible();
+        expect(screen.queryByLabelText("Clave OpenRouter")).toBeNull();
+      } else {
+        expect(screen.getByLabelText("Clave OpenRouter")).toBeVisible();
+      }
+    },
+  );
+
   it.each([401, 403])(
     "clears loaded configuration and drafts when a refresh is denied with %i",
     async (status) => {
@@ -1024,6 +1084,39 @@ describe("assistant configuration background reads", () => {
       "unsaved-secret",
     );
     expect(screen.getByRole("status")).toHaveTextContent("Network unavailable");
+  });
+
+  it("keeps the unsaved model when retrying a background read", async () => {
+    const user = userEvent.setup();
+    const services = servicesWithSummary();
+    const initial = await services.assistantConfiguration.summary();
+    const background = pendingRead<typeof initial>();
+    services.assistantConfiguration.summary = vi
+      .fn()
+      .mockResolvedValueOnce(initial)
+      .mockReturnValueOnce(background.promise)
+      .mockResolvedValueOnce({
+        ...initial,
+        global: { ...initial.global!, model: "provider/remote-model" },
+      });
+    render(<AssistantConfigurationPage services={services} />);
+    const model = await screen.findByLabelText("Modelo global");
+    let refresh: Promise<unknown> | undefined;
+    act(() => {
+      refresh = Promise.resolve(realtimeRefreshes.get("settings:0")?.());
+    });
+    await user.clear(model);
+    await user.type(model, "provider/draft-model");
+
+    await act(async () => {
+      background.reject(new Error("Network unavailable"));
+      await refresh;
+    });
+    expect(model).toHaveValue("provider/draft-model");
+    await user.click(screen.getByRole("button", { name: "Reintentar" }));
+    expect(services.assistantConfiguration.summary).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText(/Network unavailable/)).toBeNull();
+    expect(model).toHaveValue("provider/draft-model");
   });
 
   it("ignores an older read that settles after the newer settings read", async () => {
