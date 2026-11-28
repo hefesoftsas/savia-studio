@@ -1,4 +1,5 @@
 import { RouteLoading } from "@/components/admin/route-loading";
+import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
 import type { AppServices } from "@/app-services";
 import { ApiClientError } from "@/api/api-client";
 import type { paths } from "@/api/generated/openapi";
@@ -256,6 +257,8 @@ function BookingWorkspace({
   const [reservationReadPending, setReservationsLoading] = useState(false);
   const [requestedReservationRange, setRequestedReservationRange] =
     useState<string>();
+  const [loadedReservationRange, setLoadedReservationRange] =
+    useState<string>();
   const [reservationsLoadFailed, setReservationsLoadFailed] = useState(false);
   const [reservationActions, setReservationActions] = useState<
     Record<string, ReservationActionFeedback>
@@ -283,8 +286,10 @@ function BookingWorkspace({
     tZone,
     horizonDays,
   ]);
+  const reservationsAreCurrent = loadedReservationRange === reservationRange;
   const reservationsLoading =
-    reservationReadPending || requestedReservationRange !== reservationRange;
+    !reservationsAreCurrent &&
+    (reservationReadPending || requestedReservationRange !== reservationRange);
   const publicReady = Boolean(
     bootstrap?.settings.enabled && bootstrap.settings.published,
   );
@@ -332,6 +337,7 @@ function BookingWorkspace({
     setBootstrap(undefined);
     setSettings(undefined);
     setReservations([]);
+    setLoadedReservationRange(undefined);
     setConferenceSelections({});
     void services.apiClient
       .get<{ data: Bootstrap }>(`/v1/tenants/${tenantId}/booking`, { signal })
@@ -399,7 +405,6 @@ function BookingWorkspace({
         Object.entries(current).filter(([, feedback]) => feedback.pending),
       ),
     );
-    setNextReservationPage(undefined);
     setLoadingMoreReservations(false);
     setMoreReservationsFailed(false);
     setError("");
@@ -414,6 +419,8 @@ function BookingWorkspace({
         };
     if (from >= to) {
       setReservations([]);
+      setLoadedReservationRange(reservationRange);
+      setNextReservationPage(undefined);
       setReservationsLoading(false);
       return;
     }
@@ -422,6 +429,7 @@ function BookingWorkspace({
       url,
       ({ data, nextCursor }) => {
         setReservations(data);
+        setLoadedReservationRange(reservationRange);
         setNextReservationPage(
           nextCursor ? { url, cursor: nextCursor } : undefined,
         );
@@ -452,7 +460,13 @@ function BookingWorkspace({
   ]);
 
   async function loadMoreReservations() {
-    if (!nextReservationPage || moreReservationsRequest.current) return;
+    if (
+      !reservationsAreCurrent ||
+      reservationReadPending ||
+      !nextReservationPage ||
+      moreReservationsRequest.current
+    )
+      return;
     const { url, cursor } = nextReservationPage;
     const controller = new AbortController();
     moreReservationsRequest.current = controller;
@@ -1519,13 +1533,23 @@ function BookingWorkspace({
               </Button>
             </div>
           )}
+          {reservationsAreCurrent ? (
+            <ReadRefreshStatus
+              refreshing={reservationReadPending}
+              error={
+                reservationsLoadFailed
+                  ? t("Reservations could not be loaded.")
+                  : undefined
+              }
+            />
+          ) : null}
           {reservationsLoading ? (
             <div role="status" className="grid gap-2">
               <span className="sr-only">{t("Reservations")}</span>
               <div className="h-10 animate-pulse rounded bg-muted" />
               <div className="h-16 animate-pulse rounded bg-muted" />
             </div>
-          ) : reservationsLoadFailed ? (
+          ) : !reservationsAreCurrent ? (
             <p role="alert" className="text-sm text-destructive">
               {t("Reservations could not be loaded.")}
             </p>
@@ -1714,29 +1738,27 @@ function BookingWorkspace({
               </table>
             </div>
           )}
-          {nextReservationPage &&
-            !reservationsLoading &&
-            !reservationsLoadFailed && (
-              <div className="grid justify-items-start gap-2">
-                {moreReservationsFailed && (
-                  <p role="alert" className="text-sm text-destructive">
-                    {t("More reservations could not be loaded.")}
-                  </p>
+          {nextReservationPage && reservationsAreCurrent && (
+            <div className="grid justify-items-start gap-2">
+              {moreReservationsFailed && (
+                <p role="alert" className="text-sm text-destructive">
+                  {t("More reservations could not be loaded.")}
+                </p>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                disabled={reservationReadPending || loadingMoreReservations}
+                onClick={() => void loadMoreReservations()}
+              >
+                {t(
+                  loadingMoreReservations
+                    ? "Loading reservations…"
+                    : "Load more reservations",
                 )}
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={loadingMoreReservations}
-                  onClick={() => void loadMoreReservations()}
-                >
-                  {t(
-                    loadingMoreReservations
-                      ? "Loading reservations…"
-                      : "Load more reservations",
-                  )}
-                </Button>
-              </div>
-            )}
+              </Button>
+            </div>
+          )}
         </section>
       )}
     </main>

@@ -24,6 +24,10 @@ Changing the reservations date or leaving its tab cancels the pending list
 request so its response cannot replace the current view.
 When the date changes, the agenda hides the previous day's reservations and
 pagination while the selected date is being read.
+Refreshing the same date keeps the loaded reservations visible. If a transient
+read fails, the agenda keeps those results and the original pagination cursor
+available while you retry. An access denial hides the reservations and offers
+workspace or sign-in recovery.
 
 If a Bookings link specifies a tab or date, both the organization picker and
 sign-in preserve those selections. Switching tabs updates the URL, so the

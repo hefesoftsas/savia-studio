@@ -1116,6 +1116,107 @@ it("shows a single error when the reservations list cannot load and retries it",
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
+it("keeps the current date's reservations and cursor when a refresh fails", async () => {
+  const reservation = {
+    id: "reservation-1",
+    version: 1,
+    serviceName: "Consultation",
+    professionalName: "Ari",
+    startsAt: "2025-03-09T12:00:00.000Z",
+    endsAt: "2025-03-09T12:30:00.000Z",
+    customerName: "Saved customer",
+    customerEmail: "customer@example.test",
+    status: "cancelled",
+    deliveryStatus: "skipped",
+    calendarStatus: "not_connected",
+  };
+  let rejectRefresh!: (reason: Error) => void;
+  const refresh = new Promise<never>((_resolve, reject) => {
+    rejectRefresh = reject;
+  });
+  const apiClient = {
+    get: vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: { settings, candidates: [], canManage: true, publicUrl: null },
+      })
+      .mockResolvedValueOnce({ data: [reservation], nextCursor: "page-2" })
+      .mockReturnValueOnce(refresh)
+      .mockResolvedValueOnce({
+        data: [
+          {
+            ...reservation,
+            id: "reservation-2",
+            customerName: "Next customer",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ data: [] }),
+  };
+  mount(apiClient, 42, "/bookings?tab=reservations&date=2025-03-09");
+  const customer = await screen.findByText("Saved customer");
+  const more = screen.getByRole("button", { name: "Load more reservations" });
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+  expect(screen.getByText("Saved customer")).toBe(customer);
+  expect(more).toBeDisabled();
+  await act(async () => rejectRefresh(new Error("Temporary read failure")));
+  expect(await screen.findByText(/Refresh failed:/)).toBeVisible();
+  expect(screen.getByText("Saved customer")).toBe(customer);
+  expect(more).toBeEnabled();
+
+  fireEvent.click(more);
+  expect(await screen.findByText("Next customer")).toBeVisible();
+  expect(apiClient.get.mock.calls[3][0]).toContain("&cursor=page-2");
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(
+    await screen.findByText("No reservations in this period."),
+  ).toBeVisible();
+  expect(screen.queryByText(/Refresh failed:/)).not.toBeInTheDocument();
+});
+
+it("hides loaded reservations when access is revoked during a refresh", async () => {
+  const apiClient = {
+    get: vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: { settings, candidates: [], canManage: true, publicUrl: null },
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: "reservation-1",
+            version: 1,
+            serviceName: "Consultation",
+            professionalName: "Ari",
+            startsAt: "2025-03-09T12:00:00.000Z",
+            endsAt: "2025-03-09T12:30:00.000Z",
+            customerName: "Saved customer",
+            customerEmail: "customer@example.test",
+            status: "cancelled",
+            deliveryStatus: "skipped",
+            calendarStatus: "not_connected",
+          },
+        ],
+        nextCursor: "page-2",
+      })
+      .mockRejectedValueOnce(
+        new ApiClientError(403, "FORBIDDEN", "Access denied"),
+      ),
+  };
+  mount(apiClient, 42, "/bookings?tab=reservations&date=2025-03-09");
+  expect(await screen.findByText("Saved customer")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+  expect(
+    await screen.findByRole("link", { name: "Choose another organization" }),
+  ).toBeVisible();
+  expect(screen.queryByText("Saved customer")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Load more reservations" }),
+  ).not.toBeInTheDocument();
+});
+
 it("does not cancel a reservation when cancellation is declined", async () => {
   const reservation = {
     id: "reservation-decline",
