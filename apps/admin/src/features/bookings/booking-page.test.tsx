@@ -351,10 +351,13 @@ it("ignores a late session failure after leaving the booking links tab", async (
   );
   mount({ get }, 42, "/bookings?tab=sharing");
   await screen.findByText("Loading booking links…");
-  const signal = get.mock.calls.find(([path]) =>
-    path.endsWith("/public-links"),
-  )?.[1]?.signal;
-  expect(signal?.aborted).toBe(false);
+  const signal = await waitFor(() => {
+    const pendingSignal = get.mock.calls.find(([path]) =>
+      path.endsWith("/public-links"),
+    )?.[1]?.signal;
+    expect(pendingSignal?.aborted).toBe(false);
+    return pendingSignal;
+  });
   fireEvent.click(screen.getByRole("button", { name: "Availability" }));
   expect(signal?.aborted).toBe(true);
   await act(async () => {
