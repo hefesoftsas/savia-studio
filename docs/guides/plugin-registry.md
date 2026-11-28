@@ -90,7 +90,9 @@ The ordinary local store install button continues selecting the latest version.
 The shared catalog restores imported and active statuses from the current
 workspace inventory when it finds the same version and ZIP digest. If an
 import or installation succeeds while refreshing the workspace list fails,
-**Refresh plugin list** retries the refresh by itself.
+the catalog keeps the confirmed status even if an earlier workspace read
+completed while the change was pending. **Refresh plugin list** retries the
+workspace read without repeating the import or installation.
 
 ## Publish once and promote identical bytes
 

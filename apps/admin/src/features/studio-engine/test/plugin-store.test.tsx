@@ -117,6 +117,53 @@ it("reads shared release status from the workspace inventory, including bundled 
   ).toBeEnabled();
 });
 
+it("keeps a confirmed shared import when an earlier inventory read completes during the import", async () => {
+  const release = {
+    id: item.manifest.id,
+    label: "Shared Demo",
+    version: item.version,
+    sha256: "a".repeat(64),
+  };
+  const initialInventory = Promise.withResolvers<{ data: [] }>();
+  const imported = Promise.withResolvers<{ data: { id: string } }>();
+  let inventoryReads = 0;
+  vi.mocked(api).mockImplementation(async (path) => {
+    if (path === "/plugin-store/registry")
+      return { configured: true, data: [release], cursor: null };
+    if (path === "/plugin-store/registry/import") return imported.promise;
+    if (path === "/plugin-store") {
+      inventoryReads++;
+      if (inventoryReads === 1) return initialInventory.promise;
+      if (inventoryReads === 2) throw new Error("Workspace list unavailable");
+      return { data: [{ ...item, sha256: release.sha256 }] };
+    }
+    throw new Error(`Unexpected API request: ${path}`);
+  });
+  const onChanged = vi.fn();
+  renderStore({ onChanged });
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Añadir al espacio Shared Demo 1.0.0",
+    }),
+  );
+
+  await act(async () => initialInventory.resolve({ data: [] }));
+  expect(
+    screen.getByText("Aún no subiste plugins a este espacio."),
+  ).toBeVisible();
+  await act(async () => imported.resolve({ data: { id: release.id } }));
+
+  expect(screen.getByText("Añadido al espacio")).toBeVisible();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Actualizar lista de plugins" }),
+  );
+  await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
+  expect(screen.getByText("Añadido al espacio")).toBeVisible();
+  expect(
+    vi.mocked(api).mock.calls.filter(([, method]) => method === "POST"),
+  ).toHaveLength(1);
+});
+
 it("lista, instala y muestra un plugin del store", async () => {
   let installed: { enabled: boolean; version: string } | null = null;
   vi.mocked(api).mockImplementation(async (path, method) => {
