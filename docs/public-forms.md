@@ -281,7 +281,8 @@ owner before resubmission. The status response omits provider error details.
 A late POST response cannot replace the receipt recovered from status.
 After a lost submission response, the visible wizard checks the same
 submission a bounded number of times while it waits for a receipt, including
-after temporary failures in the status connection.
+after temporary failures in the status connection. It also retries if the first
+status check happens before the submission has been recorded.
 If a status check is rate-limited, the wizard honors `Retry-After` or waits
 15 seconds when the server gives no deadline. Returning to the tab during
 that pause keeps the deadline for the current submission.

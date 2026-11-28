@@ -632,7 +632,8 @@ export function PublicQuoteForm({
             status.status === 408 ||
             status.status === 429 ||
             status.status >= 500 ||
-            (controller.pending && status.status === 404);
+            ((controller.pending || controller.uncertain) &&
+              status.status === 404);
           return;
         }
         const { data } = status;

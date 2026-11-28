@@ -199,9 +199,8 @@ export default function RequestPage({ object }: { object: StudioObject }) {
     [formVersion, setFormVersion] = useState(0);
   const [busy, setBusy] = useState(false);
   const submitting = useRef(false);
-  const submission = useRef<
-    { fingerprint: string; pending: Map<string, string> } | undefined
-  >(undefined);
+  const submissions = useRef(new Map<string, Map<string, string>>());
+  const latestSubmission = useRef<Map<string, string> | undefined>(undefined);
   const alive = useRef(true);
   const scopeGeneration = useRef(0);
   const currentScope = useRef(scopeKey);
@@ -209,7 +208,8 @@ export default function RequestPage({ object }: { object: StudioObject }) {
   if (currentScope.current !== scopeKey) {
     currentScope.current = scopeKey;
     scopeGeneration.current++;
-    submission.current = undefined;
+    submissions.current.clear();
+    latestSubmission.current = undefined;
     accessBoundary.current = { denial: null };
   }
   const hideProtectedRuns = useCallback((denial: Error) => {
@@ -249,17 +249,18 @@ export default function RequestPage({ object }: { object: StudioObject }) {
         setRunsScope(scopeKey);
         setAccessError("");
         setResultsError("");
-        const attempt = submission.current;
-        if (attempt) {
+        for (const [fingerprint, pendingActions] of submissions.current) {
           for (const run of result.data) {
             if (
               (run.status === "complete" || run.status === "failed") &&
-              attempt.pending.get(run.actionId) === run.id
+              pendingActions.get(run.actionId) === run.id
             )
-              attempt.pending.delete(run.actionId);
+              pendingActions.delete(run.actionId);
           }
-          if (attempt.pending.size === 0) {
-            submission.current = undefined;
+          if (pendingActions.size > 0) continue;
+          submissions.current.delete(fingerprint);
+          if (latestSubmission.current === pendingActions) {
+            latestSubmission.current = undefined;
             setExecutionError("");
           }
         }
@@ -533,20 +534,13 @@ export default function RequestPage({ object }: { object: StudioObject }) {
               submitActions.map((action) => action.id),
               data,
             ]);
-            const previous = submission.current;
-            const attempt =
-              previous?.fingerprint === fingerprint
-                ? previous
-                : {
-                    fingerprint,
-                    pending: new Map(
-                      submitActions.map((action) => [
-                        action.id,
-                        crypto.randomUUID(),
-                      ]),
-                    ),
-                  };
-            submission.current = attempt;
+            const pendingActions =
+              submissions.current.get(fingerprint) ??
+              new Map(
+                submitActions.map((action) => [action.id, crypto.randomUUID()]),
+              );
+            submissions.current.set(fingerprint, pendingActions);
+            latestSubmission.current = pendingActions;
             submitting.current = true;
             const generation = scopeGeneration.current;
             setBusy(true);
@@ -554,24 +548,29 @@ export default function RequestPage({ object }: { object: StudioObject }) {
             try {
               await Promise.all(
                 submitActions.map(async (a) => {
-                  const id = attempt.pending.get(a.id);
+                  const id = pendingActions.get(a.id);
                   if (!id) return;
                   try {
                     const run = await execute(a, data, id);
-                    if (run.status !== "running") attempt.pending.delete(a.id);
+                    if (run.status !== "running") pendingActions.delete(a.id);
                   } catch (e) {
                     if (
                       alive.current &&
                       generation === scopeGeneration.current &&
-                      attempt.pending.has(a.id) &&
+                      pendingActions.has(a.id) &&
                       !isReadAccessDenied(e)
                     )
                       setExecutionError((e as Error).message);
                   }
                 }),
               );
-              if (attempt.pending.size === 0 && submission.current === attempt)
-                submission.current = undefined;
+              if (
+                pendingActions.size === 0 &&
+                submissions.current.get(fingerprint) === pendingActions
+              ) {
+                submissions.current.delete(fingerprint);
+                latestSubmission.current = undefined;
+              }
               await refresh();
               if (
                 isWizard &&
