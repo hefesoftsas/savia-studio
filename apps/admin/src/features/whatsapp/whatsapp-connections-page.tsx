@@ -18,9 +18,13 @@ import type {
   WhatsappConnection,
   WhatsappProvider,
 } from "@/api/whatsapp-client";
+import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useMessages } from "@/i18n/core";
+import { personalIntegrationsMessages } from "@/i18n/locales/integrations";
+import { isReadAccessDenied } from "@/queries/read-state";
 import {
   IntegrationGroup,
   IntegrationGroupEmpty,
@@ -118,13 +122,17 @@ export function WhatsappConnectionsPage({
   nangoFactory?: WhatsappNangoConnectFactory;
   embedded?: boolean;
 }) {
+  const t = useMessages(personalIntegrationsMessages);
   const currentTenant = useCurrentTenant();
   const [provider, setProvider] = useState<WhatsappProvider | null>(null);
   const [connection, setConnection] = useState<WhatsappConnection | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [readFailure, setReadFailure] = useState<{
+    tenantId: number | null;
+    message: string;
+  }>();
   const [loadedTenantId, setLoadedTenantId] = useState<number | null>();
   const [phoneNumberId, setPhoneNumberId] = useState("");
   const [displayPhoneNumber, setDisplayPhoneNumber] = useState("");
@@ -161,11 +169,8 @@ export function WhatsappConnectionsPage({
     const requestId = ++refreshRequestId.current;
     const requestFeedbackVersion = actionFeedbackVersion.current;
     const requestTenantId = currentTenant.id;
-    const keepVisible = loadedTenantId === requestTenantId && provider !== null;
-    if (!keepVisible) {
-      setLoading(true);
-      setRefreshError(null);
-    }
+    const keepVisible = loadedTenantId === requestTenantId;
+    setLoading(true);
     if (!preserveDrafts) setFeedback(null);
     try {
       const [nextProviders, nextConnections] = await Promise.all([
@@ -197,22 +202,27 @@ export function WhatsappConnectionsPage({
           : (next?.wabaId ?? ""),
       );
       setLoadedTenantId(requestTenantId);
-      setRefreshError(null);
+      setReadFailure(undefined);
     } catch (exception) {
       if (
         requestId !== refreshRequestId.current ||
         requestTenantId !== latestTenant.current.id
       )
         return;
-      if (keepVisible) {
-        if (requestFeedbackVersion === actionFeedbackVersion.current)
-          setRefreshError(feedbackFrom(exception));
-      } else {
-        setFeedback(feedbackFrom(exception));
+      const accessDenied = isReadAccessDenied(exception);
+      if (!keepVisible || accessDenied) {
         setProvider(null);
         setConnection(null);
-        setLoadedTenantId(requestTenantId);
+        setLoadedTenantId(undefined);
       }
+      if (
+        accessDenied ||
+        requestFeedbackVersion === actionFeedbackVersion.current
+      )
+        setReadFailure({
+          tenantId: requestTenantId,
+          message: feedbackFrom(exception),
+        });
     } finally {
       if (
         requestId === refreshRequestId.current &&
@@ -229,6 +239,7 @@ export function WhatsappConnectionsPage({
       setProvider(null);
       setConnection(null);
       setLoadedTenantId(undefined);
+      setReadFailure(undefined);
       return;
     }
     void refresh();
@@ -252,6 +263,11 @@ export function WhatsappConnectionsPage({
   });
 
   const tenantDataIsCurrent = scopeReady && loadedTenantId === currentTenant.id;
+  const refreshError =
+    readFailure?.tenantId === currentTenant.id
+      ? readFailure.message
+      : undefined;
+  const initialReadFailed = !tenantDataIsCurrent && refreshError !== undefined;
   const enabled = provider?.availability === "enabled";
   const connected = connection?.status === "connected";
   const canConfigureAssistant =
@@ -274,7 +290,7 @@ export function WhatsappConnectionsPage({
   function showActionFeedback(message: string | null) {
     if (currentTenant.id !== latestTenant.current.id) return;
     actionFeedbackVersion.current += 1;
-    setRefreshError(null);
+    setReadFailure(undefined);
     setFeedback(message);
   }
 
@@ -424,10 +440,14 @@ export function WhatsappConnectionsPage({
       title="WhatsApp"
       help="Conecta tu cuenta de WhatsApp Business para activar el asistente y el menú. Las credenciales se gestionan de forma segura."
     >
-      {loading || !tenantDataIsCurrent || !provider ? (
+      {!tenantDataIsCurrent ? (
         <li className="px-5 py-4">
           <Skeleton className="h-10 w-full" />
         </li>
+      ) : !provider ? (
+        <IntegrationGroupEmpty
+          message={t("WhatsApp no está disponible en este entorno.")}
+        />
       ) : (
         <>
           <IntegrationProviderRow
@@ -569,20 +589,22 @@ export function WhatsappConnectionsPage({
 
   const content = (
     <>
-      {tenantDataIsCurrent && (refreshError || feedback) ? (
+      <ReadRefreshStatus
+        refreshing={loading && (tenantDataIsCurrent || initialReadFailed)}
+        error={refreshError}
+        onRetry={() => void refresh({ preserveDrafts: true })}
+      />
+      {tenantDataIsCurrent && feedback ? (
         <div
           className="integrations-feedback flex items-start gap-3 rounded-xl border bg-card px-4 py-3 text-sm"
           role="status"
         >
           <CircleAlert className="mt-0.5 size-4 shrink-0 text-primary" />
-          <p className="leading-6">{refreshError || feedback}</p>
+          <p className="leading-6">{feedback}</p>
         </div>
       ) : null}
 
-      {loading ||
-      !tenantDataIsCurrent ||
-      !provider ||
-      !canConfigureAssistant ? (
+      {initialReadFailed ? null : !canConfigureAssistant ? (
         <div className="space-y-4">{connectionGroup}</div>
       ) : (
         <Tabs
