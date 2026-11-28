@@ -100,10 +100,14 @@ separate; sharing a test phone does not mean sharing a Nango connection id.
    section menu or remounting assistant, channel, and native settings while those
    sections remain available. Unsaved
    number edits are retained while untouched number fields receive current
-   metadata. Failed background reads show an error and retain the last loaded
-   settings; the next successful refresh clears that error. Starting a user
-   action clears stale refresh errors so its result remains visible. Switching tenants
-   still hides the previous tenant's settings until the new scope loads.
+   metadata. Select **Reintentar** when the provider or connection list fails
+   to load. A transient background failure keeps the last loaded settings and
+   draft, and a successful retry clears the error. Starting a user action
+   clears stale nonblocking refresh errors so its result remains visible.
+   A denied read hides connection details and keeps **Reintentar** available
+   when a previous action finishes. Switching tenants hides the previous tenant's
+   settings until the new scope loads. An empty provider list shows that
+   WhatsApp is unavailable in the current environment.
 2. **Conectar** creates a short-lived Nango Connect session for that tenant.
    The browser receives only the session token and the public Nango URLs.
 3. The user authorizes the `whatsapp-business` integration in Nango with the

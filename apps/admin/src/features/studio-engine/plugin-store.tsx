@@ -183,13 +183,15 @@ export default function PluginStoreManager({
   const locale = useAppLocale();
   const fileRef = useRef<HTMLInputElement>(null);
   const listGeneration = useRef(0);
+  const mutationInFlight = useRef(false);
 
   const [inventory, setInventory] = useState(emptyInventory);
   const latestWorkspaceVersions = useRef(emptyInventory.items);
   const { items, bundled, canDeleteFromRegistry } = inventory;
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [mutation, setMutation] = useState<"change" | "upload" | null>(null);
+  const mutationPending = mutation !== null;
+  const uploading = mutation === "upload";
   const [error, setError] = useState("");
   const [openPluginId, setOpenPluginId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -262,11 +264,7 @@ export default function PluginStoreManager({
   const remoteChanges = useRealtimeRefresh({
     topics: ["studio"],
     tenantId: getStudioRuntime().tenantId,
-    blocked:
-      busy !== null ||
-      uploading ||
-      openPluginId !== null ||
-      deleteTarget !== null,
+    blocked: mutationPending || openPluginId !== null || deleteTarget !== null,
     refresh: reloadRemoteChanges,
     accepts: (event) => event.collection === "objects",
   });
@@ -308,38 +306,44 @@ export default function PluginStoreManager({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function run(id: string, operation: () => Promise<unknown>) {
-    setBusy(id);
-    setError("");
+  async function runMutation(
+    operation: () => Promise<void>,
+    kind: "change" | "upload" = "change",
+  ) {
+    if (mutationInFlight.current) return;
+    mutationInFlight.current = true;
+    setMutation(kind);
     try {
       await operation();
-      await reload();
-      await onChanged();
-    } catch (reason) {
-      setError(message(reason));
     } finally {
-      setBusy(null);
+      mutationInFlight.current = false;
+      setMutation(null);
     }
   }
 
+  function run(operation: () => Promise<unknown>, kind?: "upload") {
+    return runMutation(async () => {
+      setError("");
+      try {
+        await operation();
+        await reload();
+        await onChanged();
+      } catch (reason) {
+        setError(message(reason));
+      }
+    }, kind);
+  }
+
   async function upload(file: File) {
-    if (!/\.zip$/i.test(file.name)) {
-      setError(t("El archivo debe ser un .zip válido."));
-      if (fileRef.current) fileRef.current.value = "";
-      return;
-    }
-    setUploading(true);
-    setError("");
     try {
-      const form = new FormData();
-      form.set("file", file);
-      await api("/plugin-store/upload", "POST", form);
-      await reload();
-      await onChanged();
-    } catch (reason) {
-      setError(message(reason));
+      await run(async () => {
+        if (!/\.zip$/i.test(file.name))
+          throw new Error(t("El archivo debe ser un .zip válido."));
+        const form = new FormData();
+        form.set("file", file);
+        await api("/plugin-store/upload", "POST", form);
+      }, "upload");
     } finally {
-      setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
     }
   }
@@ -430,6 +434,8 @@ export default function PluginStoreManager({
         key={getStudioRuntime().tenantId}
         workspaceVersions={items}
         getLatestWorkspaceVersions={() => latestWorkspaceVersions.current}
+        mutationPending={mutationPending}
+        runMutation={runMutation}
         onImported={async () => {
           await reload();
           await onChanged();
@@ -462,6 +468,7 @@ export default function PluginStoreManager({
               accept=".zip"
               className="hidden"
               aria-label={t("Subir plugin")}
+              disabled={mutationPending}
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) void upload(file);
@@ -469,7 +476,7 @@ export default function PluginStoreManager({
             />
             <Button
               size="sm"
-              disabled={uploading}
+              disabled={mutationPending}
               onClick={() => fileRef.current?.click()}
             >
               <Upload aria-hidden="true" />
@@ -555,6 +562,7 @@ export default function PluginStoreManager({
               type="button"
               size="sm"
               variant="outline"
+              disabled={mutationPending}
               onClick={() => void fetchInitial()}
             >
               {t("Reintentar")}
@@ -586,7 +594,7 @@ export default function PluginStoreManager({
               type="button"
               size="sm"
               className="mt-2"
-              disabled={uploading}
+              disabled={mutationPending}
               onClick={() => fileRef.current?.click()}
             >
               <Upload aria-hidden="true" />
@@ -633,7 +641,6 @@ export default function PluginStoreManager({
               );
               const active = isActive(item);
               const updateAvailable = hasUpdate(item);
-              const pending = busy === item.manifest.id;
               const open = openPluginId === item.manifest.id;
               return (
                 <article
@@ -737,7 +744,7 @@ export default function PluginStoreManager({
                         size="sm"
                         variant="ghost"
                         disabled={
-                          pending ||
+                          mutationPending ||
                           (active && item.installed?.version === item.version)
                         }
                         title={
@@ -784,7 +791,7 @@ export default function PluginStoreManager({
                                     size="sm"
                                     variant="ghost"
                                     disabled={
-                                      pending ||
+                                      mutationPending ||
                                       (active &&
                                         item.installed?.version ===
                                           version.version)
@@ -816,9 +823,9 @@ export default function PluginStoreManager({
                       {!item.installed ? (
                         <Button
                           size="sm"
-                          disabled={pending}
+                          disabled={mutationPending}
                           onClick={() =>
-                            void run(item.manifest.id, () =>
+                            void run(() =>
                               api(
                                 `/extensions/${item.manifest.id}/install`,
                                 "POST",
@@ -836,9 +843,9 @@ export default function PluginStoreManager({
                           {updateAvailable ? (
                             <Button
                               size="sm"
-                              disabled={pending}
+                              disabled={mutationPending}
                               onClick={() =>
-                                void run(item.manifest.id, () =>
+                                void run(() =>
                                   api(
                                     `/extensions/${item.manifest.id}/install`,
                                     "POST",
@@ -853,9 +860,9 @@ export default function PluginStoreManager({
                           <Button
                             size="sm"
                             variant="outline"
-                            disabled={pending}
+                            disabled={mutationPending}
                             onClick={() =>
-                              void run(item.manifest.id, () =>
+                              void run(() =>
                                 api(
                                   `/extensions/${item.manifest.id}`,
                                   "PATCH",
@@ -892,7 +899,7 @@ export default function PluginStoreManager({
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={pending}
+                          disabled={mutationPending}
                           onClick={() => confirmDeletion(group)}
                           aria-label={t("Eliminar %{value0}", {
                             value0: label,
@@ -916,6 +923,8 @@ export default function PluginStoreManager({
                     <StoreConnections
                       extensionId={item.manifest.id}
                       connectors={item.declarations!.connectors}
+                      mutationPending={mutationPending}
+                      runMutation={runMutation}
                     />
                   ) : null}
                 </article>
@@ -991,21 +1000,21 @@ export default function PluginStoreManager({
             <Button
               type="button"
               variant="destructive"
-              disabled={!deleteTarget || busy === deleteTarget.group.id}
+              disabled={!deleteTarget || mutationPending}
               onClick={() => {
                 const target = deleteTarget;
                 if (!target) return;
-                setDeleteTarget(null);
                 const params = new URLSearchParams();
                 if (target.version) params.set("version", target.version);
                 if (deleteFromRegistry) params.set("registry", "true");
                 const suffix = params.size ? `?${params}` : "";
-                void run(target.group.id, () =>
-                  api(
+                void run(() => {
+                  setDeleteTarget(null);
+                  return api(
                     `/plugin-store/${encodeURIComponent(target.group.id)}${suffix}`,
                     "DELETE",
-                  ),
-                );
+                  );
+                });
               }}
             >
               {t("Eliminar definitivamente")}

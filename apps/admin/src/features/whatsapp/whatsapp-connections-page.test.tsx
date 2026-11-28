@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppServices } from "@/app-services";
+import { ApiClientError } from "@/api/api-client";
 import {
   WhatsappConnectionsPage,
   type WhatsappNangoConnectFactory,
@@ -124,6 +125,120 @@ function createServices() {
 }
 
 describe("WhatsappConnectionsPage", () => {
+  it.each(["listProviders", "listConnections"] as const)(
+    "recovers from an initial %s failure without leaving the page",
+    async (failedRead) => {
+      tenantState.id = 101;
+      const user = userEvent.setup();
+      const services = createServices();
+      vi.mocked(services.whatsapp[failedRead]).mockRejectedValueOnce(
+        new Error("Temporary WhatsApp outage"),
+      );
+      const { container } = render(
+        <MemoryRouter>
+          <WhatsappConnectionsPage services={services} />
+        </MemoryRouter>,
+      );
+
+      expect(
+        await screen.findByText(/Temporary WhatsApp outage/),
+      ).toBeVisible();
+      const retry = screen.getByRole("button", { name: "Reintentar" });
+      expect(container.querySelector('[data-slot="skeleton"]')).toBeNull();
+      await user.click(retry);
+
+      expect(
+        await screen.findByRole("button", { name: "Conectar" }),
+      ).toBeVisible();
+      expect(screen.queryByText(/Temporary WhatsApp outage/)).toBeNull();
+    },
+  );
+
+  it("shows an empty state when no WhatsApp provider is available", async () => {
+    const services = createServices();
+    vi.mocked(services.whatsapp.listProviders).mockResolvedValue([]);
+    render(
+      <MemoryRouter>
+        <WhatsappConnectionsPage services={services} />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByText("WhatsApp no está disponible en este entorno."),
+    ).toBeVisible();
+  });
+
+  it("clears connection details when a refresh is denied", async () => {
+    tenantState.id = 101;
+    const services = createServices();
+    const connection = await services.whatsapp.complete("connection-1", {
+      agencyId: 101,
+    });
+    vi.mocked(services.whatsapp.listConnections).mockResolvedValue([
+      { ...connection, displayPhoneNumber: "+573001234567" },
+    ]);
+    render(
+      <MemoryRouter>
+        <WhatsappConnectionsPage services={services} />
+      </MemoryRouter>,
+    );
+    await screen.findByText("+573001234567");
+
+    vi.mocked(services.whatsapp.listConnections).mockRejectedValueOnce(
+      new ApiClientError(403, "denied", "Access denied"),
+    );
+    await act(async () => {
+      await realtime.refresh?.();
+    });
+
+    expect(screen.queryByText("+573001234567")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Desconectar" })).toBeNull();
+    expect(screen.getByText(/Access denied/)).toBeVisible();
+  });
+
+  it("keeps retry available when an earlier action finishes after a denied read", async () => {
+    tenantState.id = 101;
+    const user = userEvent.setup();
+    const services = createServices();
+    const connection = await services.whatsapp.complete("connection-1", {
+      agencyId: 101,
+    });
+    vi.mocked(services.whatsapp.listConnections).mockResolvedValue([
+      { ...connection, phoneNumberId: "12345" },
+    ]);
+    let resolveSend!: (result: { messageId: string }) => void;
+    vi.mocked(services.whatsapp.testSend).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <WhatsappConnectionsPage services={services} />
+      </MemoryRouter>,
+    );
+    await user.type(
+      await screen.findByRole("textbox", { name: "Destino" }),
+      "+573001234567",
+    );
+    await user.type(screen.getByRole("textbox", { name: "Texto" }), "Test");
+    await user.click(screen.getByRole("button", { name: "Enviar prueba" }));
+    vi.mocked(services.whatsapp.listConnections).mockRejectedValueOnce(
+      new ApiClientError(403, "denied", "Access denied"),
+    );
+    await act(async () => {
+      await realtime.refresh?.();
+    });
+    expect(screen.getByRole("button", { name: "Reintentar" })).toBeVisible();
+    await act(async () => resolveSend({ messageId: "wamid.test" }));
+
+    expect(screen.getByText(/Access denied/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Reintentar" }));
+    expect(
+      await screen.findByRole("button", { name: "Desconectar" }),
+    ).toBeVisible();
+  });
+
   it("does not let a late background failure hide a newer send result", async () => {
     tenantState.id = 101;
     const user = userEvent.setup();
@@ -170,7 +285,7 @@ describe("WhatsappConnectionsPage", () => {
     expect(
       screen.getByText("Mensaje de prueba aceptado (wamid.test)."),
     ).toBeVisible();
-    expect(screen.queryByText("Late background failure")).toBeNull();
+    expect(screen.queryByText(/Late background failure/)).toBeNull();
   });
 
   it.each([
@@ -210,7 +325,7 @@ describe("WhatsappConnectionsPage", () => {
       await act(async () => {
         await realtime.refresh?.();
       });
-      expect(screen.getByText("Background read failed")).toBeVisible();
+      expect(screen.getByText(/Background read failed/)).toBeVisible();
       if (action === "send") {
         await user.type(
           screen.getByRole("textbox", { name: "Destino" }),
@@ -229,7 +344,7 @@ describe("WhatsappConnectionsPage", () => {
         );
       }
       expect(await screen.findByText(message)).toBeVisible();
-      expect(screen.queryByText("Background read failed")).toBeNull();
+      expect(screen.queryByText(/Background read failed/)).toBeNull();
     },
   );
 
@@ -399,15 +514,19 @@ describe("WhatsappConnectionsPage", () => {
     await act(async () => {
       await realtime.refresh?.();
     });
-    expect(screen.getByText("Temporary connection failure")).toBeVisible();
+    expect(screen.getByText(/Temporary connection failure/)).toBeVisible();
     expect(
       screen.getByRole("textbox", { name: "Contactos de prueba" }),
     ).toHaveValue("+573028648594");
     expect(services.whatsapp.getAssistant).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      await realtime.refresh?.();
-    });
-    expect(screen.queryByText("Temporary connection failure")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Reintentar" }));
+    await waitFor(() =>
+      expect(screen.queryByText(/Temporary connection failure/)).toBeNull(),
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Contactos de prueba" }),
+    ).toHaveValue("+573028648594");
+    expect(services.whatsapp.getAssistant).toHaveBeenCalledTimes(1);
   });
 
   it("shows only the selected section and preserves unsaved assistant changes", async () => {

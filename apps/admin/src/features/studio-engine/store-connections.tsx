@@ -1,6 +1,6 @@
 import { useMessages } from "@/i18n/core";
 import { automationMessages } from "@/i18n/locales/automation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "./api";
@@ -42,9 +42,13 @@ function fieldValue(
 export function StoreConnections({
   extensionId,
   connectors,
+  mutationPending = false,
+  runMutation = (operation) => operation(),
 }: {
   extensionId: string;
   connectors: StoreConnectorDeclaration[];
+  mutationPending?: boolean;
+  runMutation?: (operation: () => Promise<void>) => Promise<void>;
 }) {
   const t = useMessages(automationMessages);
   const [summaries, setSummaries] = useState<ConnectionSummary[]>([]);
@@ -54,25 +58,39 @@ export function StoreConnections({
   const [checks, setChecks] = useState<Record<string, Record<string, boolean>>>(
     {},
   );
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [mutationError, setMutationError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const readGeneration = useRef(0);
+  const error = mutationError || readError;
+  const operationPending = mutationPending || busy !== null;
 
   async function reload() {
-    const response = await api<{ data: ConnectionSummary[] }>(
-      `/extensions/${extensionId}/connections`,
-    );
-    setSummaries(response.data);
+    const generation = ++readGeneration.current;
+    try {
+      const response = await api<{ data: ConnectionSummary[] }>(
+        `/extensions/${extensionId}/connections`,
+      );
+      if (generation === readGeneration.current) {
+        setSummaries(response.data);
+        setReadError("");
+      }
+    } catch (reason) {
+      if (generation === readGeneration.current)
+        setReadError(reason instanceof Error ? reason.message : String(reason));
+    }
   }
 
   useEffect(() => {
-    reload().catch((reason) =>
-      setError(reason instanceof Error ? reason.message : String(reason)),
-    );
+    void reload();
+    return () => {
+      readGeneration.current += 1;
+    };
   }, [extensionId]);
 
   async function save(connectorId: string, fields: StoreConnectorField[]) {
     setBusy(connectorId);
-    setError("");
+    setMutationError("");
     try {
       const values: Record<string, unknown> = {};
       for (const field of fields) {
@@ -92,7 +110,9 @@ export function StoreConnections({
       );
       await reload();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setMutationError(
+        reason instanceof Error ? reason.message : String(reason),
+      );
     } finally {
       setBusy(null);
     }
@@ -100,7 +120,7 @@ export function StoreConnections({
 
   async function remove(connectionId: string) {
     setBusy(connectionId);
-    setError("");
+    setMutationError("");
     try {
       await api(
         `/extensions/${extensionId}/connections/${connectionId}`,
@@ -108,7 +128,9 @@ export function StoreConnections({
       );
       await reload();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setMutationError(
+        reason instanceof Error ? reason.message : String(reason),
+      );
     } finally {
       setBusy(null);
     }
@@ -137,8 +159,8 @@ export function StoreConnections({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={busy !== null}
-                onClick={() => void remove(connector.id)}
+                disabled={operationPending}
+                onClick={() => void runMutation(() => remove(connector.id))}
                 aria-label={t("Eliminar %{value0}", {
                   value0: connector.label,
                 })}
@@ -195,8 +217,10 @@ export function StoreConnections({
           </div>
           <Button
             size="sm"
-            disabled={busy !== null}
-            onClick={() => void save(connector.id, connector.fields)}
+            disabled={operationPending}
+            onClick={() =>
+              void runMutation(() => save(connector.id, connector.fields))
+            }
             aria-label={t("Configurar conexión de %{value0}", {
               value0: connector.label,
             })}

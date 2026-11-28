@@ -87,6 +87,12 @@ against the workspace copy before activating it. If the copy changed, reload
 the page and review the version in **My plugins** before trying again.
 The ordinary local store install button continues selecting the latest version.
 
+From the Extensions tab, run one plugin change at a time. The upload,
+installation, activation, deletion, connection settings, and shared catalog
+import controls become available when the current operation and its refresh
+finish. Connection settings keep the latest connection list after a save or
+removal.
+
 The shared catalog restores imported and active statuses from the current
 workspace inventory when it finds the same version and ZIP digest. If an
 import or installation succeeds while refreshing the workspace list fails,
