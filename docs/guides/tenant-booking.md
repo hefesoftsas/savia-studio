@@ -61,7 +61,8 @@ If the identity provider returns an error during authorization or during the
 code exchange for a valid Bookings transaction, **Sign in again** starts a new
 transaction for the same workspace, tab, and date.
 If the authentication page restarts access because the authorization or its MFA
-challenge expired, the new sign-in also retains the selected tab and date.
+challenge expired, the new sign-in retains the organization, tab, and date,
+including when the API and organization use different hostnames.
 When the final callback arrives within five minutes after the login transaction
 expires, **Sign in again** preserves the same workspace and Bookings view.
 
