@@ -5,6 +5,9 @@ Owner: Platform UI team. Reviewed: 2026-10-03.
 My Day combines assigned Savia appointments, personal calendar events, personal mail, and quick views of
 collections. Each collection widget links to its full screen. Layout changes
 save automatically to the backend and support drag, keyboard, and menu ordering.
+If the saved layout cannot be read, **Retry** reloads it before enabling layout
+changes. A temporary refresh failure keeps an already loaded layout visible.
+Returning to My Day during a save waits for it before rereading the layout.
 
 ## Widget types
 
@@ -36,7 +39,9 @@ visible with a notice that the list is incomplete and a retry action.
 
 Plugin widgets are offered only when their collection matches and their
 extension is enabled. If an extension becomes unavailable, its card explains
-how to restore it.
+how to restore it. A temporary catalog refresh failure keeps an open plugin
+widget running and offers **Retry**. Switching workspace or account, losing
+access, or removing the installation hides the previous widget.
 
 ## Add and arrange widgets
 

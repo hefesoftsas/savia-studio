@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   translateMessage,
   useAppLocale,
@@ -6,6 +6,7 @@ import {
 } from "@/i18n/core";
 import { myDayStateMessages } from "./my-day-state-messages";
 import type { UserPreferencesClient } from "@/api/user-preferences-client";
+import { isReadAccessDenied } from "@/queries/read-state";
 import {
   defaultMyDayWidgets,
   parseMyDayWidgets,
@@ -15,6 +16,7 @@ import {
 
 let layoutCache = new WeakMap<UserPreferencesClient, MyDayWidgetsLayout>();
 let layoutRevisions = new WeakMap<UserPreferencesClient, number>();
+let layoutWrites = new WeakMap<UserPreferencesClient, Promise<boolean>>();
 let sessionGeneration = 0;
 type WidgetMessage = {
   key: keyof typeof myDayStateMessages;
@@ -30,6 +32,7 @@ function clearLayoutCache() {
   sessionGeneration += 1;
   layoutCache = new WeakMap();
   layoutRevisions = new WeakMap();
+  layoutWrites = new WeakMap();
 }
 
 function nextLayoutRevision(client: UserPreferencesClient): number {
@@ -43,39 +46,50 @@ if (typeof window !== "undefined") {
   window.addEventListener("savia:principal-changed", clearLayoutCache);
 }
 
+type LayoutScope = {
+  client: UserPreferencesClient | undefined;
+  generation: number;
+};
+
+type LayoutView = {
+  scope: LayoutScope;
+  layout: MyDayWidgetsLayout | undefined;
+  reading: boolean;
+  failed: boolean;
+};
+
+function startingView(scope: LayoutScope): LayoutView {
+  return {
+    scope,
+    layout: scope.client
+      ? layoutCache.get(scope.client)
+      : defaultMyDayWidgets(),
+    reading: Boolean(scope.client),
+    failed: false,
+  };
+}
+
 export function useMyDayWidgets(
   userPreferences: UserPreferencesClient | undefined,
 ) {
   const locale = useAppLocale();
-  const [layoutState, setLayoutState] = useState<MyDayWidgetsLayout | null>(
-    () => (userPreferences ? (layoutCache.get(userPreferences) ?? null) : null),
-  );
-  const [layoutOwner, setLayoutOwner] = useState(userPreferences);
-  const [loadingState, setLoading] = useState(
-    () => !userPreferences || !layoutCache.has(userPreferences),
-  );
   const [currentSessionGeneration, setCurrentSessionGeneration] =
     useState(sessionGeneration);
-  const [saving, setSaving] = useState(false);
+  const scope = useMemo(
+    () => ({ client: userPreferences, generation: currentSessionGeneration }),
+    [userPreferences, currentSessionGeneration],
+  );
+  const [view, setView] = useState(() => startingView(scope));
+  const [writingScope, setWritingScope] = useState<LayoutScope>();
   const [feedbackState, setFeedback] = useState<WidgetFeedback>(null);
-  const revision = useRef(0);
-  const layout =
-    layoutOwner === userPreferences
-      ? layoutState
-      : userPreferences
-        ? (layoutCache.get(userPreferences) ?? null)
-        : null;
-  const loading =
-    layoutOwner === userPreferences
-      ? loadingState
-      : !userPreferences || !layoutCache.has(userPreferences);
+  const activeScope = useRef<LayoutScope | undefined>(undefined);
+  const current = view.scope === scope ? view : startingView(scope);
+  const { layout } = current;
+  const saving = writingScope === scope;
+  const canEdit = Boolean(layout) && !current.reading && !current.failed;
 
   useEffect(() => {
     const clear = () => {
-      revision.current += 1;
-      setLayoutState(null);
-      setLayoutOwner(userPreferences);
-      setLoading(true);
       setFeedback(null);
       setCurrentSessionGeneration(sessionGeneration);
     };
@@ -85,115 +99,104 @@ export function useMyDayWidgets(
       window.removeEventListener("savia:session-cleared", clear);
       window.removeEventListener("savia:principal-changed", clear);
     };
-  }, [userPreferences]);
+  }, []);
+
+  const reload = useCallback(
+    async (signal?: AbortSignal) => {
+      const { client, generation } = scope;
+      const isCurrent = () =>
+        !signal?.aborted &&
+        activeScope.current === scope &&
+        generation === sessionGeneration;
+      if (!client || !isCurrent()) return;
+
+      const pendingSave = layoutWrites.get(client);
+      if (pendingSave) await pendingSave;
+      if (!isCurrent()) return;
+
+      setView(startingView(scope));
+      const requestRevision = nextLayoutRevision(client);
+      try {
+        const next = parseMyDayWidgets(await client.getMyDayWidgets());
+        if (!isCurrent() || layoutRevisions.get(client) !== requestRevision)
+          return;
+        layoutCache.set(client, next);
+        setView({ scope, layout: next, reading: false, failed: false });
+      } catch (error) {
+        if (!isCurrent() || layoutRevisions.get(client) !== requestRevision)
+          return;
+        if (isReadAccessDenied(error)) layoutCache.delete(client);
+        setView({
+          scope,
+          layout: layoutCache.get(client),
+          reading: false,
+          failed: true,
+        });
+      }
+    },
+    [scope],
+  );
 
   useEffect(() => {
-    if (!userPreferences) {
-      setLayoutState(defaultMyDayWidgets());
-      setLayoutOwner(undefined);
-      setLoading(false);
-      return;
-    }
-    let active = true;
-    const generation = sessionGeneration;
-    const requestRevision = nextLayoutRevision(userPreferences);
-    revision.current = requestRevision;
-    const existing = layoutCache.get(userPreferences);
-    if (!existing) setLoading(true);
-    userPreferences
-      .getMyDayWidgets()
-      .then(
-        (remote) => {
-          if (
-            !active ||
-            generation !== sessionGeneration ||
-            revision.current !== requestRevision ||
-            layoutRevisions.get(userPreferences) !== requestRevision
-          )
-            return;
-          try {
-            const next = parseMyDayWidgets(remote);
-            layoutCache.set(userPreferences, next);
-            setLayoutState(next);
-            setLayoutOwner(userPreferences);
-          } catch {
-            setLayoutState(defaultMyDayWidgets());
-            setLayoutOwner(userPreferences);
-            setFeedback(
-              message("Saved widgets could not be read. Starting over."),
-            );
-          }
-        },
-        () => {
-          if (
-            !active ||
-            generation !== sessionGeneration ||
-            revision.current !== requestRevision ||
-            layoutRevisions.get(userPreferences) !== requestRevision
-          )
-            return;
-          if (!existing) setLayoutState(defaultMyDayWidgets());
-          setLayoutOwner(userPreferences);
-          setFeedback(message("Could not load widgets. Try again."));
-        },
-      )
-      .finally(() => {
-        if (
-          active &&
-          generation === sessionGeneration &&
-          revision.current === requestRevision
-        ) {
-          setLoading(false);
-        }
-      });
+    activeScope.current = scope;
+    const controller = new AbortController();
+    void reload(controller.signal);
     return () => {
-      active = false;
+      controller.abort();
+      activeScope.current = undefined;
     };
-  }, [userPreferences, currentSessionGeneration]);
+  }, [reload, scope]);
 
   const persist = useCallback(
     async (
       next: MyDayWidgetsLayout,
       successMessage: WidgetMessage["key"] | null,
     ) => {
-      if (!userPreferences) {
-        setLayoutState(next);
-        setLayoutOwner(undefined);
+      const { client, generation } = scope;
+      const isCurrent = () =>
+        activeScope.current === scope && generation === sessionGeneration;
+      if (!canEdit || !isCurrent()) return false;
+      if (!client) {
+        setView({ scope, layout: next, reading: false, failed: false });
         if (successMessage) setFeedback(message(successMessage));
         return true;
       }
-      setSaving(true);
+      if (layoutWrites.has(client)) return false;
+      setWritingScope(scope);
       setFeedback(null);
-      const generation = sessionGeneration;
-      const saveRevision = nextLayoutRevision(userPreferences);
-      revision.current = saveRevision;
-      try {
-        const saved = await userPreferences.saveMyDayWidgets(next);
-        if (
-          generation !== sessionGeneration ||
-          revision.current !== saveRevision ||
-          layoutRevisions.get(userPreferences) !== saveRevision
-        )
+      nextLayoutRevision(client);
+      const operation = (async () => {
+        try {
+          const parsed = parseMyDayWidgets(await client.saveMyDayWidgets(next));
+          if (generation !== sessionGeneration) return false;
+          layoutCache.set(client, parsed);
+          if (isCurrent()) {
+            setView({ scope, layout: parsed, reading: false, failed: false });
+            if (successMessage) setFeedback(message(successMessage));
+          }
+          return true;
+        } catch {
+          if (isCurrent()) {
+            setView({
+              scope,
+              layout: layoutCache.get(client),
+              reading: false,
+              failed: false,
+            });
+            setFeedback(message("Could not save widgets. Try again."));
+          }
           return false;
-        const parsed = parseMyDayWidgets(saved);
-        layoutCache.set(userPreferences, parsed);
-        setLayoutState(parsed);
-        setLayoutOwner(userPreferences);
-        if (successMessage) setFeedback(message(successMessage));
-        return true;
-      } catch {
-        if (
-          generation === sessionGeneration &&
-          revision.current === saveRevision
-        ) {
-          setFeedback(message("Could not save widgets. Try again."));
         }
-        return false;
+      })();
+      layoutWrites.set(client, operation);
+      try {
+        return await operation;
       } finally {
-        setSaving(false);
+        if (layoutWrites.get(client) === operation) layoutWrites.delete(client);
+        if (isCurrent()) setWritingScope(undefined);
       }
     },
-    [userPreferences],
+    [canEdit, scope],
   );
 
   const add = useCallback(
@@ -267,7 +270,16 @@ export function useMyDayWidgets(
   return {
     layout,
     widgets: layout?.widgets ?? [],
-    loading,
+    loading: current.reading && !layout,
+    refreshing: current.reading && Boolean(layout),
+    readError: current.failed
+      ? translateMessage(
+          myDayStateMessages,
+          "Could not load widgets. Try again.",
+          locale,
+        )
+      : undefined,
+    canEdit,
     saving,
     feedback:
       typeof feedbackState === "object" && feedbackState
@@ -278,48 +290,12 @@ export function useMyDayWidgets(
             feedbackState.params,
           )
         : feedbackState,
-    unavailable: !userPreferences,
     setFeedback,
     add,
     remove,
     move,
     reorder,
     hasSystemWidget,
-    reload: useCallback(async () => {
-      if (!userPreferences) return;
-      const generation = sessionGeneration;
-      const requestRevision = nextLayoutRevision(userPreferences);
-      revision.current = requestRevision;
-      const existing = layoutCache.get(userPreferences);
-      setLoading(!existing);
-      try {
-        const parsed = parseMyDayWidgets(
-          await userPreferences.getMyDayWidgets(),
-        );
-        if (
-          generation !== sessionGeneration ||
-          revision.current !== requestRevision ||
-          layoutRevisions.get(userPreferences) !== requestRevision
-        )
-          return;
-        layoutCache.set(userPreferences, parsed);
-        setLayoutState(parsed);
-        setLayoutOwner(userPreferences);
-      } catch {
-        if (
-          generation === sessionGeneration &&
-          revision.current === requestRevision
-        ) {
-          setFeedback(message("Could not load widgets. Try again."));
-        }
-      } finally {
-        if (
-          generation === sessionGeneration &&
-          revision.current === requestRevision
-        ) {
-          setLoading(false);
-        }
-      }
-    }, [userPreferences]),
+    reload,
   };
 }

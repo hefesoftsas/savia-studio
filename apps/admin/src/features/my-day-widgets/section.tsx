@@ -42,6 +42,7 @@ import type { ApiClient } from "@/api/api-client";
 import type { UserPreferencesClient } from "@/api/user-preferences-client";
 import { intlLocale, useAppLocale, useMessages } from "@/i18n/core";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddWidgetDialog } from "./add-widget-dialog";
@@ -161,11 +162,14 @@ export function MyDayWidgetsSection({
   const t = useMessages(widgetMessages);
   const [dialogOpen, setDialogOpen] = useState(false);
   const {
+    layout,
     widgets,
     loading,
+    refreshing,
+    readError,
+    canEdit,
     saving,
     feedback,
-    unavailable,
     setFeedback,
     add,
     remove,
@@ -173,6 +177,10 @@ export function MyDayWidgetsSection({
     reload,
     hasSystemWidget,
   } = useMyDayWidgets(userPreferences);
+  const layoutActionsDisabled = !canEdit || saving;
+  useEffect(() => {
+    if (!canEdit) setDialogOpen(false);
+  }, [canEdit]);
   const mailClient = isMailClient(personalIntegrations)
     ? personalIntegrations
     : undefined;
@@ -263,7 +271,10 @@ export function MyDayWidgetsSection({
 
   return (
     <section aria-label={t("My widgets")} className="mt-8">
-      <RemoteChangesNotice {...remoteLayout} />
+      <RemoteChangesNotice
+        {...remoteLayout}
+        disabled={saving || loading || refreshing}
+      />
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 ring-1 ring-primary/20">
@@ -279,14 +290,14 @@ export function MyDayWidgetsSection({
           ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {!hasSystemWidget("agenda") && !loading ? (
+          {layout && !hasSystemWidget("agenda") && !loading ? (
             <Button
               type="button"
               variant="ghost"
               size="sm"
               className="max-sm:size-11 max-sm:p-0 max-sm:has-[>svg]:px-0"
               title={t("Show agenda")}
-              disabled={saving || full}
+              disabled={layoutActionsDisabled || full}
               onClick={() =>
                 void add({ id: "agenda", kind: "agenda" } as MyDayWidget)
               }
@@ -301,7 +312,7 @@ export function MyDayWidgetsSection({
             size="sm"
             className="max-sm:size-11 max-sm:p-0 max-sm:has-[>svg]:px-0"
             title={t("Refresh")}
-            disabled={loading || saving}
+            disabled={loading || refreshing || saving}
             onClick={() => {
               void agenda.refresh();
               void mail.refresh();
@@ -309,7 +320,7 @@ export function MyDayWidgetsSection({
             }}
           >
             <RefreshCw
-              className={loading ? "animate-spin" : undefined}
+              className={loading || refreshing ? "animate-spin" : undefined}
               aria-hidden="true"
             />
             <span className="sr-only sm:not-sr-only">{t("Refresh")}</span>
@@ -319,7 +330,7 @@ export function MyDayWidgetsSection({
             size="sm"
             className="max-sm:size-11 max-sm:p-0 max-sm:has-[>svg]:px-0"
             title={t("Add widget")}
-            disabled={loading || saving || full}
+            disabled={layoutActionsDisabled || full}
             onClick={() => setDialogOpen(true)}
           >
             <Plus aria-hidden="true" />
@@ -327,6 +338,12 @@ export function MyDayWidgetsSection({
           </Button>
         </div>
       </div>
+      <ReadRefreshStatus
+        refreshing={refreshing}
+        error={readError}
+        onRetry={() => void reload()}
+        retryDisabled={loading || saving}
+      />
 
       {mailClient &&
       (mail.reconnectRequired.length > 0 ||
@@ -447,7 +464,7 @@ export function MyDayWidgetsSection({
             </div>
           ))}
         </div>
-      ) : visibleWidgets.length === 0 ? (
+      ) : !layout ? null : visibleWidgets.length === 0 ? (
         <div
           className="flex min-h-56 flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-gradient-to-b from-muted/60 to-muted/20 px-6 py-12 text-center shadow-sm"
           data-testid="my-day-widgets-empty"
@@ -469,6 +486,7 @@ export function MyDayWidgetsSection({
               type="button"
               variant="secondary"
               size="sm"
+              disabled={layoutActionsDisabled}
               onClick={() => setDialogOpen(true)}
             >
               <Plus aria-hidden="true" />
@@ -481,6 +499,7 @@ export function MyDayWidgetsSection({
               type="button"
               variant="outline"
               size="sm"
+              disabled={layoutActionsDisabled}
               onClick={() =>
                 void add({ id: "agenda", kind: "agenda" } as MyDayWidget)
               }
@@ -504,7 +523,7 @@ export function MyDayWidgetsSection({
                 <SortableWidgetItem
                   key={widget.id}
                   widget={widget}
-                  disabled={saving}
+                  disabled={layoutActionsDisabled}
                   expanded={widget.kind === "agenda" && agenda.view !== "day"}
                 >
                   {({ attributes, listeners }) => (
@@ -531,7 +550,7 @@ export function MyDayWidgetsSection({
                       }}
                       isFirst={index === 0}
                       isLast={index === visibleWidgets.length - 1}
-                      disabled={saving}
+                      disabled={layoutActionsDisabled}
                       dragHandle={
                         <button
                           type="button"
@@ -575,7 +594,7 @@ export function MyDayWidgetsSection({
             type="button"
             variant="ghost"
             size="sm"
-            disabled={saving || full}
+            disabled={layoutActionsDisabled || full}
             onClick={() =>
               void add({ id: "quick_task", kind: "quick_task" } as MyDayWidget)
             }
