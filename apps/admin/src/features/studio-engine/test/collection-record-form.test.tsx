@@ -107,6 +107,55 @@ it("shows a client selector on creation and saves the link after the record", as
     screen.queryByText("Relaciones", { exact: true }),
   ).not.toBeInTheDocument();
 });
+
+it("follows the source pagination when selecting a related record", async () => {
+  responses();
+  const original = vi.mocked(api).getMockImplementation()!;
+  vi.mocked(api).mockImplementation(async (path, ...rest) => {
+    const url = new URL(path, "https://savia.test");
+    if (url.pathname !== "/records/clients") return original(path, ...rest);
+    if (url.searchParams.get("page") === "1") {
+      return {
+        data: [{ id: "c1", display_name: "Ana Pérez" }],
+        pageInfo: { hasNextPage: true },
+      };
+    }
+    return {
+      data: Array.from({ length: 20 }, (_, index) => ({
+        id: `c${index + 2}`,
+        display_name: `Contacto ${index + 2}`,
+      })),
+      pageInfo: { hasNextPage: false },
+    };
+  });
+  const save = vi
+    .fn()
+    .mockResolvedValue({ id: "new-1", name: "Prueba", _version: 1 });
+  const done = vi.fn();
+  mount(save, done);
+  fireEvent.click(
+    await screen.findByRole("combobox", { name: "cliente_id", exact: true }),
+  );
+  await screen.findByRole("option", { name: "Ana Pérez", exact: true });
+  const next = screen.getByRole("button", { name: "Siguiente", exact: true });
+  expect(next).toBeEnabled();
+  fireEvent.click(next);
+  const secondPageRecord = await screen.findByRole("option", {
+    name: "Contacto 2",
+    exact: true,
+  });
+  expect(next).toBeDisabled();
+  fireEvent.click(secondPageRecord);
+  fireEvent.change(screen.getByLabelText(/Nombre/), {
+    target: { value: "Prueba" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Guardar registro" }));
+  await waitFor(() => expect(done).toHaveBeenCalled());
+  expect(api).toHaveBeenCalledWith("/record-links/test/new-1/r1", "POST", {
+    targetId: "c2",
+  });
+});
+
 it("retries linking using the already created record instead of creating again", async () => {
   responses(true);
   const saved = { id: "new-1", name: "Prueba", _version: 1 };

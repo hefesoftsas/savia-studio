@@ -6,6 +6,7 @@ import { useTenantBranding } from "@/features/tenant-branding/tenant-branding-pr
 import {
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -84,6 +85,8 @@ import { LucideLookupIcon } from "@/features/studio-engine/lucide-lookup-icon";
 import { UserMenu } from "@/components/admin/user-menu";
 import { SidebarFlowsSkeleton } from "@/components/admin/page-skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
+import { isReadAccessDenied } from "@/queries/read-state";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { useAppServices } from "@/features/assistant/assistant-context";
 import { useSaviaRequestWorkspace } from "@/features/savia-request/savia-request-provider";
@@ -334,6 +337,7 @@ export function AppSidebar() {
   const currentTenant = useCurrentTenant();
   const { branding } = useTenantBranding();
   const services = useAppServices();
+  const preferences = services.userPreferences;
   const { openMobile, setOpenMobile, state } = useSidebar();
   const { active: saviaRequestActive } = useSaviaRequestWorkspace();
   const {
@@ -342,9 +346,13 @@ export function AppSidebar() {
     itemsById: staticItems,
   } = useVisibleSidebarNavigation();
   const location = useLocation();
-  const { children: studioChildren, tenantId } = useStudioSidebarNavigation(
-    Boolean(staticItems["studio"]),
-  );
+  const {
+    children: studioChildren,
+    tenantId,
+    metadataReadFailed,
+    metadataRetrying,
+    retryMetadata,
+  } = useStudioSidebarNavigation(Boolean(staticItems["studio"]));
   const pageAdmin = studioChildren.find((child) => child.id === "studio:admin");
   const itemsById = useMemo(() => {
     const items = { ...staticItems };
@@ -445,8 +453,13 @@ export function AppSidebar() {
     >;
   }, [studioChildren, tenantId]);
   const [search, setSearch] = useState("");
-  const [organizationMode, setOrganizationMode] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [organizing, setOrganizationMode] = useState(false);
+  const [savingOperation, setSavingOperation] = useState<{
+    client: typeof preferences;
+  }>();
+  const saving = Boolean(
+    savingOperation && savingOperation.client === preferences,
+  );
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeDragId, setActiveDragId] =
     useState<SidebarNavigationItemId | null>(null);
@@ -460,10 +473,25 @@ export function AppSidebar() {
   const [sectionDropTarget, setSectionDropTarget] = useState<{
     beforeBlockId: string | null;
   } | null>(null);
-  const [layout, setLayout] = useState<SidebarNavigationLayout | null>(null);
-  const [confirmedLayout, setConfirmedLayout] =
-    useState<SidebarNavigationLayout | null>(null);
-  const didLoadPreferences = useRef(false);
+  const [navigation, setNavigation] = useState<{
+    client: typeof preferences;
+    layout: SidebarNavigationLayout | null;
+    confirmed: SidebarNavigationLayout | null;
+    failed: boolean;
+  }>();
+  const currentNavigation =
+    navigation?.client === preferences ? navigation : undefined;
+  const layout = currentNavigation?.layout ?? null;
+  const confirmedLayout = currentNavigation?.confirmed ?? null;
+  const preferencesReadFailed = currentNavigation?.failed === true;
+  const [readingPreferences, setReadingPreferences] = useState(false);
+  const activePreferences = useRef(preferences);
+  activePreferences.current = preferences;
+  const readRevision = useRef(0);
+  const saveInFlight = useRef<typeof savingOperation>(undefined);
+  const canPersistLayout =
+    !preferences || Boolean(confirmedLayout && !preferencesReadFailed);
+  const organizationMode = organizing && canPersistLayout;
   const visibleItemIds = useMemo(
     () =>
       Object.keys(itemsById).filter((id): id is SidebarNavigationItemId =>
@@ -503,7 +531,12 @@ export function AppSidebar() {
   );
   const searching = search.trim().length > 0;
   const canOrganize =
-    !isLoading && state === "expanded" && !searching && !saving;
+    !isLoading &&
+    state === "expanded" &&
+    !searching &&
+    !saving &&
+    !readingPreferences &&
+    canPersistLayout;
   const activeDragSectionTitle = useMemo(() => {
     if (!activeDragSectionId) return null;
     const block = displayedLayout.blocks.find(
@@ -519,46 +552,62 @@ export function AppSidebar() {
     return block.label;
   }, [activeDragSectionId, displayedLayout.blocks, translate]);
 
-  useEffect(() => {
-    if (isLoading || didLoadPreferences.current) return;
-    didLoadPreferences.current = true;
-    const fallback = defaultSidebarNavigationLayout();
-    const preferences = services.userPreferences;
-    if (!preferences) {
-      setLayout(fallback);
-      setConfirmedLayout(fallback);
-      return;
+  const reloadPreferences = useCallback(async () => {
+    if (!preferences || saveInFlight.current?.client === preferences) return;
+    const request = ++readRevision.current;
+    const isCurrent = () =>
+      request === readRevision.current &&
+      activePreferences.current === preferences;
+    setReadingPreferences(true);
+    try {
+      const saved = await preferences.getSidebarNavigation();
+      if (!isCurrent()) return;
+      const upgraded = upgradeSidebarNavigationPreset(saved);
+      setNavigation({
+        client: preferences,
+        layout: upgraded,
+        confirmed: upgraded,
+        failed: false,
+      });
+    } catch (error) {
+      if (!isCurrent()) return;
+      const denied = isReadAccessDenied(error);
+      setNavigation((previous) => {
+        const retained =
+          !denied && previous?.client === preferences ? previous : undefined;
+        return {
+          client: preferences,
+          layout: retained?.layout ?? null,
+          confirmed: retained?.confirmed ?? null,
+          failed: true,
+        };
+      });
+      setOrganizationMode(false);
+    } finally {
+      if (isCurrent()) setReadingPreferences(false);
     }
+  }, [preferences]);
 
-    let active = true;
-    void preferences.getSidebarNavigation().then(
-      (saved) => {
-        if (!active) return;
-        const upgraded = upgradeSidebarNavigationPreset(saved);
-        setLayout(upgraded);
-        setConfirmedLayout(upgraded);
-      },
-      () => {
-        if (!active) return;
-        setLayout(fallback);
-        setConfirmedLayout(fallback);
-      },
-    );
+  useEffect(() => {
+    if (!preferences) setReadingPreferences(false);
+    else if (!isLoading) void reloadPreferences();
     return () => {
-      active = false;
+      readRevision.current += 1;
     };
-  }, [isLoading, services.userPreferences]);
+  }, [isLoading, preferences, reloadPreferences]);
+
+  useEffect(() => {
+    setOrganizationMode(false);
+    return () => {
+      saveInFlight.current = undefined;
+    };
+  }, [preferences]);
 
   useRealtimeRefresh({
     topics: ["account"],
-    blocked: saving || Boolean(activeDragSectionId),
-    refresh: async () => {
-      const saved = await services.userPreferences?.getSidebarNavigation();
-      if (!saved) return;
-      const upgraded = upgradeSidebarNavigationPreset(saved);
-      setLayout(upgraded);
-      setConfirmedLayout(upgraded);
-    },
+    enabled: !isLoading && Boolean(preferences),
+    blocked: saving || organizationMode,
+    refresh: reloadPreferences,
   });
 
   const closeMobileSidebar = () => {
@@ -568,9 +617,15 @@ export function AppSidebar() {
   // fija en lugar del layout fallback: así el paso a fallback→guardado no
   // reordena ítems visibles (CLS 0.07 en el trace) sino esqueleto→final.
   const preferencesLoading =
-    layout === null && Boolean(services.userPreferences);
+    Boolean(preferences) && !confirmedLayout && !preferencesReadFailed;
 
   const persistLayout = async (nextLayout: SidebarNavigationLayout) => {
+    if (
+      !canPersistLayout ||
+      activePreferences.current !== preferences ||
+      (saveInFlight.current && saveInFlight.current.client === preferences)
+    )
+      return;
     const lastConfirmed = confirmedLayout ?? displayedLayout;
     const preservedItems = lastConfirmed.blocks.flatMap((block) =>
       blockItems(block).filter(
@@ -604,29 +659,54 @@ export function AppSidebar() {
         };
       }
     }
+    const operation = { client: preferences };
+    saveInFlight.current = operation;
+    const isCurrent = () =>
+      saveInFlight.current === operation &&
+      activePreferences.current === preferences;
+    readRevision.current += 1;
+    setReadingPreferences(false);
     setSaveError(null);
-    setLayout(nextLayout);
-    setSaving(true);
+    setNavigation({
+      client: preferences,
+      layout: nextLayout,
+      confirmed: lastConfirmed,
+      failed: false,
+    });
+    setSavingOperation(operation);
     try {
-      const preferences = services.userPreferences;
       const saved = preferences
         ? await preferences.saveSidebarNavigation(nextLayout)
         : nextLayout;
-      setLayout(saved);
-      setConfirmedLayout(saved);
-    } catch (error) {
-      setLayout(lastConfirmed);
+      if (!isCurrent()) return;
+      setNavigation({
+        client: preferences,
+        layout: saved,
+        confirmed: saved,
+        failed: false,
+      });
+    } catch {
+      if (!isCurrent()) return;
+      setNavigation({
+        client: preferences,
+        layout: lastConfirmed,
+        confirmed: lastConfirmed,
+        failed: false,
+      });
       const message = translate(navigationSaveErrorKey);
       setSaveError(message);
       toast.error(message);
     } finally {
-      setSaving(false);
+      if (saveInFlight.current === operation) {
+        saveInFlight.current = undefined;
+        setSavingOperation(undefined);
+      }
     }
   };
 
   const toggleSection = (blockId: string, collapsed: boolean) => {
     if (saving || organizationMode || searching) return;
-    void persistLayout({
+    const next: SidebarNavigationLayout = {
       ...displayedLayout,
       version: 2,
       ...(displayedLayout.hiddenItems
@@ -635,7 +715,15 @@ export function AppSidebar() {
       blocks: displayedLayout.blocks.map((block) =>
         blockKey(block) === blockId ? { ...block, collapsed } : block,
       ),
-    });
+    };
+    if (canPersistLayout) void persistLayout(next);
+    else
+      setNavigation({
+        client: preferences,
+        layout: next,
+        confirmed: confirmedLayout,
+        failed: preferencesReadFailed,
+      });
   };
 
   const toggleVisibility = (itemId: SidebarNavigationItemId) => {
@@ -946,6 +1034,20 @@ export function AppSidebar() {
               </Button>
             </div>
           ) : null}
+          {preferencesReadFailed ? (
+            <ReadRefreshStatus
+              refreshing={readingPreferences}
+              error={translate("savia.sidebar.loadOrderError")}
+              onRetry={() => void reloadPreferences()}
+            />
+          ) : null}
+          {metadataReadFailed ? (
+            <ReadRefreshStatus
+              refreshing={metadataRetrying}
+              error={translate("savia.sidebar.loadScreensError")}
+              onRetry={retryMetadata}
+            />
+          ) : null}
           {saveError ? (
             <div className="flex items-start gap-1.5 px-1" role="alert">
               <p className="min-w-0 flex-1 text-xs text-destructive">
@@ -1076,7 +1178,9 @@ export function AppSidebar() {
                       onToggleCollapsed={(collapsed) =>
                         toggleSection(blockId, collapsed)
                       }
-                      onToggleVisibility={toggleVisibility}
+                      onToggleVisibility={
+                        canPersistLayout ? toggleVisibility : undefined
+                      }
                       onRename={
                         block.kind === "custom"
                           ? (label) =>
@@ -1208,7 +1312,7 @@ function NavigationSection({
   onRename?: (label: string) => void;
   onRemove?: () => void;
   onToggleCollapsed(collapsed: boolean): void;
-  onToggleVisibility(itemId: SidebarNavigationItemId): void;
+  onToggleVisibility?: (itemId: SidebarNavigationItemId) => void;
   previousBlockId?: string;
   nextBlockId?: string;
 }) {
@@ -1505,7 +1609,7 @@ function SortableNavigationItem({
           <Button
             size="icon"
             variant="ghost"
-            disabled={saving}
+            disabled={saving || !onToggleVisibility}
             aria-label={translate("savia.sidebar.showItem", {
               item: item.label,
             })}

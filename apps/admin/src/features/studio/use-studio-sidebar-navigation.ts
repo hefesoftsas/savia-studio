@@ -31,6 +31,9 @@ import {
 export function useStudioSidebarNavigation(enabled: boolean): {
   tenantId?: number;
   children: StudioSidebarChild[];
+  metadataReadFailed: boolean;
+  metadataRetrying: boolean;
+  retryMetadata: () => void;
 } {
   const services = useAppServices();
   const readsPaused = useSessionReadsPaused();
@@ -74,6 +77,10 @@ export function useStudioSidebarNavigation(enabled: boolean): {
       | { status: "denied" }
     )
   >();
+  const [metadataFailure, setMetadataFailure] = useState<{
+    scope: TenantScope;
+    retrying: boolean;
+  }>();
   const metadataRead = useRef<{
     scope: TenantScope;
     controller: AbortController;
@@ -105,25 +112,26 @@ export function useStudioSidebarNavigation(enabled: boolean): {
       active = false;
     };
   }, [catalogScope, catalogVersion]);
-  const [remoteRefresh, setRemoteRefresh] = useState<{
+  const [refresh, setRefresh] = useState<{
     scope: TenantScope;
     revision: number;
   }>();
-  const remoteRevision =
-    remoteRefresh?.scope === tenantScope ? (remoteRefresh?.revision ?? 0) : 0;
+  const refreshRevision =
+    refresh?.scope === tenantScope ? (refresh?.revision ?? 0) : 0;
+  const retryMetadata = () => {
+    if (!tenantScope) return;
+    setRefresh((previous) => ({
+      scope: tenantScope,
+      revision: previous?.scope === tenantScope ? previous.revision + 1 : 1,
+    }));
+  };
   useRealtimeRefresh({
     topics: ["studio", "records"],
     tenantId,
     enabled: Boolean(tenantScope),
     refreshScope: tenantScope,
     refreshOnInitialConnect: Boolean(services.localData),
-    refresh: () => {
-      if (!tenantScope) return;
-      setRemoteRefresh((previous) => ({
-        scope: tenantScope,
-        revision: previous?.scope === tenantScope ? previous.revision + 1 : 1,
-      }));
-    },
+    refresh: retryMetadata,
   });
   useEffect(() => {
     if (!tenantScope) return;
@@ -132,13 +140,18 @@ export function useStudioSidebarNavigation(enabled: boolean): {
     const { signal } = controller;
     const request = { scope: tenantScope, controller };
     metadataRead.current = request;
+    setMetadataFailure((previous) =>
+      previous?.scope === tenantScope
+        ? { scope: tenantScope, retrying: true }
+        : previous,
+    );
     const load = () =>
       services.apiClient.get<{ data: unknown[] }>(
         `${apiBasePath}/api/objects`,
         { signal },
       );
     void (
-      services.localData && remoteRevision === 0 && catalogRevision === 0
+      services.localData && refreshRevision === 0 && catalogRevision === 0
         ? services.localData.cachedMetadata(`navigation:${apiBasePath}`, load)
         : load()
     )
@@ -160,16 +173,22 @@ export function useStudioSidebarNavigation(enabled: boolean): {
               ? previous.hubspotCount
               : undefined,
         }));
+        setMetadataFailure(undefined);
       })
       .catch((error: unknown) => {
-        if (!signal.aborted && isReadAccessDenied(error))
+        if (signal.aborted) return;
+        if (isReadAccessDenied(error)) {
           setSnapshot({ scope: tenantScope, status: "denied" });
+          setMetadataFailure(undefined);
+        } else {
+          setMetadataFailure({ scope: tenantScope, retrying: false });
+        }
       });
     return () => {
       controller.abort();
       if (metadataRead.current === request) metadataRead.current = undefined;
     };
-  }, [tenantScope, remoteRevision, catalogRevision]);
+  }, [tenantScope, refreshRevision, catalogRevision]);
   useEffect(() => {
     if (!tenantScope) return;
     const scope = tenantScope;
@@ -187,6 +206,7 @@ export function useStudioSidebarNavigation(enabled: boolean): {
         if (metadataRead.current?.scope === scope)
           metadataRead.current.controller.abort();
         setSnapshot({ scope, status: "denied" });
+        setMetadataFailure(undefined);
         return;
       }
       const objects = event.data.objects
@@ -205,6 +225,7 @@ export function useStudioSidebarNavigation(enabled: boolean): {
           ? previous
           : { scope, status: "ready", objects, hubspotCount },
       );
+      setMetadataFailure(undefined);
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -239,5 +260,13 @@ export function useStudioSidebarNavigation(enabled: boolean): {
         : item,
     );
   }, [canLoad, snapshot, tenantId, tenantScope, activeObject, locale]);
-  return { tenantId, children };
+  const currentFailure =
+    metadataFailure?.scope === tenantScope ? metadataFailure : undefined;
+  return {
+    tenantId,
+    children,
+    metadataReadFailed: Boolean(currentFailure),
+    metadataRetrying: currentFailure?.retrying ?? false,
+    retryMetadata,
+  };
 }

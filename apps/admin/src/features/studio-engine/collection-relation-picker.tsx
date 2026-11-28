@@ -15,6 +15,8 @@ import { api } from "./api";
 import { getStudioRuntime } from "./runtime";
 import { relationRecordLabel } from "./relation-record-label";
 
+const pageSize = 20;
+
 export function CollectionRelationPicker(props: IFieldProps) {
   const t = useMessages(recordsMessages);
 
@@ -56,10 +58,19 @@ export function CollectionRelationPicker(props: IFieldProps) {
     ],
     enabled: open && !!target,
     queryFn: () =>
-      api<{ data: Record<string, unknown>[]; total?: number }>(
-        `/records/${encodeURIComponent(target)}?${new URLSearchParams({ q: search, page: String(page), perPage: "20" })}`,
+      api<{
+        data: Record<string, unknown>[];
+        total?: number;
+        pageInfo?: { hasNextPage?: boolean };
+      }>(
+        `/records/${encodeURIComponent(target)}?${new URLSearchParams({ q: search, page: String(page), perPage: String(pageSize) })}`,
       ),
   });
+  const hasNextPage =
+    options.data?.pageInfo?.hasNextPage ??
+    (options.data?.total != null
+      ? page * pageSize < options.data.total
+      : (options.data?.data.length ?? 0) >= pageSize);
   const labels = useQuery({
     queryKey: [
       "relation-selected",
@@ -226,12 +237,7 @@ export function CollectionRelationPicker(props: IFieldProps) {
               type="button"
               size="sm"
               variant="ghost"
-              disabled={
-                options.isFetching ||
-                (options.data?.total != null
-                  ? page * 20 >= options.data.total
-                  : (options.data?.data.length ?? 0) < 20)
-              }
+              disabled={options.isFetching || !hasNextPage}
               onClick={() => setPage(page + 1)}
             >
               {t("Siguiente")}

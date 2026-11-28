@@ -44,6 +44,8 @@ footer shows zero results for the empty page, even when the collection total
 is known. The tracked `ra-core` patch uses the provider's
 continuation metadata to keep valid pages accessible. HubSpot row ranges use
 the number of records read on previous pages, including after short pages.
+When selecting a related record in a form, **Next** follows the collection's
+pagination metadata, including when a page is short or the total is unknown.
 
 Linked collections open in the table view. Older saved pipeline views still
 apply their supported table settings, with stage filters omitted.
