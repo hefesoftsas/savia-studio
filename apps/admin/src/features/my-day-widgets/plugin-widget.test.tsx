@@ -99,64 +99,6 @@ describe("PluginWidgetBody", () => {
     expect(get).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps the plugin frame mounted after transient catalog refresh fails and during retry", async () => {
-    let rejectRefresh!: (error: ApiClientError) => void;
-    let resolveRetry!: (value: ReturnType<typeof catalog>) => void;
-    const pending = new Promise<never>((_resolve, reject) => {
-      rejectRefresh = reject;
-    });
-    const retry = new Promise<ReturnType<typeof catalog>>((resolve) => {
-      resolveRetry = resolve;
-    });
-    const get = vi
-      .fn()
-      .mockResolvedValueOnce(catalog(true))
-      .mockReturnValueOnce(pending)
-      .mockReturnValueOnce(retry);
-    render(
-      <PluginWidgetBody apiClient={apiWithCatalog(get)} widget={widget} />,
-    );
-
-    const frame = await screen.findByTitle("Proyectos");
-    act(() => realtime.refresh?.());
-    expect(screen.getByTitle("Proyectos")).toBe(frame);
-    await act(async () =>
-      rejectRefresh(new ApiClientError(503, "UNAVAILABLE", "Unavailable")),
-    );
-    expect(screen.getByTitle("Proyectos")).toBe(frame);
-
-    fireEvent.click(screen.getByRole("button", { name: "Reintentar" }));
-    expect(screen.getByTitle("Proyectos")).toBe(frame);
-    await act(async () => resolveRetry(catalog(true)));
-    await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "Reintentar" })).toBeNull(),
-    );
-    expect(screen.getByTitle("Proyectos")).toBe(frame);
-    expect(get).toHaveBeenCalledTimes(3);
-  });
-
-  it.each([401, 403, 404, 410])(
-    "hides the previously loaded frame after a catalog read returns %s",
-    async (status) => {
-      const get = vi
-        .fn()
-        .mockResolvedValueOnce(catalog(true))
-        .mockRejectedValueOnce(
-          new ApiClientError(status, "ACCESS_ENDED", "Access ended"),
-        );
-      render(
-        <PluginWidgetBody apiClient={apiWithCatalog(get)} widget={widget} />,
-      );
-      await screen.findByTitle("Proyectos");
-
-      act(() => realtime.refresh?.());
-      expect(
-        await screen.findByRole("button", { name: "Reintentar" }),
-      ).toBeVisible();
-      expect(screen.queryByTitle("Proyectos")).toBeNull();
-    },
-  );
-
   it.each(["organization", "account", "API client"])(
     "rechecks installation before rendering a widget after changing the %s",
     async (change) => {
@@ -231,4 +173,62 @@ describe("PluginWidgetBody", () => {
     }
     expect(screen.getByText(enableMessage)).toBeVisible();
   });
+
+  it("keeps the plugin frame mounted after transient catalog refresh fails and during retry", async () => {
+    let rejectRefresh!: (error: ApiClientError) => void;
+    let resolveRetry!: (value: ReturnType<typeof catalog>) => void;
+    const pending = new Promise<never>((_resolve, reject) => {
+      rejectRefresh = reject;
+    });
+    const retry = new Promise<ReturnType<typeof catalog>>((resolve) => {
+      resolveRetry = resolve;
+    });
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce(catalog(true))
+      .mockReturnValueOnce(pending)
+      .mockReturnValueOnce(retry);
+    render(
+      <PluginWidgetBody apiClient={apiWithCatalog(get)} widget={widget} />,
+    );
+
+    const frame = await screen.findByTitle("Proyectos");
+    act(() => realtime.refresh?.());
+    expect(screen.getByTitle("Proyectos")).toBe(frame);
+    await act(async () =>
+      rejectRefresh(new ApiClientError(503, "UNAVAILABLE", "Unavailable")),
+    );
+    expect(screen.getByTitle("Proyectos")).toBe(frame);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reintentar" }));
+    expect(screen.getByTitle("Proyectos")).toBe(frame);
+    await act(async () => resolveRetry(catalog(true)));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Reintentar" })).toBeNull(),
+    );
+    expect(screen.getByTitle("Proyectos")).toBe(frame);
+    expect(get).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([401, 403, 404, 410])(
+    "hides the previously loaded frame after a catalog read returns %s",
+    async (status) => {
+      const get = vi
+        .fn()
+        .mockResolvedValueOnce(catalog(true))
+        .mockRejectedValueOnce(
+          new ApiClientError(status, "ACCESS_ENDED", "Access ended"),
+        );
+      render(
+        <PluginWidgetBody apiClient={apiWithCatalog(get)} widget={widget} />,
+      );
+      await screen.findByTitle("Proyectos");
+
+      act(() => realtime.refresh?.());
+      expect(
+        await screen.findByRole("button", { name: "Reintentar" }),
+      ).toBeVisible();
+      expect(screen.queryByTitle("Proyectos")).toBeNull();
+    },
+  );
 });
