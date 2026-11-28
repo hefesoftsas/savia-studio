@@ -36,7 +36,9 @@ visible with a notice that the list is incomplete and a retry action.
 
 Plugin widgets are offered only when their collection matches and their
 extension is enabled. If an extension becomes unavailable, its card explains
-how to restore it.
+how to restore it. A temporary catalog refresh failure keeps an open plugin
+widget running and offers **Retry**. Switching workspace or account, losing
+access, or removing the installation hides the previous widget.
 
 ## Add and arrange widgets
 

@@ -1,12 +1,14 @@
 import { useRealtimeRefresh } from "@/realtime/use-realtime-refresh";
 import { matchTenantApiBasePath } from "@/features/studio/studio-navigation";
-import { Component, useEffect, useMemo, useState } from "react";
+import { Component, useEffect, useMemo, useState, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
-import type { ApiClient } from "@/api/api-client";
+import { ApiClientError, type ApiClient } from "@/api/api-client";
 import { useSessionReadsPaused } from "@/auth/logout-progress";
 import { useSessionGeneration } from "@/auth/session-scope";
 import { useAppLocale, useMessages } from "@/i18n/core";
+import { isReadAccessDenied } from "@/queries/read-state";
 import type { MyDayWidget } from "@savia/studio-shared/my-day-widgets";
+import { ReadRefreshStatus } from "@/components/admin/read-refresh-status";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -90,12 +92,12 @@ export function PluginWidgetBody({
     () => ({ apiClient, apiBasePath, sessionGeneration, readsPaused }),
     [apiClient, apiBasePath, sessionGeneration, readsPaused],
   );
-  const [verification, setVerification] = useState<
-    { scope: typeof scope } & (
-      | { status: "ready"; extensions: ExtensionInstallation[] }
-      | { status: "failed"; revision: number }
-    )
-  >();
+  const [verification, setVerification] = useState<{
+    scope: typeof scope;
+    revision: number;
+    extensions?: ExtensionInstallation[];
+    failed: boolean;
+  }>();
   const [revision, setRevision] = useState(0);
   const retry = () => setRevision((value) => value + 1);
   const tenantId = matchTenantApiBasePath(apiBasePath);
@@ -116,11 +118,23 @@ export function PluginWidgetBody({
     void listWidgetExtensions(apiClient, apiBasePath, { signal }).then(
       (extensions) => {
         if (!signal.aborted)
-          setVerification({ scope, status: "ready", extensions });
+          setVerification({ scope, revision, extensions, failed: false });
       },
-      () => {
-        if (!signal.aborted)
-          setVerification({ scope, status: "failed", revision });
+      (reason: unknown) => {
+        if (signal.aborted) return;
+        const catalogUnavailable =
+          isReadAccessDenied(reason) ||
+          (reason instanceof ApiClientError &&
+            (reason.status === 404 || reason.status === 410));
+        setVerification((previous) => ({
+          scope,
+          revision,
+          extensions:
+            !catalogUnavailable && previous?.scope === scope
+              ? previous.extensions
+              : undefined,
+          failed: true,
+        }));
       },
     );
     return () => controller.abort();
@@ -136,7 +150,7 @@ export function PluginWidgetBody({
 
   const current = verification?.scope === scope ? verification : undefined;
   if (!ref || !current) return <PluginWidgetSkeleton />;
-  if (current.status === "failed") {
+  if (!current.extensions) {
     if (current.revision !== revision) return <PluginWidgetSkeleton />;
     const message = t("Could not verify this widget extension.");
     return (
@@ -156,8 +170,9 @@ export function PluginWidgetBody({
   // Tenant store installations take precedence over bundled contributions.
   const storeWidget = storeWidgetFor(ref, extensions);
   const storeDeclared = storeWidgetDeclarationFor(ref, extensions);
+  let content: ReactNode;
   if (storeWidget) {
-    return (
+    content = (
       <CustomPluginFrame
         pluginId={storeWidget.extensionId}
         installationVersion={
@@ -170,44 +185,56 @@ export function PluginWidgetBody({
         heightClassName="h-[320px]"
       />
     );
-  }
-  if (storeDeclared) {
-    return (
+  } else if (storeDeclared) {
+    content = (
       <p className="text-sm text-muted-foreground">
         {t("Enable the %{extension} extension to see this widget.", {
           extension: storeDeclared.title[locale] ?? storeDeclared.title.es,
         })}
       </p>
     );
-  }
-  if (!contribution) {
-    return (
+  } else if (!contribution) {
+    content = (
       <p className="text-sm text-muted-foreground">
         {t(
           "This widget type will be available soon. In the meantime, open the full collection.",
         )}
       </p>
     );
-  }
-  if (!savia) return <PluginWidgetSkeleton />;
-  const enabled = isPluginWidgetEnabled(contribution, extensions);
-  if (!enabled) {
-    return (
+  } else if (!savia) {
+    content = <PluginWidgetSkeleton />;
+  } else if (!isPluginWidgetEnabled(contribution, extensions)) {
+    content = (
       <p className="text-sm text-muted-foreground">
         {t("Enable the %{extension} extension to see this widget.", {
           extension: contribution.title[locale] ?? contribution.title.es,
         })}
       </p>
     );
+  } else {
+    const Widget = contribution.Widget;
+    content = (
+      <WidgetErrorBoundary
+        title={contribution.title[locale] ?? contribution.title.es}
+        translate={t}
+      >
+        <Widget savia={savia} widget={widget} />
+      </WidgetErrorBoundary>
+    );
   }
 
-  const Widget = contribution.Widget;
   return (
-    <WidgetErrorBoundary
-      title={contribution.title[locale] ?? contribution.title.es}
-      translate={t}
-    >
-      <Widget savia={savia} widget={widget} />
-    </WidgetErrorBoundary>
+    <>
+      <ReadRefreshStatus
+        refreshing={current.revision !== revision}
+        error={
+          current.failed
+            ? t("Could not verify this widget extension.")
+            : undefined
+        }
+        onRetry={retry}
+      />
+      {content}
+    </>
   );
 }
