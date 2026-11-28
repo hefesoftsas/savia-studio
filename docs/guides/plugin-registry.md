@@ -94,11 +94,12 @@ finish. Connection settings keep the latest connection list after a save or
 removal.
 
 The shared catalog restores imported and active statuses from the current
-workspace inventory when it finds the same version and ZIP digest. If an
-import or installation succeeds while refreshing the workspace list fails,
-the catalog keeps the confirmed status even if an earlier workspace read
-completed while the change was pending. **Refresh plugin list** retries the
-workspace read without repeating the import or installation.
+workspace inventory when it finds the same version and ZIP digest. If a local
+or shared catalog change succeeds and the inventory refresh fails, Studio
+reports that the change was saved. **Refresh plugin list** reloads the
+inventory and updates Studio without repeating the change. Plugin changes
+are available again after refresh succeeds. If the workspace denies access,
+Studio hides the previous inventory while offering the same recovery action.
 
 ## Publish once and promote identical bytes
 

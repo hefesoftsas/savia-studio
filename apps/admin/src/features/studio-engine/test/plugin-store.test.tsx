@@ -187,6 +187,98 @@ it("lista, instala y muestra un plugin del store", async () => {
   await waitFor(() => expect(changed).toHaveBeenCalled());
 });
 
+it("retries the inventory read without repeating a confirmed installation", async () => {
+  let installed: { enabled: boolean; version: string } | null = null;
+  let canRead = false;
+  vi.mocked(api).mockImplementation(async (path, method) => {
+    if (path === "/plugin-store/registry")
+      return { configured: false, data: [], cursor: null };
+    if (path === "/plugin-store") {
+      if (installed && !canRead) throw new Error("Workspace list unavailable");
+      return { data: [{ ...item, installed }] };
+    }
+    if (path === "/extensions/custom.demo/install" && method === "POST") {
+      installed = { enabled: true, version: item.version };
+      return { data: { id: item.manifest.id, ...installed } };
+    }
+    throw new Error(`Unexpected API request: ${method} ${path}`);
+  });
+  const changed = vi.fn();
+  renderStore({ onChanged: changed });
+  const install = await screen.findByRole("button", { name: "Instalar Demo" });
+
+  fireEvent.click(install);
+  const notice = await screen.findByText(
+    "El cambio se guardó. No pudimos actualizar la lista de plugins.",
+  );
+  const retry = screen.getByRole("button", {
+    name: "Actualizar lista de plugins",
+  });
+  expect(install).toBeDisabled();
+  expect(changed).not.toHaveBeenCalled();
+
+  await act(async () => fireEvent.click(retry));
+  expect(notice).toBeVisible();
+  expect(install).toBeDisabled();
+  canRead = true;
+  fireEvent.click(retry);
+
+  expect(
+    await screen.findByRole("button", { name: "Desactivar Demo" }),
+  ).toBeEnabled();
+  expect(notice).not.toBeInTheDocument();
+  expect(changed).toHaveBeenCalledOnce();
+  expect(
+    vi.mocked(api).mock.calls.filter(([, method]) => method === "POST"),
+  ).toEqual([["/extensions/custom.demo/install", "POST"]]);
+});
+
+it("clears denied inventory after a confirmed deletion and reconciles on retry", async () => {
+  let deleted = false;
+  let canRead = false;
+  const denied = Object.assign(new Error("Access revoked"), { status: 403 });
+  vi.mocked(api).mockImplementation(async (path, method) => {
+    if (path === "/plugin-store/registry")
+      return { configured: false, data: [], cursor: null };
+    if (path === "/plugin-store") {
+      if (deleted && !canRead) throw denied;
+      return { data: deleted ? [] : [item] };
+    }
+    if (path === "/plugin-store/custom.demo" && method === "DELETE") {
+      deleted = true;
+      return { data: { deleted: true } };
+    }
+    throw new Error(`Unexpected API request: ${method} ${path}`);
+  });
+  const changed = vi.fn();
+  renderStore({ onChanged: changed });
+  fireEvent.click(await screen.findByRole("button", { name: "Eliminar Demo" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Eliminar definitivamente" }),
+  );
+
+  const retry = await screen.findByRole("button", {
+    name: "Actualizar lista de plugins",
+  });
+  expect(screen.getByRole("alert")).toHaveTextContent("Access revoked");
+  expect(screen.queryByText("Demo")).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("Aún no subiste plugins a este espacio."),
+  ).not.toBeInTheDocument();
+  expect(changed).not.toHaveBeenCalled();
+
+  canRead = true;
+  fireEvent.click(retry);
+  expect(
+    await screen.findByText("Aún no subiste plugins a este espacio."),
+  ).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(changed).toHaveBeenCalledOnce();
+  expect(
+    vi.mocked(api).mock.calls.filter(([, method]) => method === "DELETE"),
+  ).toEqual([["/plugin-store/custom.demo", "DELETE"]]);
+});
+
 it("serializes plugin and connection changes through reconciliation", async () => {
   const second = {
     ...item,

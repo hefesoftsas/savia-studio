@@ -71,6 +71,33 @@ function pinnedReleaseKey(id: string, version: string, sha256: string) {
   return `${id}@${version}#${sha256}`;
 }
 
+export function PluginInventoryRefreshNotice({
+  disabled,
+  onRetry,
+}: {
+  disabled: boolean;
+  onRetry: () => void;
+}) {
+  const t = useMessages(messages);
+  return (
+    <div
+      role="status"
+      className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"
+    >
+      <p className="text-sm text-muted-foreground">{t("refreshFailed")}</p>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        disabled={disabled}
+        onClick={onRetry}
+      >
+        {t("refreshWorkspace")}
+      </Button>
+    </div>
+  );
+}
+
 /** Server-authorized catalog; credentials never enter browser state. */
 export function PluginRegistry({
   onImported,
@@ -262,19 +289,11 @@ export function PluginRegistry({
         </p>
       )}
       {refreshFailed && (
-        <div
-          role="status"
-          className="flex flex-wrap items-center justify-between gap-3 border-b px-6 py-4"
-        >
-          <p className="text-sm text-muted-foreground">{t("refreshFailed")}</p>
-          <Button
-            size="sm"
-            variant="outline"
+        <div className="border-b">
+          <PluginInventoryRefreshNotice
             disabled={operationPending}
-            onClick={() => void refreshWorkspace()}
-          >
-            {t("refreshWorkspace")}
-          </Button>
+            onRetry={() => void refreshWorkspace()}
+          />
         </div>
       )}
       {catalog?.configured && (
