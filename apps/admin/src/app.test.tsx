@@ -680,13 +680,15 @@ describe("App", () => {
   });
 
   it.each([
-    ["bookings", "https://clinic.savia-preview.hefesoft.com"],
-    ["BOOKINGS/", "https://clinic.savia-preview.hefesoft.com"],
-    ["bookings", "https://savia-preview.hefesoft.com"],
-    ["bookings", "http://127.0.0.1:5173"],
+    ["bookings", "https://clinic.savia-preview.hefesoft.com", "bookings"],
+    ["BOOKINGS/", "https://clinic.savia-preview.hefesoft.com", "bookings"],
+    ["bookings", "https://savia-preview.hefesoft.com", "bookings"],
+    ["bookings", "http://127.0.0.1:5173", "bookings"],
+    ["studio", "https://clinic.savia-preview.hefesoft.com", "studio"],
+    ["crm", "http://127.0.0.1:5173", "studio"],
   ])(
     "carries %s through React Admin's login route at %s",
-    async (route, origin) => {
+    async (route, origin, resume) => {
       const services = createServices();
       const redirect = vi.fn();
       const session = new BetterAuthOAuthSession({
@@ -704,7 +706,11 @@ describe("App", () => {
         .fn()
         .mockRejectedValue(new Error("Session expired"));
       services.authProvider.logout = vi.fn().mockResolvedValue("/login");
-      window.location.hash = `#/${route}?tab=reservations&date=2026-11-25`;
+      const query =
+        resume === "bookings"
+          ? "tab=reservations&date=2026-11-25"
+          : "tenantId=14&object=ventas&view=collection-sources";
+      window.location.hash = `#/${route}?${query}`;
 
       render(<App services={services} />);
 
@@ -714,10 +720,12 @@ describe("App", () => {
       expect(authorize.searchParams.get("return_to")).toBe(
         origin.startsWith("https://clinic.") ? origin : null,
       );
-      expect(authorize.searchParams.get("resume")).toBe("bookings");
-      expect(authorize.searchParams.get("booking_query")).toBe(
-        "tab=reservations&date=2026-11-25",
-      );
+      expect(authorize.searchParams.get("resume")).toBe(resume);
+      expect(
+        authorize.searchParams.get(
+          resume === "bookings" ? "booking_query" : "studio_query",
+        ),
+      ).toBe(query);
     },
   );
 
@@ -769,6 +777,21 @@ describe("App", () => {
       ),
     );
     expect(window.location.pathname).toBe("/");
+  });
+
+  it("resumes a Studio collection view after the OAuth callback", async () => {
+    const services = createServices();
+    const query = "tenantId=14&object=ventas&view=collection-sources";
+    services.authSession.handleCallback = vi.fn().mockResolvedValue({
+      returnOrigin: window.location.origin,
+      returnRoute: "studio",
+      returnStudioQuery: query,
+    });
+    window.history.replaceState({}, "", "/auth/callback?code=code&state=state");
+
+    render(<App services={services} />);
+
+    await waitFor(() => expect(window.location.hash).toBe(`#/studio?${query}`));
   });
 
   it("keeps the local organization selection in Bookings and handles denied access", async () => {

@@ -1,4 +1,8 @@
 import type { UserIdentity } from "ra-core";
+import type {
+  AdminResume,
+  AdminResumeRoute,
+} from "@savia/tenant-host/admin-resume";
 
 export type TenantMembershipPermission = {
   tenantId: number;
@@ -21,8 +25,9 @@ export type AuthPermissions = {
 
 export type CallbackResult = {
   returnOrigin?: string;
-  returnRoute?: "bookings";
+  returnRoute?: AdminResumeRoute;
   returnBookingQuery?: string;
+  returnStudioQuery?: string;
 };
 
 export class OAuthCallbackError extends Error {
@@ -35,7 +40,7 @@ export class OAuthCallbackError extends Error {
 }
 
 export interface AuthSession {
-  login(bookingQuery?: string): Promise<void>;
+  login(destination?: AdminResume): Promise<void>;
   logout(): Promise<string>;
   getAuthorizeUrl(): string;
   handleCallback(): Promise<CallbackResult | void>;

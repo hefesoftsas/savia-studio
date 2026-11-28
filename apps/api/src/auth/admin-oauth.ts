@@ -7,9 +7,12 @@ import {
 } from "@savia/tenant-host/tenant-host";
 import type { AuthService } from "./better-auth";
 import {
-  bookingQueryFromOAuthState,
-  normalizeBookingRouteQuery,
-} from "@savia/tenant-host/bookings-route";
+  adminResumeQueryParam,
+  isAdminResumeRoute,
+  readAdminOAuthState,
+  readAdminResume,
+  type AdminResume,
+} from "@savia/tenant-host/admin-resume";
 
 type AdminOAuthClient = {
   clientId: string;
@@ -38,7 +41,6 @@ const transactionLifetimeMilliseconds = 5 * 60 * 1000;
 const transactionRecoveryMilliseconds = 5 * 60 * 1000;
 const authProviderTimeoutMilliseconds = 10_000;
 const authClientLookupTimeoutMilliseconds = 4_000;
-const bookingsStateSuffix = ".bookings";
 const refreshCookieName = "savia.admin_refresh_token";
 const refreshCookiePath = "/api/auth/admin";
 const refreshTokenLifetimeSeconds = 30 * 24 * 60 * 60;
@@ -365,15 +367,14 @@ async function createTransaction(
   d1: D1Database,
   client: AdminOAuthClient,
   initiatedOrigin: string,
-  bookingStateQuery: string | undefined,
+  destination: AdminResume | undefined,
 ): Promise<{ codeChallenge: string; state: string }> {
   // Bind the allowlisted destination to the one-time server-side transaction.
   const state =
     randomValue() +
-    (bookingStateQuery === undefined
-      ? ""
-      : bookingsStateSuffix +
-        (bookingStateQuery ? `?${bookingStateQuery}` : ""));
+    (destination
+      ? `.${destination.route}${destination.query ? `?${destination.query}` : ""}`
+      : "");
   const codeVerifier = randomValue(64);
   const now = new Date();
   const expiresAt = new Date(
@@ -704,20 +705,21 @@ export function registerAdminOAuthRoutes(
       (isAllowedPublicOrigin(new URL(context.req.url).origin, canonicalHost)
         ? new URL(context.req.url).origin
         : new URL(client.redirectUri).origin);
-    let bookingStateQuery: string | undefined;
-    if (context.req.query("resume") === "bookings") {
-      const navigation = new URLSearchParams(
-        normalizeBookingRouteQuery(context.req.query("booking_query") ?? ""),
-      );
-      if (targetOrigin) navigation.set("return_to", targetOrigin);
-      bookingStateQuery = navigation.toString();
+    const route = context.req.query("resume");
+    const resume = isAdminResumeRoute(route)
+      ? readAdminResume(route, context.req.query(adminResumeQueryParam[route]))
+      : undefined;
+    if (resume && targetOrigin) {
+      const navigation = new URLSearchParams(resume.query);
+      navigation.set("return_to", targetOrigin);
+      resume.query = navigation.toString();
     }
     phaseStarted = performance.now();
     const transaction = await createTransaction(
       d1,
       client,
       initiatedOrigin,
-      bookingStateQuery,
+      resume,
     );
     const transactionDuration = performance.now() - phaseStarted;
     const authorization = new URL(
@@ -860,19 +862,24 @@ export function registerAdminOAuthRoutes(
     )
       ? transaction.initiatedOrigin
       : undefined;
-    const bookingQuery = bookingQueryFromOAuthState(input.state);
-    const bookingDestination =
-      bookingQuery !== undefined
+    const resume = readAdminOAuthState(input.state);
+    const destination =
+      resume
         ? {
             returnOrigin,
-            returnRoute: "bookings",
-            ...(bookingQuery ? { returnBookingQuery: bookingQuery } : {}),
+            returnRoute: resume.route,
+            ...(resume.route === "bookings" && resume.query && {
+              returnBookingQuery: resume.query,
+            }),
+            ...(resume.route === "studio" && resume.query && {
+              returnStudioQuery: resume.query,
+            }),
           }
         : undefined;
     // A recently expired transaction can only supply navigation for a new login.
     if (transaction.expired)
       return Response.json(
-        { ...invalidState, ...bookingDestination },
+        { ...invalidState, ...destination },
         { status: 400, headers },
       );
     const domain = cookieDomain(context.req.url);
@@ -886,7 +893,7 @@ export function registerAdminOAuthRoutes(
             code: "OAUTH_AUTHORIZATION_FAILED",
             message: "The authorization request did not complete",
           },
-          ...bookingDestination,
+          ...destination,
         },
         { status: 401, headers },
       );
@@ -920,7 +927,7 @@ export function registerAdminOAuthRoutes(
             code: "AUTHENTICATION_UNAVAILABLE",
             message: "Authentication service is temporarily unavailable",
           },
-          ...bookingDestination,
+          ...destination,
         },
         { status: 503, headers },
       );
@@ -942,7 +949,7 @@ export function registerAdminOAuthRoutes(
               ? `Better Auth rejected the authorization code (${providerError})`
               : "Better Auth rejected the authorization code",
           },
-          ...bookingDestination,
+          ...destination,
         },
         { status: 401, headers },
       );
@@ -965,7 +972,7 @@ export function registerAdminOAuthRoutes(
       {
         ...publicTokenResponse(token),
         ...(returnOrigin ? { returnOrigin } : {}),
-        ...bookingDestination,
+        ...destination,
       },
       { headers },
     );

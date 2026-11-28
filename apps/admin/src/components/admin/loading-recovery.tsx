@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { adminAuthorizeUrl } from "@/auth/admin-authorize-url";
+import type { AdminResume } from "@savia/tenant-host/admin-resume";
 import { Button } from "@/components/ui/button";
 import { defaultAppLocale, isAppLocale } from "@/i18n/app-locale";
 import { translateMessage } from "@/i18n/core";
@@ -7,9 +8,9 @@ import { loadingMessages } from "@/i18n/locales/loading";
 
 export const LOADING_RECOVERY_DELAY_MS = 15_000;
 
-export function getAdminAuthorizeUrl(bookingQuery?: string): string {
+export function getAdminAuthorizeUrl(destination?: AdminResume): string {
   const apiUrl = import.meta.env.VITE_SAVIA_API_URL ?? window.location.origin;
-  return adminAuthorizeUrl(apiUrl, window.location.href, bookingQuery);
+  return adminAuthorizeUrl(apiUrl, window.location.href, destination);
 }
 
 function getRecoveryCopy() {

@@ -501,6 +501,11 @@ const oauthUiScript = String.raw`(() => {
       "BACKUP_CODES_NOT_ENABLED",
     ];
     if (!(error instanceof Error)) return false;
+    if (formKind === "consent" && error.status === 401 && oauthQuery) {
+      // Sign in again for the same signed client request.
+      navigateTo("/api/auth/login?" + oauthQuery, true);
+      return true;
+    }
     const enrollmentSessionExpired = formKind === "enable-totp" && error.status === 401;
     return (enrollmentSessionExpired || restartCodes.includes(error.code)) && restartAuthorization();
   }

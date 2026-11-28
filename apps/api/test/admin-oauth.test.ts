@@ -849,6 +849,42 @@ describe("admin OAuth bridge", () => {
       });
     });
 
+    it("returns Studio screens and retry navigation from the initiating transaction", async () => {
+      const f = fixture();
+      const search = new URLSearchParams({
+        resume: "studio",
+        return_to: tenantOrigin,
+        studio_query:
+          "tenantId=14&object=ventas&view=collection-sources&tab=sources&ignored=1",
+      });
+      const callback = await f.signIn(canonicalOrigin, "", `?${search}`);
+      expect(callback.status).toBe(200);
+      const destination = {
+        returnOrigin: tenantOrigin,
+        returnRoute: "studio",
+        returnStudioQuery:
+          "tenantId=14&object=ventas&view=collection-sources&tab=sources",
+      };
+      expect(await callback.json()).toMatchObject(destination);
+
+      const authorize = await f.app.request(
+        `${canonicalOrigin}/api/auth/admin/authorize?${search}`,
+      );
+      const state = new URL(authorize.headers.get("location")!).searchParams.get(
+        "state",
+      );
+      const failure = await f.app.request(
+        `${canonicalOrigin}/api/auth/admin/callback`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: canonicalOrigin },
+          body: JSON.stringify({ authorizationFailed: true, state }),
+        },
+      );
+      expect(failure.status).toBe(401);
+      expect(await failure.json()).toMatchObject(destination);
+    });
+
     it("retains a same-origin Bookings organization through the local OAuth callback", async () => {
       const localOrigin = "http://127.0.0.1:5173";
       const f = fixture(localOrigin);

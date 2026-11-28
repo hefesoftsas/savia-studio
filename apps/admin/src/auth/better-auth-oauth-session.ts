@@ -1,6 +1,9 @@
 import type { UserIdentity } from "ra-core";
 import { isAllowedTenantOrigin } from "@savia/tenant-host";
-import { normalizeBookingRouteQuery } from "@savia/tenant-host/bookings-route";
+import {
+  readAdminResume,
+  type AdminResume,
+} from "@savia/tenant-host/admin-resume";
 import { adminAuthorizeUrl } from "./admin-authorize-url";
 import { getSessionGeneration, rotateSessionScope } from "./session-scope";
 import { isOfflineError } from "../offline/offline-error";
@@ -36,7 +39,17 @@ type CallbackDestination = {
   returnOrigin?: unknown;
   returnRoute?: unknown;
   returnBookingQuery?: unknown;
+  returnStudioQuery?: unknown;
 };
+
+function readCallbackResume(payload?: CallbackDestination) {
+  return readAdminResume(
+    payload?.returnRoute,
+    payload?.returnRoute === "studio"
+      ? payload.returnStudioQuery
+      : payload?.returnBookingQuery,
+  );
+}
 
 type IdentityResponse = {
   data?: {
@@ -206,16 +219,16 @@ export class BetterAuthOAuthSession implements AuthSession {
     }
   }
 
-  getAuthorizeUrl(bookingQuery?: string): string {
+  getAuthorizeUrl(destination?: AdminResume): string {
     return adminAuthorizeUrl(
       this.settings.apiUrl,
       this.navigation.currentUrl(),
-      bookingQuery,
+      destination,
     );
   }
 
-  async login(bookingQuery?: string): Promise<void> {
-    this.navigation.redirect(this.getAuthorizeUrl(bookingQuery));
+  async login(destination?: AdminResume): Promise<void> {
+    this.navigation.redirect(this.getAuthorizeUrl(destination));
   }
 
   async logout(): Promise<string> {
@@ -398,21 +411,16 @@ export class BetterAuthOAuthSession implements AuthSession {
       const payload = (await response.json().catch(() => undefined)) as
         (OAuthErrorPayload & CallbackDestination) | undefined;
       const message = oauthErrorMessage(response, payload);
-      if (payload?.returnRoute === "bookings") {
+      const resume = readCallbackResume(payload);
+      if (resume) {
         const destination =
-          typeof payload.returnOrigin === "string" &&
+          typeof payload?.returnOrigin === "string" &&
           isAllowedTenantOrigin(payload.returnOrigin)
             ? payload.returnOrigin
             : callback.href;
         throw new OAuthCallbackError(
           message,
-          adminAuthorizeUrl(
-            this.settings.apiUrl,
-            destination,
-            typeof payload.returnBookingQuery === "string"
-              ? payload.returnBookingQuery
-              : "",
-          ),
+          adminAuthorizeUrl(this.settings.apiUrl, destination, resume),
         );
       }
       throw new Error(message);
@@ -425,15 +433,14 @@ export class BetterAuthOAuthSession implements AuthSession {
       typeof payload.returnOrigin === "string"
         ? payload.returnOrigin
         : undefined;
-    const returnBookingQuery =
-      payload.returnRoute === "bookings" &&
-      typeof payload.returnBookingQuery === "string"
-        ? normalizeBookingRouteQuery(payload.returnBookingQuery)
-        : "";
+    const resume = readCallbackResume(payload);
     return {
       returnOrigin,
-      ...(payload.returnRoute === "bookings" && { returnRoute: "bookings" }),
-      ...(returnBookingQuery && { returnBookingQuery }),
+      ...(resume && { returnRoute: resume.route }),
+      ...(resume?.route === "bookings" &&
+        resume.query && { returnBookingQuery: resume.query }),
+      ...(resume?.route === "studio" &&
+        resume.query && { returnStudioQuery: resume.query }),
     };
   }
 

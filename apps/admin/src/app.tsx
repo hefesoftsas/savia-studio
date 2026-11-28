@@ -54,6 +54,7 @@ import { resolveInitialAppLocale } from "@/i18n/locale-storage";
 import { OfflineBanner } from "@/offline/offline-banner";
 import { PwaSplash } from "@/pwa/pwa-splash";
 import { getAdminAuthorizeUrl } from "@/components/admin/loading-recovery";
+import { readAdminResume } from "@savia/tenant-host/admin-resume";
 import { Button } from "@/components/ui/button";
 import { RouteLoading } from "@/components/admin/route-loading";
 import { TenantHostMismatchError } from "@/components/admin/tenant-mismatch-error";
@@ -399,17 +400,25 @@ function AppContent({
     () => window.location.pathname === "/auth/callback",
   );
   const finishCallback = useCallback(
-    ({ returnOrigin, returnRoute, returnBookingQuery }: CallbackResult) => {
-      const bookings =
-        returnRoute === "bookings"
-          ? "#/bookings" + (returnBookingQuery ? `?${returnBookingQuery}` : "")
-          : undefined;
+    ({
+      returnOrigin,
+      returnRoute,
+      returnBookingQuery,
+      returnStudioQuery,
+    }: CallbackResult) => {
+      const resume = readAdminResume(
+        returnRoute,
+        returnRoute === "studio" ? returnStudioQuery : returnBookingQuery,
+      );
+      const destination = resume
+        ? `#/${resume.route}${resume.query ? `?${resume.query}` : ""}`
+        : undefined;
       if (returnOrigin) {
         try {
           const target = new URL(returnOrigin);
           if (target.origin !== window.location.origin) {
             // Only a resume marker crosses origins; the draft stays on its host.
-            const route = bookings ?? "?resume-share=1#/my-day";
+            const route = destination ?? "?resume-share=1#/my-day";
             window.location.replace(`${target.origin}/${route}`);
             return;
           }
@@ -420,7 +429,7 @@ function AppContent({
       window.history.replaceState(
         {},
         "",
-        `/${bookings ?? sharedLinkRouteAfterAuth() ?? "#/my-day"}`,
+        `/${destination ?? sharedLinkRouteAfterAuth() ?? "#/my-day"}`,
       );
       setHandlingCallback(false);
     },
