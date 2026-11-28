@@ -245,6 +245,22 @@ export const bookingMessages = {
     "Any eligible service",
     "Qualquer serviço disponível",
   ],
+  "Service no longer available": [
+    "El servicio ya no está disponible",
+    "Service no longer available",
+    "O serviço não está mais disponível",
+  ],
+  "Choose a service assigned to you to create a personal link.": [
+    "Elige un servicio que tengas asignado para crear un enlace personal.",
+    "Choose a service assigned to you to create a personal link.",
+    "Escolha um serviço atribuído a você para criar um link pessoal.",
+  ],
+  "Publish booking with an enabled service assigned to an active professional to create team links.":
+    [
+      "Publica la agenda con un servicio habilitado y asignado a un profesional activo para crear enlaces de equipo.",
+      "Publish booking with an enabled service assigned to an active professional to create team links.",
+      "Publique a agenda com um serviço habilitado e atribuído a um profissional ativo para criar links de equipe.",
+    ],
   "New links default to 25 bookings per day. Set a link-specific limit below.":
     [
       "Los enlaces nuevos permiten hasta 25 reservas al día de forma predeterminada. Configura el límite del enlace abajo.",
@@ -302,10 +318,10 @@ export const bookingMessages = {
     "Loading booking links…",
     "Carregando links de agendamento…",
   ],
-  "No booking links yet. Create a personal link to get started.": [
-    "Aún no hay enlaces de reserva. Crea un enlace personal para comenzar.",
-    "No booking links yet. Create a personal link to get started.",
-    "Ainda não há links de agendamento. Crie um link pessoal para começar.",
+  "No booking links yet.": [
+    "Aún no hay enlaces de reserva.",
+    "No booking links yet.",
+    "Ainda não há links de agendamento.",
   ],
   "My booking link": [
     "Mi enlace de reserva",

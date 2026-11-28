@@ -2064,6 +2064,129 @@ it("offers saved service options in Booking links until settings are saved", asy
   ).toBeVisible();
 });
 
+it("offers the team link for a colleague's service and blocks the personal link", async () => {
+  const apiClient = managementClient();
+  const bootstrap = await apiClient.get();
+  const { settings: saved, candidates } = bootstrap.data;
+  saved.published = true;
+  saved.professionals.push({
+    ...saved.professionals[0],
+    id: "professional-2",
+    principalId: "principal-2",
+  });
+  candidates.push({ principalId: "principal-2", displayName: "Luz" });
+  saved.services.push(
+    {
+      ...saved.services[0],
+      id: "team-intake",
+      name: "Team intake",
+      professionalIds: ["professional-2"],
+    },
+    {
+      ...saved.services[0],
+      id: "unassigned",
+      name: "Unassigned service",
+      professionalIds: [],
+    },
+  );
+  apiClient.get.mockImplementation(async (path: string) =>
+    path.endsWith("/public-links") ? { data: { links: [] } } : bootstrap,
+  );
+  const post = vi.fn().mockResolvedValue({
+    data: {
+      id: "link-1",
+      scope: { kind: "team" },
+      serviceId: "team-intake",
+      expiresAt: null,
+      revokedAt: null,
+      dailyLimit: 25,
+      version: 1,
+      publicUrl: "https://savia.test/public/bookings/team-token",
+    },
+  });
+  mount({ ...apiClient, post }, 42, "/bookings?tab=sharing");
+
+  const service = await screen.findByLabelText("Service (optional)");
+  const team = screen.getByRole("button", { name: "Create team agenda link" });
+  await waitFor(() => expect(team).toBeEnabled());
+  fireEvent.change(service, { target: { value: "team-intake" } });
+  const personal = screen.getByRole("button", {
+    name: "Create my booking link",
+  });
+  expect(personal).toBeDisabled();
+  expect(team).toBeEnabled();
+  expect(
+    screen.getByText(
+      "Choose a service assigned to you to create a personal link.",
+    ),
+  ).toBeVisible();
+  expect(
+    screen.queryByRole("option", { name: "Unassigned service" }),
+  ).toBeNull();
+  fireEvent.click(personal);
+  expect(post).not.toHaveBeenCalled();
+  fireEvent.click(team);
+  await screen.findByText("Booking link created.");
+  expect(post).toHaveBeenCalledExactlyOnceWith(
+    "/v1/tenants/42/booking/public-links",
+    expect.objectContaining({
+      scope: { kind: "team" },
+      serviceId: "team-intake",
+    }),
+  );
+  fireEvent.change(service, { target: { value: "consult" } });
+  expect(personal).toBeEnabled();
+});
+
+it("keeps creation disabled until a user replaces a service removed during a save", async () => {
+  const apiClient = managementClient();
+  const bootstrap = await apiClient.get();
+  const saved = bootstrap.data.settings;
+  saved.published = true;
+  const followUp = { ...saved.services[0], id: "follow-up", name: "Follow-up" };
+  saved.services.push(followUp);
+  let resolveSave!: (result: { data: unknown }) => void;
+  const pendingSave = new Promise<{ data: unknown }>((resolve) => {
+    resolveSave = resolve;
+  });
+  apiClient.get.mockImplementation(async (path: string) =>
+    path.endsWith("/public-links") ? { data: { links: [] } } : bootstrap,
+  );
+  apiClient.put.mockReturnValue(pendingSave);
+  mount(apiClient);
+  await screen.findByLabelText("Public title");
+  fireEvent.click(screen.getByRole("button", { name: "Services" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Remove service Consultation" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(apiClient.put).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "Booking links" }));
+  const service = await screen.findByLabelText("Service (optional)");
+  fireEvent.change(service, { target: { value: "consult" } });
+  await act(async () =>
+    resolveSave({
+      data: {
+        ...bootstrap.data,
+        settings: { ...saved, version: 4, services: [followUp] },
+      },
+    }),
+  );
+  expect(service).toHaveValue("consult");
+  expect(
+    screen.getByRole("option", { name: "Service no longer available" }),
+  ).toBeDisabled();
+  const personal = screen.getByRole("button", {
+    name: "Create my booking link",
+  });
+  const team = screen.getByRole("button", { name: "Create team agenda link" });
+  expect(personal).toBeDisabled();
+  expect(team).toBeDisabled();
+  fireEvent.change(service, { target: { value: "follow-up" } });
+  expect(personal).toBeEnabled();
+  expect(team).toBeEnabled();
+});
+
 it("uses the saved time zone for reservations when settings have an unsaved time zone", async () => {
   const apiClient = {
     get: vi.fn(async (path: string) => ({

@@ -276,6 +276,7 @@ it.each([
   "status recovery",
   "status lookup offline",
   "status lookup unavailable",
+  "status lookup before submission is recorded",
   "status lookup stalled",
   "status lookup rate limited",
   "status lookup rate limited without Retry-After",
@@ -322,6 +323,8 @@ it.each([
             throw new TypeError("Connection still unavailable");
           if (outcome === "status lookup unavailable")
             return new Response(null, { status: 503 });
+          if (outcome === "status lookup before submission is recorded")
+            return new Response(null, { status: 404 });
           if (rateLimited)
             return new Response(null, {
               status: 429,
@@ -432,6 +435,13 @@ it.each([
       expect(statusReads).toBe(1);
       await act(async () => vi.advanceTimersByTimeAsync(10_000));
       expect(stalledSignal?.aborted).toBe(true);
+      vi.useRealTimers();
+    } else if (outcome === "status lookup before submission is recorded") {
+      vi.useFakeTimers();
+      await act(async () => fireEvent.click(submitButton));
+      expect(statusReads).toBe(1);
+      await act(async () => vi.advanceTimersByTimeAsync(2000));
+      expect(statusReads).toBe(2);
       vi.useRealTimers();
     } else {
       fireEvent.click(submitButton);

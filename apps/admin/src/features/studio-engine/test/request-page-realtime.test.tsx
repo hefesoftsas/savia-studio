@@ -259,6 +259,71 @@ it("keeps the pending ID when retrying identical values in another key order", a
   );
 });
 
+it("keeps an uncertain quote's execution ID after another quote completes", async () => {
+  const first = { reference: "FIRST" };
+  const second = { reference: "SECOND" };
+  requestPageApi.mockResolvedValue({ data: [] });
+  executeRequestPageAction
+    .mockRejectedValueOnce(new Error("First receipt lost"))
+    .mockResolvedValueOnce(run("quote_page", "Second quote saved"))
+    .mockResolvedValueOnce(run("quote_page", "First quote recovered"));
+  render(<RequestPage object={page("quote_page")} />);
+  await waitFor(() => expect(requestPageApi).toHaveBeenCalledOnce());
+
+  state.formValues = first;
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  await screen.findByText("First receipt lost");
+
+  state.formValues = second;
+  fireEvent.click(await screen.findByRole("button", { name: "Ejecutar" }));
+  await waitFor(() => expect(requestPageApi).toHaveBeenCalledTimes(3));
+
+  state.formValues = first;
+  fireEvent.click(await screen.findByRole("button", { name: "Ejecutar" }));
+  await waitFor(() =>
+    expect(executeRequestPageAction).toHaveBeenCalledTimes(3),
+  );
+  const [firstAttempt, secondAttempt, retry] =
+    executeRequestPageAction.mock.calls;
+  expect(firstAttempt[4]).toEqual(expect.any(String));
+  expect(secondAttempt[4]).not.toBe(firstAttempt[4]);
+  expect(retry[4]).toBe(firstAttempt[4]);
+});
+
+it("keeps the latest error when history confirms an earlier quote", async () => {
+  requestPageApi.mockResolvedValue({ data: [] });
+  executeRequestPageAction
+    .mockRejectedValueOnce(new Error("First receipt lost"))
+    .mockRejectedValueOnce(new Error("Second receipt lost"));
+  render(<RequestPage object={page("quote_page")} />);
+  await waitFor(() => expect(requestPageApi).toHaveBeenCalledOnce());
+
+  state.formValues = { reference: "FIRST" };
+  fireEvent.click(screen.getByRole("button", { name: "Ejecutar" }));
+  await screen.findByText("First receipt lost");
+
+  state.formValues = { reference: "SECOND" };
+  fireEvent.click(await screen.findByRole("button", { name: "Ejecutar" }));
+  await screen.findByText("Second receipt lost");
+  await screen.findByRole("button", { name: "Ejecutar" });
+
+  const completed = {
+    ...run("quote_page", "First quote recovered"),
+    id: executeRequestPageAction.mock.calls[0][4],
+  };
+  requestPageApi.mockResolvedValue({ data: [completed] });
+  await act(async () =>
+    state.callbacks.onEvent({
+      topic: "request-pages",
+      type: "updated",
+      collection: "quote_page",
+    }),
+  );
+
+  await screen.findByText("First quote recovered");
+  expect(screen.getByText("Second receipt lost")).toBeTruthy();
+});
+
 it("keeps a confirmed quote when an older history read arrives before a failed refresh", async () => {
   const oldHistory = deferred<{ data: PageRun[] }>();
   requestPageApi

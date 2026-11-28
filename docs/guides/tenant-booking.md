@@ -91,8 +91,12 @@ Publish when booking is enabled and an enabled service has an enabled profession
 
 ### Personal and team public links
 
-The service options in **Booking links** come from saved settings. Draft
-changes stay in the setup wizard and appear in the link selector after saving.
+The service options in **Booking links** come from saved, published settings.
+Draft changes stay in the setup wizard and appear in the link selector after
+saving. A personal link needs a service assigned to you. Administrators can
+create team links for services assigned to any active professional. If a
+selected service becomes unavailable, choose another option before creating a
+link.
 
 If your session expires while loading or managing links, **Sign in again**
 returns to the **Booking links** tab in the same workspace. The tab reloads

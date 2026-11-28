@@ -20,10 +20,11 @@ Assistant conversation and generated request-page hints use the self-only princi
 A successful request-page history read clears a previous history error. A
 submission error stays visible until the user starts another submission.
 If the response to a quote submission is lost, retrying the same form values,
-mode, and operations in the open page reuses the pending execution IDs. The
-page skips executions it has already confirmed and recovers known results from
-history when available. Changing the order of fields in the payload preserves
-the retry ID, including when the API compares values from older saved runs.
+mode, and operations in the open page reuses the pending execution IDs, even
+if another quote was submitted in between. The page skips executions it has
+already confirmed and recovers known results from history when available.
+Changing the order of fields in the payload preserves the retry ID, including
+when the API compares values from older saved runs.
 A history read started before a new receipt triggers a fresh read when it
 returns. A delayed running receipt preserves any completed or failed result
 already present in history for that execution.
