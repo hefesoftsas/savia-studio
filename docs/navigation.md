@@ -25,6 +25,10 @@ Menu search includes authorized, personally hidden destinations. These results a
 
 ## Existing preferences
 
+If the saved menu cannot be loaded, the default menu remains available for
+navigation and temporary section expansion. Select **Retry** to load your
+saved menu before organizing items or saving section changes.
+
 The layout schema remains version 2 and accepts optional `presetVersion: 2`. A legacy personal layout is upgraded once in the client, and only source groups whose built-in item sequence still matches the old default are eligible: My day moves from the former Productivity group to Work, Savia Request moves from Administration to Build, Users moves from Management to Administration, and screen administration moves from Management to Build. Explicitly reordered built-in source groups, items placed in other groups, custom groups, hidden items and collapse state are retained. Customized layouts can opt into the complete new grouping with Reset. The preset marker is saved through the backend with the next explicit preference change; no browser-storage fallback is added. Reset uses the new default grouping.
 
 The historical section IDs remain stable: `operation` = Work, `productivity` = Build, `administration` = Administration, `management` = Platform. Screen configuration and spreadsheet import use the same display labels.

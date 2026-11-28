@@ -331,6 +331,68 @@ describe("AppSidebar navigation preferences", () => {
     ).toBeVisible();
   });
 
+  it("keeps the fallback menu navigable without saving it after a preferences read fails", async () => {
+    const services = createServices();
+    const savedLayout: SidebarNavigationLayout = {
+      ...defaultLayout,
+      blocks: [
+        {
+          kind: "custom",
+          id: "custom:shortcuts",
+          label: "Atajos guardados",
+          items: [],
+          collapsed: false,
+        },
+        ...defaultLayout.blocks,
+      ],
+    };
+    vi.mocked(services.userPreferences.getSidebarNavigation)
+      .mockRejectedValueOnce(
+        new ApiClientError(503, "UNAVAILABLE", "Unavailable"),
+      )
+      .mockResolvedValueOnce(savedLayout);
+    render(<App services={services} />);
+
+    const collapse = await screen.findByRole("button", {
+      name: "Contraer Trabajo",
+    });
+    const organize = screen.getByRole("button", { name: "Organizar menú" });
+    expect(organize).toBeDisabled();
+    fireEvent.click(collapse);
+    fireEvent.click(screen.getByRole("button", { name: "Expandir Trabajo" }));
+    expect(
+      within(sidebarGroup("Trabajo")).getByRole("link", { name: "Mi día" }),
+    ).toBeVisible();
+    expect(
+      services.userPreferences.saveSidebarNavigation,
+    ).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reintentar" }));
+    const savedSection = await screen.findByRole("button", {
+      name: "Contraer Atajos guardados",
+    });
+    expect(savedSection).toBeVisible();
+    expect(organize).toBeEnabled();
+    expect(
+      services.userPreferences.saveSidebarNavigation,
+    ).not.toHaveBeenCalled();
+    fireEvent.click(savedSection);
+    await waitFor(() =>
+      expect(
+        services.userPreferences.saveSidebarNavigation,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blocks: expect.arrayContaining([
+            expect.objectContaining({
+              id: "custom:shortcuts",
+              collapsed: true,
+            }),
+          ]),
+        }),
+      ),
+    );
+  });
+
   it("disables organization while the menu search is filtering", async () => {
     const user = userEvent.setup();
 
