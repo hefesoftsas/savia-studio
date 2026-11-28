@@ -19,6 +19,8 @@ export type ObjectsResponse = {
   data: Array<{
     name?: unknown;
     label?: unknown;
+    version?: unknown;
+    created_at?: unknown;
     count?: unknown;
     hidden?: unknown;
     config?: {
@@ -130,6 +132,8 @@ export function normalizeSchema(
     apiBasePath,
     name: collection,
     label: objectLabel(row),
+    ...(typeof row.version === "number" ? { version: row.version } : {}),
+    ...(typeof row.created_at === "string" ? { createdAt: row.created_at } : {}),
     fields,
     ...(hubspot ? { hubspot: true } : {}),
     ...(source?.kind === "crm" || source?.capabilities?.sort === false

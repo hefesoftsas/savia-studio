@@ -205,6 +205,25 @@ describe("HubSpot CRM adapter", () => {
     });
   });
 
+  it.each([
+    { description: "missing results", payload: { message: "provider error" } },
+    { description: "non-array results", payload: { results: {} } },
+    {
+      description: "an invalid record after a valid match",
+      payload: { results: [{ id: "contact-1" }, { properties: {} }] },
+    },
+  ])("rejects an upstream list with $description", async ({ payload }) => {
+    const proxy = vi.fn(async () => Response.json(payload));
+    const adapter = createHubSpotAdapter(nangoClient(proxy));
+
+    await expect(
+      adapter.listContacts(connection, { limit: 25 }),
+    ).rejects.toMatchObject({ code: "NANGO_REQUEST_FAILED" });
+    await expect(
+      adapter.findContactByEmail(connection, "ada@acme.test"),
+    ).rejects.toMatchObject({ code: "NANGO_REQUEST_FAILED" });
+  });
+
   it("finds initial customer matches with exact email and company-name filters", async () => {
     const proxy = vi
       .fn()

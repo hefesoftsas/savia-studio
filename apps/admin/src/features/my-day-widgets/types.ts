@@ -30,6 +30,8 @@ export type WidgetCollectionSchema = {
   apiBasePath: string;
   name: string;
   label: string;
+  version?: number;
+  createdAt?: string;
   fields: WidgetCollectionField[];
   hubspot?: true;
   sortSupported?: false;

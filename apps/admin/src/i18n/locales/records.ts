@@ -1211,6 +1211,11 @@ export const recordsMessages = {
     "No records on this page.",
     "Nenhum registro nesta página.",
   ],
+  "Ve a la página siguiente para ver más registros.": [
+    "Ve a la página siguiente para ver más registros.",
+    "Go to the next page to see more records.",
+    "Vá para a próxima página para ver mais registros.",
+  ],
   "Sin registros relacionados.": [
     "Sin registros relacionados.",
     "No related records.",

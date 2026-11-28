@@ -456,35 +456,50 @@ it.each(["records", "studio"])(
   },
 );
 
-it.each([503, 403])(
-  "handles a %s when reloading the metadata of an already visible summary",
-  async (status) => {
+it.each([
+  { status: 503, nextVersion: 1, keepsTotal: true },
+  { status: 503, nextVersion: 2, keepsTotal: false },
+  { status: 403, nextVersion: 1, keepsTotal: false },
+])(
+  "keeps the old summary $keepsTotal after metadata error $status and version $nextVersion",
+  async ({ status, nextVersion, keepsTotal }) => {
     const widget = {
       id: "metadata-refresh",
       kind: "summary" as const,
       apiBasePath: "/v1/studio/14",
       collection: "hubspot_contacts",
     };
-    const schema = {
+    const schema = (version: number) => ({
       data: [
         {
           name: widget.collection,
+          version,
+          created_at: "2030-05-01T12:00:00Z",
           config: {
             studio: { collection: { kind: "crm", sourceId: "hubspot" } },
           },
         },
       ],
-    };
+    });
     let rejectMetadata!: (error: Error) => void;
-    const pendingMetadata = new Promise<typeof schema>((_resolve, reject) => {
-      rejectMetadata = reject;
+    const pendingMetadata = new Promise<ReturnType<typeof schema>>(
+      (_resolve, reject) => {
+        rejectMetadata = reject;
+      },
+    );
+    let finishSummary!: (result: { data: []; total: number }) => void;
+    const pendingSummary = new Promise<{ data: []; total: number }>((resolve) => {
+      finishSummary = resolve;
     });
     let schemaReads = 0;
     const get = vi.fn(async (path: string) => {
-      if (path.endsWith("/objects"))
-        return ++schemaReads === 2 ? pendingMetadata : schema;
+      if (path.endsWith("/objects")) {
+        schemaReads++;
+        if (schemaReads === 2) return pendingMetadata;
+        return schema(schemaReads === 1 ? 1 : nextVersion);
+      }
       if (path.endsWith("/summary"))
-        return { data: [], total: schemaReads === 1 ? 37 : 12 };
+        return schemaReads === 1 ? { data: [], total: 37 } : pendingSummary;
       throw new Error(`Unexpected endpoint: ${path}`);
     });
     render(<SummaryWidgetBody apiClient={{ get } as never} widget={widget} />);
@@ -511,6 +526,14 @@ it.each([503, 403])(
       expect(screen.queryByText("37")).not.toBeInTheDocument();
     }
     fireEvent.click(retry);
+    await waitFor(() =>
+      expect(
+        get.mock.calls.filter(([path]) => path.endsWith("/summary")),
+      ).toHaveLength(2),
+    );
+    if (keepsTotal) expect(screen.getByText("37")).toBeVisible();
+    else expect(screen.queryByText("37")).not.toBeInTheDocument();
+    await act(async () => finishSummary({ data: [], total: 12 }));
     expect(await screen.findByText("12")).toBeVisible();
   },
 );
@@ -712,11 +735,13 @@ it.each([false, true])(
     };
     const rateLimitedRead = cached ? 2 : 1;
     let reads = 0;
+    let schemaReads = 0;
     const apiClient = new ApiClient({
       baseUrl: "https://savia.test",
       tokenSource: { getAccessToken: async () => "test" },
       fetcher: async (url) => {
-        if (String(url).endsWith("/objects"))
+        if (String(url).endsWith("/objects")) {
+          schemaReads++;
           return Response.json({
             data: [
               {
@@ -727,6 +752,7 @@ it.each([false, true])(
               },
             ],
           });
+        }
         if (++reads === rateLimitedRead)
           return Response.json(
             { error: "Rate limit" },
@@ -761,10 +787,22 @@ it.each([false, true])(
         view.rerender(
           <SummaryWidgetBody apiClient={apiClient} widget={{ ...widget }} />,
         );
-        await vi.advanceTimersByTimeAsync(29_999);
+        await vi.advanceTimersByTimeAsync(29_799);
       });
       expect(reads).toBe(rateLimitedRead);
       expect(retry()).toBeDisabled();
+
+      const metadataSubscription = subscribe.mock.calls
+        .filter(([options]) => options.topics.includes("studio"))
+        .at(-1)?.[0];
+      await act(async () => {
+        metadataSubscription?.onEvent({ topic: "studio", type: "updated" });
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      expect(schemaReads).toBe(2);
+      expect(reads).toBe(rateLimitedRead);
+      expect(retry()).toBeDisabled();
+      if (cached) expect(screen.getByText("37")).toBeVisible();
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1);
@@ -901,6 +939,7 @@ it.each(
       expect(schemaReads).toBe(2);
       expect(reads).toBe(rateLimitedRead);
       expect(retry()).toBeDisabled();
+      if (cached) expect(screen.getByText("Previous value")).toBeVisible();
 
       const editedWidget = {
         ...widget,

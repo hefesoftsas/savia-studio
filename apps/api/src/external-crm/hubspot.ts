@@ -95,10 +95,11 @@ function listFromHubSpot<T>(
   mapper: (entry: unknown) => T | undefined,
 ): T[] {
   const results = propertiesFrom(value).results;
-  if (!Array.isArray(results)) return [];
-  return results.flatMap((entry) => {
+  if (!Array.isArray(results)) throw new CrmUpstreamError();
+  return results.map((entry) => {
     const item = mapper(entry);
-    return item ? [item] : [];
+    if (item === undefined) throw new CrmUpstreamError();
+    return item;
   });
 }
 

@@ -49,7 +49,10 @@ for the current selection in its summary, items, chart, or actions widget.
 **Retry** becomes available at that time. Manual and live data refreshes wait
 until then, even if the widget settings or collection metadata change.
 Background collection metadata refreshes also keep the current widget visible
-during a temporary failure. A denied or missing collection removes its results.
+during a temporary failure. Reading the same collection metadata again keeps
+the current results visible while data refreshes or waits for the retry time.
+A new collection version, a missing collection, or an authorization failure
+hides those results until a new authorized data read succeeds.
 Collection widgets hide the previous session's data as soon as the session
 is cleared and skip new reads while explicit logout finishes.
 Live refresh notices and queued events are discarded when the signed-in
